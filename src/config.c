@@ -13,8 +13,6 @@ static void usage(const char *prog) {
             "  --plane-id N                 (video plane; default: 76)\n"
             "  --blank-primary              (detach primary plane on commit)\n"
             "  --no-udev                    (disable hotplug listener)\n"
-            "  --stay-blue                  (only do modeset & blue FB; no pipeline)\n"
-            "  --blue-hold-ms N             (hold blue for N ms after commit)\n"
             "  --udp-port N                 (default: 5600)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
@@ -37,8 +35,6 @@ void cfg_defaults(AppCfg *c) {
     strcpy(c->card_path, "/dev/dri/card0");
     c->plane_id = 76;
     c->blank_primary = 0;
-    c->stay_blue = 0;
-    c->blue_hold_ms = 0;
     c->use_udev = 1;
 
     c->udp_port = 5600;
@@ -75,10 +71,6 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->blank_primary = 1;
         } else if (!strcmp(argv[i], "--no-udev")) {
             cfg->use_udev = 0;
-        } else if (!strcmp(argv[i], "--stay-blue")) {
-            cfg->stay_blue = 1;
-        } else if (!strcmp(argv[i], "--blue-hold-ms") && i + 1 < argc) {
-            cfg->blue_hold_ms = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--udp-port") && i + 1 < argc) {
             cfg->udp_port = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--vid-pt") && i + 1 < argc) {
