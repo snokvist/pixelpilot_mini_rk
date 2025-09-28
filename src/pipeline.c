@@ -27,6 +27,7 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
 
 static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiver_out) {
     GstElement *appsrc_elem = gst_element_factory_make("appsrc", "udp_appsrc");
+    UdpReceiver *receiver = NULL;
     CHECK_ELEM(appsrc_elem, "appsrc");
 
     GstCaps *caps = gst_caps_new_empty_simple("application/x-rtp");
@@ -46,7 +47,7 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
     gst_app_src_set_latency(appsrc, 0, 0);
     gst_app_src_set_max_bytes(appsrc, 4 * 1024 * 1024);
 
-    UdpReceiver *receiver = udp_receiver_create(cfg->udp_port, cfg->vid_pt, cfg->aud_pt, appsrc);
+    receiver = udp_receiver_create(cfg->udp_port, cfg->vid_pt, cfg->aud_pt, appsrc);
     if (receiver == NULL) {
         LOGE("Failed to create UDP receiver");
         goto fail;

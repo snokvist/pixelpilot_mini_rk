@@ -330,7 +330,6 @@ static gpointer receiver_thread(gpointer data) {
         GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
         if (flow != GST_FLOW_OK) {
             LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
-            gst_buffer_unref(gstbuf);
             if (flow == GST_FLOW_FLUSHING) {
                 g_usleep(1000);
             }
