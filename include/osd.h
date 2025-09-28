@@ -22,6 +22,13 @@ typedef enum {
 
 #define OSD_PLOT_MAX_SAMPLES 1024
 
+typedef struct {
+    int x;
+    int y;
+    int w;
+    int h;
+} OSDRect;
+
 typedef struct OSD {
     int enabled;
     int active;
@@ -64,6 +71,8 @@ typedef struct OSD {
     int plot_x;
     int plot_y;
     OSDWidgetPosition plot_position;
+    OSDRect plot_rect;
+    OSDRect text_rect;
 } OSD;
 
 void osd_init(OSD *osd);

@@ -192,6 +192,29 @@ static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
     }
 }
 
+static void osd_store_rect(OSDRect *r, int x, int y, int w, int h) {
+    if (!r) {
+        return;
+    }
+    if (w < 0) {
+        w = 0;
+    }
+    if (h < 0) {
+        h = 0;
+    }
+    r->x = x;
+    r->y = y;
+    r->w = w;
+    r->h = h;
+}
+
+static void osd_clear_rect(OSD *o, const OSDRect *r) {
+    if (!r || r->w <= 0 || r->h <= 0) {
+        return;
+    }
+    osd_fill_rect(o, r->x, r->y, r->w, r->h, 0x00000000u);
+}
+
 static void osd_draw_hline(OSD *o, int x, int y, int w, uint32_t argb) {
     osd_fill_rect(o, x, y, w, o->scale > 0 ? o->scale : 1, argb);
 }
@@ -370,15 +393,16 @@ static void osd_plot_reset(OSD *o, const AppCfg *cfg) {
 
     o->plot_capacity = capacity;
     o->plot_w = o->plot_capacity * (o->scale > 0 ? o->scale : 1);
-    int plot_target_h = 120 * (o->scale > 0 ? o->scale : 1);
+    int plot_target_h = 80 * (o->scale > 0 ? o->scale : 1);
     if (plot_target_h > o->h - 2 * margin) {
         plot_target_h = o->h - 2 * margin;
     }
-    if (plot_target_h < 40 * (o->scale > 0 ? o->scale : 1)) {
-        plot_target_h = 40 * (o->scale > 0 ? o->scale : 1);
+    if (plot_target_h < 48 * (o->scale > 0 ? o->scale : 1)) {
+        plot_target_h = 48 * (o->scale > 0 ? o->scale : 1);
     }
     o->plot_h = plot_target_h;
     osd_compute_anchor(o, o->plot_w, o->plot_h, o->plot_position, &o->plot_x, &o->plot_y);
+    osd_store_rect(&o->plot_rect, 0, 0, 0, 0);
 }
 
 static void osd_plot_push(OSD *o, double value) {
@@ -437,8 +461,16 @@ static void osd_plot_draw(OSD *o) {
     uint32_t plot_color = 0xB0FF4040u;
     uint32_t avg_color = 0x80FFD070u;
 
-    osd_fill_rect(o, o->plot_x, o->plot_y, o->plot_w, o->plot_h, bg);
-    osd_draw_rect(o, o->plot_x, o->plot_y, o->plot_w, o->plot_h, border);
+    osd_clear_rect(o, &o->plot_rect);
+
+    int base_x = o->plot_x;
+    int base_y = o->plot_y;
+    int plot_w = o->plot_w;
+    int plot_h = o->plot_h;
+
+    osd_fill_rect(o, base_x, base_y, plot_w, plot_h, bg);
+    osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
+    osd_store_rect(&o->plot_rect, base_x, base_y, plot_w, plot_h);
 
     int limit = o->plot_size;
     if (limit > o->plot_capacity) {
@@ -460,11 +492,6 @@ static void osd_plot_draw(OSD *o) {
             range = 0.1;
         }
     }
-
-    int base_x = o->plot_x;
-    int base_y = o->plot_y;
-    int plot_w = o->plot_w;
-    int plot_h = o->plot_h;
 
     // Horizontal grid lines (quartiles)
     int grid_lines = 4;
@@ -925,8 +952,9 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
 
     osd_plot_reset(o, cfg);
+    osd_store_rect(&o->text_rect, 0, 0, 0, 0);
 
-    osd_clear(o, 0x80000000u);
+    osd_clear(o, 0x00000000u);
     if (osd_commit_enable(fd, ms->crtc_id, o) != 0) {
         LOGW("OSD: atomic enable failed. Disabling OSD.");
         osd_destroy_fb(fd, o);
@@ -944,70 +972,125 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         return;
     }
 
-    osd_clear(o, 0x20000000u);
-
     int margin = o->margin_px;
-    int text_x = margin;
-    int text_y = margin;
     int line_advance = (8 + 1) * o->scale;
     uint32_t text_color = 0xB0FFFFFFu;
+    uint32_t text_bg = 0x40202020u;
+    uint32_t text_border = 0x60FFFFFFu;
+    int pad = 6 * o->scale;
+    if (pad < 4) {
+        pad = 4;
+    }
 
-    char line1[128];
-    snprintf(line1, sizeof(line1), "HDMI %dx%d@%d plane=%d", ms->mode_w, ms->mode_h, ms->mode_hz, cfg->plane_id);
-    osd_draw_text(o, text_x, text_y, line1, text_color, o->scale);
-    text_y += line_advance;
+    char text_lines[12][192];
+    const char *line_ptrs[12];
+    int line_count = 0;
 
-    char line2[128];
-    snprintf(line2, sizeof(line2), "UDP:%d PTv=%d PTa=%d lat=%dms", cfg->udp_port, cfg->vid_pt, cfg->aud_pt, cfg->latency_ms);
-    osd_draw_text(o, text_x, text_y, line2, text_color, o->scale);
-    text_y += line_advance;
+    snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "HDMI %dx%d@%d plane=%d", ms->mode_w,
+             ms->mode_h, ms->mode_hz, cfg->plane_id);
+    line_ptrs[line_count] = text_lines[line_count];
+    line_count++;
 
-    char line3[128];
-    snprintf(line3, sizeof(line3), "Pipeline: %s restarts=%d%s", ps->state == PIPELINE_RUNNING ? "RUN" : "STOP",
-             restart_count, audio_disabled ? " audio=fakesink" : "");
-    osd_draw_text(o, text_x, text_y, line3, text_color, o->scale);
-    text_y += line_advance;
+    snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "UDP:%d PTv=%d PTa=%d lat=%dms", cfg->udp_port,
+             cfg->vid_pt, cfg->aud_pt, cfg->latency_ms);
+    line_ptrs[line_count] = text_lines[line_count];
+    line_count++;
+
+    snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "Pipeline: %s restarts=%d%s",
+             ps->state == PIPELINE_RUNNING ? "RUN" : "STOP", restart_count, audio_disabled ? " audio=fakesink" : "");
+    line_ptrs[line_count] = text_lines[line_count];
+    line_count++;
 
     UdpReceiverStats stats;
     int have_stats = (pipeline_get_receiver_stats(ps, &stats) == 0);
     if (have_stats) {
         double jitter_ms = stats.jitter / 90.0;
         double jitter_avg_ms = stats.jitter_avg / 90.0;
-        char line4[160];
-        snprintf(line4, sizeof(line4),
+        snprintf(text_lines[line_count], sizeof(text_lines[line_count]),
                  "RTP vpkts=%llu loss=%llu reo=%llu dup=%llu jitter=%.2f/%.2fms br=%.2f/%.2fMbps",
                  (unsigned long long)stats.video_packets, (unsigned long long)stats.lost_packets,
                  (unsigned long long)stats.reordered_packets, (unsigned long long)stats.duplicate_packets, jitter_ms,
                  jitter_avg_ms, stats.bitrate_mbps, stats.bitrate_avg_mbps);
-        osd_draw_text(o, text_x, text_y, line4, text_color, o->scale);
-        text_y += line_advance;
+        line_ptrs[line_count] = text_lines[line_count];
+        line_count++;
 
-        char line5[160];
-        snprintf(line5, sizeof(line5), "Frames=%llu incomplete=%llu last=%lluB avg=%.0fB seq=%u",
+        snprintf(text_lines[line_count], sizeof(text_lines[line_count]),
+                 "Frames=%llu incomplete=%llu last=%lluB avg=%.0fB seq=%u",
                  (unsigned long long)stats.frame_count, (unsigned long long)stats.incomplete_frames,
                  (unsigned long long)stats.last_frame_bytes, stats.frame_size_avg, stats.expected_sequence);
-        osd_draw_text(o, text_x, text_y, line5, text_color, o->scale);
+        line_ptrs[line_count] = text_lines[line_count];
+        line_count++;
 
         osd_plot_push(o, stats.bitrate_mbps);
+    } else {
+        snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "UDP statistics unavailable");
+        line_ptrs[line_count] = text_lines[line_count];
+        line_count++;
     }
 
-    osd_plot_draw(o);
-
-    int plot_text_x = o->plot_x + 6 * o->scale;
-    int plot_text_y = o->plot_y + 6 * o->scale;
     if (o->plot_size > 0) {
-        char plot_line1[160];
-        snprintf(plot_line1, sizeof(plot_line1), "Bitrate %.2f Mbps avg=%.2f", o->plot_latest, o->plot_avg);
-        osd_draw_text(o, plot_text_x, plot_text_y, plot_line1, text_color, o->scale);
-        plot_text_y += line_advance;
-        char plot_line2[160];
-        snprintf(plot_line2, sizeof(plot_line2), "min=%.2f max=%.2f window=%ds", o->plot_min, o->plot_max,
-                 o->plot_window_seconds);
-        osd_draw_text(o, plot_text_x, plot_text_y, plot_line2, text_color, o->scale);
+        snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "Bitrate %.2f Mbps avg=%.2f", o->plot_latest,
+                 o->plot_avg);
+        line_ptrs[line_count] = text_lines[line_count];
+        line_count++;
+
+        snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "min=%.2f max=%.2f window=%ds", o->plot_min,
+                 o->plot_max, o->plot_window_seconds);
+        line_ptrs[line_count] = text_lines[line_count];
+        line_count++;
     } else {
         const char *waiting = have_stats ? "Collecting bitrate samples..." : "Bitrate stats unavailable";
-        osd_draw_text(o, plot_text_x, plot_text_y, waiting, text_color, o->scale);
+        snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "%s", waiting);
+        line_ptrs[line_count] = text_lines[line_count];
+        line_count++;
     }
+
+    osd_clear_rect(o, &o->text_rect);
+
+    int text_box_x = margin;
+    int text_box_y = margin;
+    int max_line_width = 0;
+    for (int i = 0; i < line_count; ++i) {
+        int len = (int)strlen(line_ptrs[i]);
+        int width = len * (8 + 1) * o->scale;
+        if (width > max_line_width) {
+            max_line_width = width;
+        }
+    }
+    int text_box_w = max_line_width + 2 * pad;
+    int text_box_h = line_count * line_advance + 2 * pad;
+    if (text_box_w < 0) {
+        text_box_w = 0;
+    }
+    if (text_box_h < 0) {
+        text_box_h = 0;
+    }
+    if (text_box_x + text_box_w > o->w) {
+        text_box_w = o->w - text_box_x;
+        if (text_box_w < 0) {
+            text_box_w = 0;
+        }
+    }
+    if (text_box_y + text_box_h > o->h) {
+        text_box_h = o->h - text_box_y;
+        if (text_box_h < 0) {
+            text_box_h = 0;
+        }
+    }
+
+    if (text_box_w > 0 && text_box_h > 0) {
+        osd_fill_rect(o, text_box_x, text_box_y, text_box_w, text_box_h, text_bg);
+        osd_draw_rect(o, text_box_x, text_box_y, text_box_w, text_box_h, text_border);
+        int draw_x = text_box_x + pad;
+        int draw_y = text_box_y + pad;
+        for (int i = 0; i < line_count; ++i) {
+            osd_draw_text(o, draw_x, draw_y, line_ptrs[i], text_color, o->scale);
+            draw_y += line_advance;
+        }
+    }
+    osd_store_rect(&o->text_rect, text_box_x, text_box_y, text_box_w, text_box_h);
+
+    osd_plot_draw(o);
 
     osd_commit_touch(fd, o->crtc_id, o);
 }
