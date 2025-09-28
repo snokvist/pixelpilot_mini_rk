@@ -28,9 +28,10 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
 static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiver_out) {
     GstElement *appsrc_elem = gst_element_factory_make("appsrc", "udp_appsrc");
     UdpReceiver *receiver = NULL;
+    GstCaps *caps = NULL;
     CHECK_ELEM(appsrc_elem, "appsrc");
 
-    GstCaps *caps = gst_caps_new_empty();
+    caps = gst_caps_new_empty();
     if (caps == NULL) {
         LOGE("Failed to allocate RTP caps for appsrc");
         goto fail;

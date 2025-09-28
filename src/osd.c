@@ -517,8 +517,8 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
 
     o->scale = (ms->mode_w >= 1280) ? 2 : 1;
-    o->w = 480 * o->scale;
-    o->h = 120 * o->scale;
+    o->w = 800 * o->scale;
+    o->h = 160 * o->scale;
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");
