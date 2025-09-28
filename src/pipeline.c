@@ -30,15 +30,36 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
     UdpReceiver *receiver = NULL;
     CHECK_ELEM(appsrc_elem, "appsrc");
 
-    GstCaps *caps = gst_caps_new_empty_simple("application/x-rtp");
+    GstCaps *caps = gst_caps_new_empty();
     if (caps == NULL) {
         LOGE("Failed to allocate RTP caps for appsrc");
         goto fail;
     }
 
+    GstStructure *video_struct =
+        gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "video", "clock-rate", G_TYPE_INT, 90000,
+                          "encoding-name", G_TYPE_STRING, "H265", "payload", G_TYPE_INT, cfg->vid_pt, NULL);
+    if (video_struct != NULL) {
+        gst_caps_append_structure(caps, video_struct);
+    }
+
+    if (!cfg->no_audio) {
+        GstStructure *audio_struct = gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "audio",
+                                                       "clock-rate", G_TYPE_INT, 48000, "encoding-name",
+                                                       G_TYPE_STRING, "OPUS", "payload", G_TYPE_INT, cfg->aud_pt,
+                                                       NULL);
+        if (audio_struct != NULL) {
+            gst_caps_append_structure(caps, audio_struct);
+        }
+    }
+
+    if (gst_caps_is_empty(caps)) {
+        LOGE("Failed to build RTP caps for appsrc");
+        goto fail;
+    }
+
     g_object_set(appsrc_elem, "is-live", TRUE, "format", GST_FORMAT_BYTES, "stream-type",
-                 GST_APP_STREAM_TYPE_STREAM, "block", FALSE, "max-bytes", (guint64)(4 * 1024 * 1024),
-                 NULL);
+                 GST_APP_STREAM_TYPE_STREAM, "max-bytes", (guint64)(4 * 1024 * 1024), NULL);
 
     GstAppSrc *appsrc = GST_APP_SRC(appsrc_elem);
     gst_app_src_set_caps(appsrc, caps);
