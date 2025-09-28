@@ -31,31 +31,9 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
     GstCaps *caps = NULL;
     CHECK_ELEM(appsrc_elem, "appsrc");
 
-    caps = gst_caps_new_empty();
+    caps = gst_caps_new_empty_simple("application/x-rtp");
     if (caps == NULL) {
         LOGE("Failed to allocate RTP caps for appsrc");
-        goto fail;
-    }
-
-    GstStructure *video_struct =
-        gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "video", "clock-rate", G_TYPE_INT, 90000,
-                          "encoding-name", G_TYPE_STRING, "H265", "payload", G_TYPE_INT, cfg->vid_pt, NULL);
-    if (video_struct != NULL) {
-        gst_caps_append_structure(caps, video_struct);
-    }
-
-    if (!cfg->no_audio) {
-        GstStructure *audio_struct = gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "audio",
-                                                       "clock-rate", G_TYPE_INT, 48000, "encoding-name",
-                                                       G_TYPE_STRING, "OPUS", "payload", G_TYPE_INT, cfg->aud_pt,
-                                                       NULL);
-        if (audio_struct != NULL) {
-            gst_caps_append_structure(caps, audio_struct);
-        }
-    }
-
-    if (gst_caps_is_empty(caps)) {
-        LOGE("Failed to build RTP caps for appsrc");
         goto fail;
     }
 
