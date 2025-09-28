@@ -410,6 +410,20 @@ int udp_receiver_start(UdpReceiver *ur) {
         g_mutex_unlock(&ur->lock);
         return 0;
     }
+    ur->seq_initialized = FALSE;
+    ur->have_last_seq = FALSE;
+    ur->expected_seq = 0;
+    ur->last_seq = 0;
+    ur->frame_active = FALSE;
+    ur->frame_timestamp = 0;
+    ur->frame_bytes = 0;
+    ur->frame_missing = FALSE;
+    ur->transit_initialized = FALSE;
+    ur->last_transit = 0.0;
+    ur->bitrate_window_start_ns = 0;
+    ur->bitrate_window_bytes = 0;
+    memset(&ur->stats, 0, sizeof(ur->stats));
+    memset(ur->history, 0, sizeof(ur->history));
     g_mutex_unlock(&ur->lock);
 
     if (setup_socket(ur) != 0) {

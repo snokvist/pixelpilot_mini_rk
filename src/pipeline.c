@@ -25,13 +25,43 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
     }
 }
 
+static GstCaps *build_appsrc_caps(const AppCfg *cfg) {
+    GstCaps *caps = gst_caps_new_empty();
+    if (caps == NULL) {
+        return NULL;
+    }
+
+    GstStructure *video = gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "video", "payload",
+                                            G_TYPE_INT, cfg->vid_pt, "clock-rate", G_TYPE_INT, 90000, "encoding-name",
+                                            G_TYPE_STRING, "H265", NULL);
+    if (video == NULL) {
+        gst_caps_unref(caps);
+        return NULL;
+    }
+    gst_caps_append_structure(caps, video);
+
+    if (cfg->aud_pt >= 0) {
+        GstStructure *audio =
+            gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "audio", "payload", G_TYPE_INT,
+                              cfg->aud_pt, "clock-rate", G_TYPE_INT, 48000, "encoding-name", G_TYPE_STRING, "OPUS",
+                              NULL);
+        if (audio == NULL) {
+            gst_caps_unref(caps);
+            return NULL;
+        }
+        gst_caps_append_structure(caps, audio);
+    }
+
+    return caps;
+}
+
 static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiver_out) {
     GstElement *appsrc_elem = gst_element_factory_make("appsrc", "udp_appsrc");
     UdpReceiver *receiver = NULL;
     GstCaps *caps = NULL;
     CHECK_ELEM(appsrc_elem, "appsrc");
 
-    caps = gst_caps_new_empty_simple("application/x-rtp");
+    caps = build_appsrc_caps(cfg);
     if (caps == NULL) {
         LOGE("Failed to allocate RTP caps for appsrc");
         goto fail;
@@ -397,12 +427,17 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     if (source == NULL) {
         goto fail;
     }
+    GstElement *queue_ingress = gst_element_factory_make("queue", "udp_ingress_queue");
+    CHECK_ELEM(queue_ingress, "queue");
+    g_object_set(queue_ingress, "leaky", 2, "max-size-buffers", 0, "max-size-bytes", (guint64)0, "max-size-time",
+                 (guint64)0, NULL);
+
     GstElement *tee = gst_element_factory_make("tee", "stream_tee");
     CHECK_ELEM(tee, "tee");
 
-    gst_bin_add_many(GST_BIN(pipeline), source, tee, NULL);
-    if (!gst_element_link(source, tee)) {
-        LOGE("Failed to link source to tee");
+    gst_bin_add_many(GST_BIN(pipeline), source, queue_ingress, tee, NULL);
+    if (!gst_element_link_many(source, queue_ingress, tee, NULL)) {
+        LOGE("Failed to link source chain to tee");
         goto fail;
     }
 
@@ -422,6 +457,15 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     if (ret == GST_STATE_CHANGE_FAILURE) {
         LOGE("Failed to set pipeline to PLAYING");
         goto fail;
+    }
+    if (ret == GST_STATE_CHANGE_ASYNC) {
+        GstState state = GST_STATE_NULL;
+        GstState pending = GST_STATE_NULL;
+        ret = gst_element_get_state(pipeline, &state, &pending, GST_SECOND);
+        if (ret == GST_STATE_CHANGE_FAILURE) {
+            LOGE("Pipeline state change failed during async wait");
+            goto fail;
+        }
     }
 
     if (ps->udp_receiver != NULL) {
