@@ -1,0 +1,609 @@
+#include "osd.h"
+#include "drm_fb.h"
+#include "drm_props.h"
+#include "logging.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <libdrm/drm_fourcc.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+
+#ifndef DRM_PLANE_TYPE_OVERLAY
+#define DRM_PLANE_TYPE_OVERLAY 0
+#endif
+#ifndef DRM_PLANE_TYPE_PRIMARY
+#define DRM_PLANE_TYPE_PRIMARY 1
+#endif
+#ifndef DRM_PLANE_TYPE_CURSOR
+#define DRM_PLANE_TYPE_CURSOR 2
+#endif
+
+void osd_init(OSD *o) {
+    memset(o, 0, sizeof(*o));
+}
+
+static void osd_clear(OSD *o, uint32_t argb) {
+    if (!o->fb.map) {
+        return;
+    }
+    uint32_t *px = (uint32_t *)o->fb.map;
+    size_t count = o->fb.size / 4;
+    for (size_t i = 0; i < count; ++i) {
+        px[i] = argb;
+    }
+}
+
+static const uint8_t *font5x7(char c) {
+    static const uint8_t SPC[7] = {0, 0, 0, 0, 0, 0, 0};
+    static const uint8_t D0[7] = {0x1E, 0x21, 0x23, 0x25, 0x29, 0x31, 0x1E};
+    static const uint8_t D1[7] = {0x08, 0x18, 0x08, 0x08, 0x08, 0x08, 0x1C};
+    static const uint8_t D2[7] = {0x1E, 0x21, 0x01, 0x06, 0x18, 0x20, 0x3F};
+    static const uint8_t D3[7] = {0x1E, 0x21, 0x01, 0x0E, 0x01, 0x21, 0x1E};
+    static const uint8_t D4[7] = {0x02, 0x06, 0x0A, 0x12, 0x3F, 0x02, 0x02};
+    static const uint8_t D5[7] = {0x3F, 0x20, 0x3E, 0x01, 0x01, 0x21, 0x1E};
+    static const uint8_t D6[7] = {0x0E, 0x10, 0x20, 0x3E, 0x21, 0x21, 0x1E};
+    static const uint8_t D7[7] = {0x3F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08};
+    static const uint8_t D8[7] = {0x1E, 0x21, 0x21, 0x1E, 0x21, 0x21, 0x1E};
+    static const uint8_t D9[7] = {0x1E, 0x21, 0x21, 0x1F, 0x01, 0x02, 0x1C};
+    static const uint8_t A[7] = {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+    static const uint8_t B[7] = {0x3E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x3E};
+    static const uint8_t C[7] = {0x0E, 0x11, 0x20, 0x20, 0x20, 0x11, 0x0E};
+    static const uint8_t D[7] = {0x3C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x3C};
+    static const uint8_t E[7] = {0x3F, 0x20, 0x20, 0x3E, 0x20, 0x20, 0x3F};
+    static const uint8_t F[7] = {0x3F, 0x20, 0x20, 0x3E, 0x20, 0x20, 0x20};
+    static const uint8_t G[7] = {0x0E, 0x11, 0x20, 0x27, 0x21, 0x11, 0x0F};
+    static const uint8_t H[7] = {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+    static const uint8_t I[7] = {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F};
+    static const uint8_t J[7] = {0x1F, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C};
+    static const uint8_t K[7] = {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
+    static const uint8_t L[7] = {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F};
+    static const uint8_t M[7] = {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11};
+    static const uint8_t N[7] = {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
+    static const uint8_t O[7] = {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+    static const uint8_t P[7] = {0x3E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10};
+    static const uint8_t Q[7] = {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D};
+    static const uint8_t R[7] = {0x3E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11};
+    static const uint8_t S_[7] = {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E};
+    static const uint8_t T[7] = {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t U[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+    static const uint8_t V[7] = {0x11, 0x11, 0x11, 0x11, 0x0A, 0x0A, 0x04};
+    static const uint8_t W[7] = {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11};
+    static const uint8_t X[7] = {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11};
+    static const uint8_t Y[7] = {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t Z[7] = {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F};
+    static const uint8_t COL[7] = {0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00};
+    static const uint8_t SLH[7] = {0x01, 0x02, 0x04, 0x04, 0x08, 0x10, 0x10};
+    static const uint8_t DASH[7] = {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00};
+    static const uint8_t UND[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F};
+    static const uint8_t DOT[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06};
+    static const uint8_t AT[7] = {0x0E, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0E};
+    static const uint8_t LBR[7] = {0x06, 0x08, 0x10, 0x10, 0x10, 0x08, 0x06};
+    static const uint8_t RBR[7] = {0x18, 0x04, 0x02, 0x02, 0x02, 0x04, 0x18};
+    static const uint8_t SPC2[7] = {0, 0, 0, 0, 0, 0, 0};
+
+    switch (c) {
+    case '0': return D0;
+    case '1': return D1;
+    case '2': return D2;
+    case '3': return D3;
+    case '4': return D4;
+    case '5': return D5;
+    case '6': return D6;
+    case '7': return D7;
+    case '8': return D8;
+    case '9': return D9;
+    case 'A': return A;
+    case 'B': return B;
+    case 'C': return C;
+    case 'D': return D;
+    case 'E': return E;
+    case 'F': return F;
+    case 'G': return G;
+    case 'H': return H;
+    case 'I': return I;
+    case 'J': return J;
+    case 'K': return K;
+    case 'L': return L;
+    case 'M': return M;
+    case 'N': return N;
+    case 'O': return O;
+    case 'P': return P;
+    case 'Q': return Q;
+    case 'R': return R;
+    case 'S': return S_;
+    case 'T': return T;
+    case 'U': return U;
+    case 'V': return V;
+    case 'W': return W;
+    case 'X': return X;
+    case 'Y': return Y;
+    case 'Z': return Z;
+    case ':': return COL;
+    case '/': return SLH;
+    case '-': return DASH;
+    case '_': return UND;
+    case '.': return DOT;
+    case '@': return AT;
+    case '(': return LBR;
+    case ')': return RBR;
+    case '[': return LBR;
+    case ']': return RBR;
+    case ' ': return SPC;
+    default: return SPC2;
+    }
+}
+
+static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale) {
+    if (c >= 'a' && c <= 'z') {
+        c = (char)(c - 'a' + 'A');
+    }
+    const uint8_t *glyph = font5x7(c);
+    uint32_t *fb = (uint32_t *)o->fb.map;
+    int pitch = o->fb.pitch / 4;
+    for (int row = 0; row < 7; ++row) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 5; ++col) {
+            if (!(bits & (1 << (4 - col)))) {
+                continue;
+            }
+            for (int sy = 0; sy < scale; ++sy) {
+                int py = y + row * scale + sy;
+                if (py < 0 || py >= o->h) {
+                    continue;
+                }
+                uint32_t *row_px = fb + py * pitch;
+                for (int sx = 0; sx < scale; ++sx) {
+                    int px = x + col * scale + sx;
+                    if (px >= 0 && px < o->w) {
+                        row_px[px] = argb;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, int scale) {
+    int cursor = 0;
+    for (const char *p = s; *p; ++p) {
+        if (*p == '\n') {
+            y += 8 * scale;
+            cursor = 0;
+            continue;
+        }
+        osd_draw_char(o, x + cursor * (6 * scale), y, *p, argb, scale);
+        cursor++;
+    }
+}
+
+typedef struct {
+    uint32_t p_fb_id, p_crtc_id, p_crtc_x, p_crtc_y, p_crtc_w, p_crtc_h;
+    uint32_t p_src_x, p_src_y, p_src_w, p_src_h;
+    uint32_t p_zpos;
+    int have_zpos;
+    uint64_t zmin, zmax;
+    uint32_t p_alpha;
+    int have_alpha;
+    uint64_t amin, amax;
+    uint32_t p_blend;
+    int have_blend;
+} PlaneProps;
+
+static int plane_get_basic_props(int fd, uint32_t plane_id, PlaneProps *pp) {
+    memset(pp, 0, sizeof(*pp));
+    if (drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &pp->p_fb_id) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &pp->p_crtc_id) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_X", &pp->p_crtc_x) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y", &pp->p_crtc_y) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_W", &pp->p_crtc_w) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_H", &pp->p_crtc_h) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_X", &pp->p_src_x) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_Y", &pp->p_src_y) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_W", &pp->p_src_w) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_H", &pp->p_src_h)) {
+        return -1;
+    }
+
+    pp->have_zpos =
+        (drm_get_prop_id_and_range_ci(fd, plane_id, DRM_MODE_OBJECT_PLANE, "ZPOS", &pp->p_zpos, &pp->zmin, &pp->zmax,
+                                      "zpos") == 0);
+    if (drm_get_prop_id_and_range_ci(fd, plane_id, DRM_MODE_OBJECT_PLANE, "alpha", &pp->p_alpha, &pp->amin, &pp->amax,
+                                     "alpha") == 0) {
+        pp->have_alpha = 1;
+    }
+    if (drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "pixel blend mode", &pp->p_blend) == 0) {
+        pp->have_blend = 1;
+    }
+    return 0;
+}
+
+static int plane_accepts_linear_argb(int fd, uint32_t plane_id, uint32_t crtc_id) {
+    PlaneProps pp;
+    if (plane_get_basic_props(fd, plane_id, &pp) != 0) {
+        return 0;
+    }
+
+    struct DumbFB fb = {0};
+    if (create_argb_fb(fd, 64, 32, 0x80FFFFFFu, &fb) != 0) {
+        return 0;
+    }
+
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    if (!req) {
+        destroy_dumb_fb(fd, &fb);
+        return 0;
+    }
+
+    drmModeAtomicAddProperty(req, plane_id, pp.p_fb_id, fb.fb_id);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_crtc_id, crtc_id);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_crtc_x, 0);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_crtc_y, 0);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_crtc_w, fb.w);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_crtc_h, fb.h);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_src_x, 0);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_src_y, 0);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_src_w, (uint64_t)fb.w << 16);
+    drmModeAtomicAddProperty(req, plane_id, pp.p_src_h, (uint64_t)fb.h << 16);
+
+    int ok = (drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) == 0);
+
+    drmModeAtomicFree(req);
+    destroy_dumb_fb(fd, &fb);
+    return ok;
+}
+
+static int get_plane_type(int fd, uint32_t plane_id, int *out_type) {
+    uint32_t type_prop = 0;
+    if (drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "type", &type_prop) != 0) {
+        return -1;
+    }
+    drmModeObjectProperties *pr = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (!pr) {
+        return -1;
+    }
+    int found = -1;
+    for (uint32_t k = 0; k < pr->count_props; ++k) {
+        if (pr->props[k] == type_prop) {
+            *out_type = (int)pr->prop_values[k];
+            found = 0;
+            break;
+        }
+    }
+    drmModeFreeObjectProperties(pr);
+    return found;
+}
+
+static int osd_validate_requested_plane(int fd, uint32_t crtc_id, uint32_t plane_id) {
+    if (!plane_accepts_linear_argb(fd, plane_id, crtc_id)) {
+        return -1;
+    }
+    int type = 0;
+    if (get_plane_type(fd, plane_id, &type) == 0) {
+        if (type == DRM_PLANE_TYPE_CURSOR) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int osd_pick_plane(int fd, uint32_t crtc_id, int avoid_plane_id, uint32_t requested,
+                          uint32_t *out_plane, uint64_t *out_zmax) {
+    if (requested) {
+        if (osd_validate_requested_plane(fd, crtc_id, requested) == 0) {
+            uint32_t pz = 0;
+            uint64_t zmin = 0, zmax = 0;
+            int have = (drm_get_prop_id_and_range_ci(fd, requested, DRM_MODE_OBJECT_PLANE, "ZPOS", &pz, &zmin, &zmax,
+                                                     "zpos") == 0);
+            *out_plane = requested;
+            *out_zmax = have ? zmax : 0;
+            return 0;
+        }
+        LOGW("OSD: requested plane %u is not LINEAR ARGB-capable; falling back to auto-pick.", requested);
+    }
+
+    drmModeRes *res = drmModeGetResources(fd);
+    if (!res) {
+        return -1;
+    }
+
+    int crtc_index = -1;
+    for (int i = 0; i < res->count_crtcs; ++i) {
+        if ((uint32_t)res->crtcs[i] == crtc_id) {
+            crtc_index = i;
+            break;
+        }
+    }
+    if (crtc_index < 0) {
+        drmModeFreeResources(res);
+        return -1;
+    }
+
+    drmModePlaneRes *prs = drmModeGetPlaneResources(fd);
+    if (!prs) {
+        drmModeFreeResources(res);
+        return -1;
+    }
+
+    uint32_t best_plane = 0;
+    int best_score = -1000000;
+    uint64_t best_zmax = 0;
+
+    for (uint32_t i = 0; i < prs->count_planes; ++i) {
+        drmModePlane *p = drmModeGetPlane(fd, prs->planes[i]);
+        if (!p) {
+            continue;
+        }
+        if ((int)p->plane_id == avoid_plane_id) {
+            drmModeFreePlane(p);
+            continue;
+        }
+        if ((p->possible_crtcs & (1U << crtc_index)) == 0) {
+            drmModeFreePlane(p);
+            continue;
+        }
+
+        int type = 0;
+        if (get_plane_type(fd, p->plane_id, &type) != 0) {
+            drmModeFreePlane(p);
+            continue;
+        }
+        if (type == DRM_PLANE_TYPE_CURSOR) {
+            drmModeFreePlane(p);
+            continue;
+        }
+
+        if (!plane_accepts_linear_argb(fd, p->plane_id, crtc_id)) {
+            drmModeFreePlane(p);
+            continue;
+        }
+
+        uint32_t pz = 0;
+        uint64_t zmin = 0, zmax = 0;
+        int have_z = (drm_get_prop_id_and_range_ci(fd, p->plane_id, DRM_MODE_OBJECT_PLANE, "ZPOS", &pz, &zmin, &zmax,
+                                                   "zpos") == 0);
+
+        int score = 0;
+        if (have_z) {
+            score += 100 + (int)zmax;
+        }
+        if (type == DRM_PLANE_TYPE_OVERLAY) {
+            score += 1;
+        }
+
+        if (score > best_score) {
+            best_score = score;
+            best_plane = p->plane_id;
+            best_zmax = have_z ? zmax : 0;
+        }
+
+        drmModeFreePlane(p);
+    }
+
+    drmModeFreePlaneResources(prs);
+    drmModeFreeResources(res);
+
+    if (!best_plane) {
+        return -1;
+    }
+    *out_plane = best_plane;
+    *out_zmax = best_zmax;
+    return 0;
+}
+
+static int osd_query_plane_props(int fd, uint32_t plane_id, OSD *o) {
+    if (drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &o->p_fb_id) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &o->p_crtc_id) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_X", &o->p_crtc_x) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y", &o->p_crtc_y) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_W", &o->p_crtc_w) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_H", &o->p_crtc_h) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_X", &o->p_src_x) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_Y", &o->p_src_y) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_W", &o->p_src_w) ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_H", &o->p_src_h)) {
+        LOGE("OSD plane props missing (id=%u)", plane_id);
+        drm_debug_list_props(fd, plane_id, DRM_MODE_OBJECT_PLANE, "OSD_PLANE");
+        return -1;
+    }
+    o->have_zpos =
+        (drm_get_prop_id_and_range_ci(fd, plane_id, DRM_MODE_OBJECT_PLANE, "ZPOS", &o->p_zpos, &o->zmin, &o->zmax,
+                                      "zpos") == 0);
+
+    uint32_t p_alpha = 0, p_blend = 0;
+    uint64_t amin = 0, amax = 0;
+    if (drm_get_prop_id_and_range_ci(fd, plane_id, DRM_MODE_OBJECT_PLANE, "alpha", &p_alpha, &amin, &amax,
+                                     "alpha") == 0) {
+        o->p_alpha = p_alpha;
+        o->alpha_min = amin;
+        o->alpha_max = amax;
+        o->have_alpha = 1;
+    } else {
+        o->have_alpha = 0;
+    }
+    if (drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "pixel blend mode", &p_blend) == 0) {
+        o->p_blend = p_blend;
+        o->have_blend = 1;
+    } else {
+        o->have_blend = 0;
+    }
+    return 0;
+}
+
+static int osd_commit_enable(int fd, uint32_t crtc_id, OSD *o) {
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    if (!req) {
+        return -1;
+    }
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, o->fb.fb_id);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_x, 0);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_y, 0);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_w, o->w);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_h, o->h);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_src_x, 0);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_src_y, 0);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_src_w, (uint64_t)o->w << 16);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_src_h, (uint64_t)o->h << 16);
+    if (o->have_zpos) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_zpos, o->zmax);
+    }
+    if (o->have_alpha) {
+        uint64_t aval = o->alpha_max ? o->alpha_max : 65535;
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_alpha, aval);
+    }
+    if (o->have_blend) {
+        drmModePropertyRes *prop = drmModeGetProperty(fd, o->p_blend);
+        if (prop) {
+            uint64_t premul_val = 0;
+            int found = 0;
+            for (int i = 0; i < prop->count_enums; ++i) {
+                if (strcmp(prop->enums[i].name, "Pre-multiplied") == 0) {
+                    premul_val = prop->enums[i].value;
+                    found = 1;
+                    break;
+                }
+            }
+            drmModeFreeProperty(prop);
+            if (found) {
+                drmModeAtomicAddProperty(req, o->plane_id, o->p_blend, premul_val);
+            }
+        }
+    }
+    int ret = drmModeAtomicCommit(fd, req, 0, NULL);
+    drmModeAtomicFree(req);
+    return ret;
+}
+
+static int osd_commit_disable(int fd, OSD *o) {
+    if (!o->active) {
+        return 0;
+    }
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    if (!req) {
+        return -1;
+    }
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, 0);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, 0);
+    int ret = drmModeAtomicCommit(fd, req, 0, NULL);
+    drmModeAtomicFree(req);
+    return ret;
+}
+
+static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    if (!req) {
+        return;
+    }
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, o->fb.fb_id);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
+    drmModeAtomicCommit(fd, req, 0, NULL);
+    drmModeAtomicFree(req);
+}
+
+static void osd_destroy_fb(int fd, OSD *o) {
+    destroy_dumb_fb(fd, &o->fb);
+    o->fb.map = NULL;
+}
+
+int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plane_id, OSD *o) {
+    o->enabled = cfg->osd_enable;
+    o->requested_plane_id = (uint32_t)cfg->osd_plane_id;
+    o->refresh_ms = cfg->osd_refresh_ms;
+    o->crtc_id = ms->crtc_id;
+
+    if (!o->enabled) {
+        return 0;
+    }
+
+    uint32_t chosen = 0;
+    uint64_t zmax = 0;
+    if (osd_pick_plane(fd, ms->crtc_id, video_plane_id, o->requested_plane_id, &chosen, &zmax) != 0) {
+        LOGW("OSD: failed to find suitable plane. Disabling OSD.");
+        o->enabled = 0;
+        return -1;
+    }
+    o->plane_id = chosen;
+    LOGI("OSD: using overlay plane id=%u", o->plane_id);
+    if (osd_query_plane_props(fd, o->plane_id, o) != 0) {
+        LOGW("OSD: plane props missing. Disabling OSD.");
+        o->enabled = 0;
+        return -1;
+    }
+    if (o->have_zpos && zmax > 0) {
+        o->zmax = zmax;
+    }
+
+    o->scale = (ms->mode_w >= 1280) ? 2 : 1;
+    o->w = 480 * o->scale;
+    o->h = 120 * o->scale;
+
+    if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
+        LOGW("OSD: create fb failed. Disabling OSD.");
+        o->enabled = 0;
+        return -1;
+    }
+
+    osd_clear(o, 0x80000000u);
+    if (osd_commit_enable(fd, ms->crtc_id, o) != 0) {
+        LOGW("OSD: atomic enable failed. Disabling OSD.");
+        osd_destroy_fb(fd, o);
+        o->enabled = 0;
+        return -1;
+    }
+
+    o->active = 1;
+    return 0;
+}
+
+void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
+                      int audio_disabled, int restart_count, OSD *o) {
+    if (!o->enabled || !o->active) {
+        return;
+    }
+
+    osd_clear(o, 0x20000000u);
+
+    char line1[128];
+    snprintf(line1, sizeof(line1), "HDMI %dx%d@%d plane=%d", ms->mode_w, ms->mode_h, ms->mode_hz, cfg->plane_id);
+    osd_draw_text(o, 10 * o->scale, 10 * o->scale, line1, 0xB0FFFFFFu, o->scale);
+
+    char line2[128];
+    snprintf(line2, sizeof(line2), "UDP:%d PTv=%d PTa=%d lat=%dms", cfg->udp_port, cfg->vid_pt, cfg->aud_pt, cfg->latency_ms);
+    osd_draw_text(o, 10 * o->scale, 30 * o->scale, line2, 0xB0FFFFFFu, o->scale);
+
+    char line3[128];
+    snprintf(line3, sizeof(line3), "Pipeline: %s restarts=%d%s", ps->state == PIPELINE_RUNNING ? "RUN" : "STOP",
+             restart_count, audio_disabled ? " audio=fakesink" : "");
+    osd_draw_text(o, 10 * o->scale, 50 * o->scale, line3, 0xB0FFFFFFu, o->scale);
+
+    osd_commit_touch(fd, o->crtc_id, o);
+}
+
+int osd_is_enabled(const OSD *o) {
+    return o->enabled;
+}
+
+int osd_is_active(const OSD *o) {
+    return o->active;
+}
+
+void osd_disable(int fd, OSD *o) {
+    if (!o->active) {
+        return;
+    }
+    if (osd_commit_disable(fd, o) == 0) {
+        o->active = 0;
+    }
+}
+
+void osd_teardown(int fd, OSD *o) {
+    if (o->active) {
+        osd_commit_disable(fd, o);
+        o->active = 0;
+    }
+    osd_destroy_fb(fd, o);
+    memset(o, 0, sizeof(*o));
+}
