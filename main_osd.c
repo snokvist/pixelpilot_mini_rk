@@ -780,19 +780,22 @@ static void osd_draw_char(OSD* o, int x, int y, char c, uint32_t argb, int scale
     for (int row=0; row<7; row++){
         uint8_t bits = g[row];
         for (int col=0; col<5; col++){
-            if (bits & (1<<col)){
+            // FIX: read MSB-left (bit 4 is leftmost), not LSB-left
+            int bit = (bits >> (4 - col)) & 1;
+            if (bit){
                 int px = x + col*sx;
                 int py = y + row*sy;
                 for (int dy=0; dy<sy; dy++){
                     uint32_t* line = (uint32_t*)((uint8_t*)o->fb.map + (py+dy)*o->fb.pitch);
                     for (int dx=0; dx<sx; dx++){
-                        if (px+dx < o->w && py+dy < o->h) line[px+dx] = argb; // premultiplied ARGB
+                        if (px+dx < o->w && py+dy < o->h) line[px+dx] = argb;
                     }
                 }
             }
         }
     }
 }
+
 static void osd_draw_text(OSD* o, int x, int y, const char* s, uint32_t argb, int scale){
     int cursor = 0;
     for (const char* p=s; *p; ++p){
