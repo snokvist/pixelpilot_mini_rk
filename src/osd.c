@@ -365,6 +365,14 @@ static void osd_plot_reset(OSD *o, const AppCfg *cfg) {
     o->plot_min = DBL_MAX;
     o->plot_max = 0.0;
     o->plot_avg = 0.0;
+    o->plot_scale_min = 0.0;
+    o->plot_scale_max = 1.0;
+    o->plot_step_px = 0.0;
+    o->plot_background_ready = 0;
+    o->plot_prev_valid = 0;
+    o->plot_prev_x = 0;
+    o->plot_prev_y = 0;
+    o->plot_rescale_countdown = 0;
     memset(o->plot_samples, 0, sizeof(o->plot_samples));
     o->plot_clear_on_next_draw = 0;
 
@@ -418,6 +426,12 @@ static void osd_plot_reset(OSD *o, const AppCfg *cfg) {
     osd_store_rect(&o->plot_rect, 0, 0, 0, 0);
     osd_store_rect(&o->plot_label_rect, 0, 0, 0, 0);
     osd_store_rect(&o->plot_stats_rect, 0, 0, 0, 0);
+
+    if (o->plot_capacity > 1 && o->plot_w > 1) {
+        o->plot_step_px = (double)(o->plot_w - 1) / (double)(o->plot_capacity - 1);
+    } else {
+        o->plot_step_px = 0.0;
+    }
 }
 
 static void osd_plot_push(OSD *o, double value) {
@@ -429,6 +443,8 @@ static void osd_plot_push(OSD *o, double value) {
     }
     if (o->plot_cursor == 0 && o->plot_size >= o->plot_capacity) {
         o->plot_clear_on_next_draw = 1;
+        o->plot_background_ready = 0;
+        o->plot_prev_valid = 0;
         o->plot_size = 0;
         o->plot_sum = 0.0;
         o->plot_min = DBL_MAX;
@@ -453,16 +469,67 @@ static void osd_plot_push(OSD *o, double value) {
     o->plot_latest = value;
 }
 
-static void osd_plot_draw(OSD *o) {
-    if (o->plot_capacity <= 0) {
-        return;
+#define OSD_PLOT_RESCALE_DELAY 12
+
+static void osd_plot_compute_scale(const OSD *o, double *out_min, double *out_max) {
+    double min_v = 0.0;
+    double max_v = 1.0;
+    if (o->plot_size > 0) {
+        if (o->plot_min != DBL_MAX) {
+            min_v = o->plot_min;
+        }
+        max_v = o->plot_max;
+        if (max_v < 0.1) {
+            max_v = 0.1;
+        }
+        if (min_v > max_v) {
+            min_v = max_v * 0.5;
+        }
     }
+
+    double span = max_v - min_v;
+    if (span <= 0.0) {
+        span = (max_v > 0.0) ? (max_v * 0.5) : 0.5;
+    }
+    double pad = span * 0.1;
+    if (pad < 0.05) {
+        pad = 0.05;
+    }
+    min_v -= pad;
+    max_v += pad;
+    if (min_v < 0.0) {
+        min_v = 0.0;
+    }
+    if (max_v <= min_v) {
+        max_v = min_v + 0.1;
+    }
+    *out_min = min_v;
+    *out_max = max_v;
+}
+
+static int osd_plot_value_to_y(const OSD *o, double value) {
+    double min_v = o->plot_scale_min;
+    double max_v = o->plot_scale_max;
+    if (max_v <= min_v) {
+        max_v = min_v + 0.1;
+    }
+    double norm = (value - min_v) / (max_v - min_v);
+    if (norm < 0.0) {
+        norm = 0.0;
+    }
+    if (norm > 1.0) {
+        norm = 1.0;
+    }
+    int plot_h = o->plot_h;
+    int base_y = o->plot_y;
+    return base_y + plot_h - 1 - (int)(norm * (plot_h - 1) + 0.5);
+}
+
+static void osd_plot_draw_background(OSD *o) {
     uint32_t bg = 0x40202020u;
     uint32_t border = 0x60FFFFFFu;
     uint32_t axis = 0x60FFFFFFu;
     uint32_t grid = 0x30909090u;
-    uint32_t plot_color = 0xB0FF4040u;
-    uint32_t avg_color = 0x80FFD070u;
 
     osd_clear_rect(o, &o->plot_rect);
 
@@ -475,90 +542,54 @@ static void osd_plot_draw(OSD *o) {
     osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
     osd_store_rect(&o->plot_rect, base_x, base_y, plot_w, plot_h);
 
-    int limit = o->plot_size;
-    if (o->plot_clear_on_next_draw) {
-        o->plot_clear_on_next_draw = 0;
-        limit = 0;
-    }
-
-    double max_v = (limit > 0) ? o->plot_max : 0.0;
-    double min_v = (limit > 0 && o->plot_min != DBL_MAX) ? o->plot_min : 0.0;
-    if (max_v < 0.1) {
-        max_v = 0.1;
-    }
-    if (max_v < min_v) {
-        max_v = min_v;
-    }
-    double range = max_v - min_v;
-    if (range < 0.1) {
-        range = max_v * 0.5;
-        if (range < 0.1) {
-            range = 0.1;
-        }
-    }
-
-    // Horizontal grid lines (quartiles)
     int grid_lines = 4;
     for (int i = 1; i < grid_lines; ++i) {
         int gy = base_y + (plot_h * i) / grid_lines;
         osd_draw_hline(o, base_x, gy, plot_w, grid);
     }
 
-    // Vertical grid lines based on window seconds (every 10s if possible)
     int desired_secs = 10;
     double px_per_sec = (o->plot_window_seconds > 0 && plot_w > 1)
                             ? (double)(plot_w - 1) / (double)o->plot_window_seconds
                             : 0.0;
     if (px_per_sec > 0.0) {
         int step_px = (int)(px_per_sec * desired_secs + 0.5);
-        if (step_px < (o->scale > 0 ? o->scale : 1)) {
-            step_px = (o->scale > 0 ? o->scale : 1);
+        int scale = o->scale > 0 ? o->scale : 1;
+        if (step_px < scale) {
+            step_px = scale;
         }
         for (int gx = step_px; gx < plot_w; gx += step_px) {
             osd_draw_vline(o, base_x + gx, base_y, plot_h, grid);
         }
     }
 
-    // Axis lines
     osd_draw_hline(o, base_x, base_y + plot_h - (o->scale > 0 ? o->scale : 1), plot_w, axis);
     osd_draw_vline(o, base_x, base_y, plot_h, axis);
+}
 
+static void osd_plot_draw_all(OSD *o) {
+    int limit = o->plot_size;
     if (limit <= 0) {
+        o->plot_prev_valid = 0;
         return;
     }
-
-    // Average line
-    if (o->plot_avg > 0.0) {
-        double norm = (o->plot_avg - min_v) / range;
-        if (norm < 0.0) {
-            norm = 0.0;
-        }
-        if (norm > 1.0) {
-            norm = 1.0;
-        }
-        int ay = base_y + plot_h - 1 - (int)(norm * (plot_h - 1));
-        osd_draw_hline(o, base_x, ay, plot_w, avg_color);
+    uint32_t plot_color = 0xB0FF4040u;
+    int base_x = o->plot_x;
+    double step = o->plot_step_px;
+    if (step <= 0.0) {
+        step = 0.0;
     }
-
     int prev_x = -1;
     int prev_y = -1;
     int scale = o->scale > 0 ? o->scale : 1;
-    double step = (o->plot_capacity > 1) ? (double)(plot_w - 1) / (double)(o->plot_capacity - 1) : 0.0;
 
     for (int i = 0; i < limit; ++i) {
         double value = o->plot_samples[i];
-        double norm = (value - min_v) / range;
-        if (norm < 0.0) {
-            norm = 0.0;
-        }
-        if (norm > 1.0) {
-            norm = 1.0;
-        }
         int x = base_x + (int)(i * step + 0.5);
-        if (x >= base_x + plot_w) {
-            x = base_x + plot_w - 1;
+        if (x >= base_x + o->plot_w) {
+            x = base_x + o->plot_w - 1;
         }
-        int y = base_y + plot_h - 1 - (int)(norm * (plot_h - 1));
+        int y = osd_plot_value_to_y(o, value);
         if (prev_x >= 0 && x >= prev_x) {
             osd_draw_line(o, prev_x, prev_y, x, y, plot_color);
         }
@@ -566,6 +597,98 @@ static void osd_plot_draw(OSD *o) {
         prev_x = x;
         prev_y = y;
     }
+
+    if (prev_x >= 0 && prev_y >= 0) {
+        o->plot_prev_valid = 1;
+        o->plot_prev_x = prev_x;
+        o->plot_prev_y = prev_y;
+    } else {
+        o->plot_prev_valid = 0;
+    }
+}
+
+static void osd_plot_draw_latest(OSD *o) {
+    int limit = o->plot_size;
+    if (limit <= 0) {
+        o->plot_prev_valid = 0;
+        return;
+    }
+    int index = limit - 1;
+    double value = o->plot_samples[index];
+    uint32_t plot_color = 0xB0FF4040u;
+    int base_x = o->plot_x;
+    double step = o->plot_step_px;
+    int x = base_x + (int)(index * step + 0.5);
+    if (x >= base_x + o->plot_w) {
+        x = base_x + o->plot_w - 1;
+    }
+    int y = osd_plot_value_to_y(o, value);
+    int scale = o->scale > 0 ? o->scale : 1;
+
+    if (o->plot_prev_valid) {
+        osd_draw_line(o, o->plot_prev_x, o->plot_prev_y, x, y, plot_color);
+    }
+    osd_fill_rect(o, x, y, scale, scale, plot_color);
+    o->plot_prev_valid = 1;
+    o->plot_prev_x = x;
+    o->plot_prev_y = y;
+}
+
+static void osd_plot_draw(OSD *o) {
+    if (o->plot_capacity <= 0) {
+        return;
+    }
+
+    double scale_min = o->plot_scale_min;
+    double scale_max = o->plot_scale_max;
+    double new_min = scale_min;
+    double new_max = scale_max;
+    osd_plot_compute_scale(o, &new_min, &new_max);
+
+    int need_background = (!o->plot_background_ready || o->plot_clear_on_next_draw);
+    if (o->plot_size > 0) {
+        double actual_min = (o->plot_min != DBL_MAX) ? o->plot_min : new_min;
+        double actual_max = o->plot_max;
+        if (!need_background) {
+            if (actual_min < scale_min || actual_max > scale_max) {
+                need_background = 1;
+            } else {
+                double span = scale_max - scale_min;
+                double used = actual_max - actual_min;
+                if (span > 0.0 && used >= 0.0) {
+                    double utilization = (span > 0.0) ? (used / span) : 1.0;
+                    if (utilization < 0.35) {
+                        if (o->plot_rescale_countdown > 0) {
+                            o->plot_rescale_countdown--;
+                        } else {
+                            need_background = 1;
+                        }
+                    } else {
+                        o->plot_rescale_countdown = OSD_PLOT_RESCALE_DELAY;
+                    }
+                }
+            }
+        }
+    }
+
+    if (need_background) {
+        osd_plot_draw_background(o);
+        o->plot_scale_min = new_min;
+        o->plot_scale_max = new_max;
+        o->plot_background_ready = 1;
+        o->plot_clear_on_next_draw = 0;
+        o->plot_prev_valid = 0;
+        o->plot_rescale_countdown = OSD_PLOT_RESCALE_DELAY;
+        osd_plot_draw_all(o);
+        return;
+    }
+
+    if (o->plot_size <= 0) {
+        o->plot_prev_valid = 0;
+        return;
+    }
+
+    osd_plot_draw_latest(o);
 }
 
 static void osd_plot_draw_label(OSD *o, const char *text) {

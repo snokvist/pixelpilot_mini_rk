@@ -65,6 +65,9 @@ typedef struct OSD {
     double plot_min;
     double plot_max;
     double plot_avg;
+    double plot_scale_min;
+    double plot_scale_max;
+    double plot_step_px;
     double plot_samples[OSD_PLOT_MAX_SAMPLES];
     int plot_w;
     int plot_h;
@@ -76,6 +79,11 @@ typedef struct OSD {
     OSDRect plot_stats_rect;
     OSDRect text_rect;
     int plot_clear_on_next_draw;
+    int plot_background_ready;
+    int plot_prev_valid;
+    int plot_prev_x;
+    int plot_prev_y;
+    int plot_rescale_countdown;
 } OSD;
 
 void osd_init(OSD *osd);
