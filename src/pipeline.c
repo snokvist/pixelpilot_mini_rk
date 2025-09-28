@@ -2,6 +2,7 @@
 #include "logging.h"
 
 #include <glib.h>
+#include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 #include <stdlib.h>
 
@@ -24,19 +25,38 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
     }
 }
 
-// Keep the ingress creation isolated so we can later replace udpsrc with an
-// appsrc that is fed by a custom UDP receiver (for packet accounting, source
-// identification, etc.).
-static GstElement *create_udp_source(const AppCfg *cfg) {
-    GstElement *udpsrc = gst_element_factory_make("udpsrc", "udp_source");
-    CHECK_ELEM(udpsrc, "udpsrc");
+static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiver_out) {
+    GstElement *appsrc_elem = gst_element_factory_make("appsrc", "udp_appsrc");
+    CHECK_ELEM(appsrc_elem, "appsrc");
 
-    g_object_set(udpsrc, "port", cfg->udp_port, "buffer-size", 262144, NULL);
-    return udpsrc;
+    GstCaps *caps = gst_caps_new_simple("application/x-rtp", NULL);
+    g_object_set(appsrc_elem, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
+                 GST_APP_STREAM_TYPE_STREAM, "block", TRUE, "caps", caps, NULL);
+    gst_caps_unref(caps);
+
+    GstAppSrc *appsrc = GST_APP_SRC(appsrc_elem);
+    gst_app_src_set_latency(appsrc, 0, 0);
+    gst_app_src_set_max_bytes(appsrc, 0);
+
+    UdpReceiver *receiver = udp_receiver_create(cfg->udp_port, cfg->vid_pt, cfg->aud_pt, appsrc);
+    if (receiver == NULL) {
+        LOGE("Failed to create UDP receiver");
+        goto fail;
+    }
+
+    if (receiver_out != NULL) {
+        *receiver_out = receiver;
+    } else {
+        udp_receiver_destroy(receiver);
+    }
+    return appsrc_elem;
 
 fail:
-    if (udpsrc != NULL) {
-        gst_object_unref(udpsrc);
+    if (receiver != NULL) {
+        udp_receiver_destroy(receiver);
+    }
+    if (appsrc_elem != NULL) {
+        gst_object_unref(appsrc_elem);
     }
     return NULL;
 }
@@ -317,6 +337,10 @@ static gpointer bus_thread_func(gpointer data) {
 }
 
 static void cleanup_pipeline(PipelineState *ps) {
+    if (ps->udp_receiver != NULL) {
+        udp_receiver_destroy(ps->udp_receiver);
+        ps->udp_receiver = NULL;
+    }
     release_request_pad(ps->tee, &ps->video_pad);
     release_request_pad(ps->tee, &ps->audio_pad);
     ps->video_sink = NULL;
@@ -354,8 +378,10 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->tee = NULL;
     ps->video_pad = NULL;
     ps->audio_pad = NULL;
+    ps->udp_receiver = NULL;
 
-    GstElement *source = create_udp_source(cfg);
+    UdpReceiver *receiver = NULL;
+    GstElement *source = create_udp_app_source(cfg, &receiver);
     if (source == NULL) {
         goto fail;
     }
@@ -370,6 +396,7 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
 
     ps->source = source;
     ps->tee = tee;
+    ps->udp_receiver = receiver;
 
     if (!build_video_branch(ps, pipeline, tee, cfg)) {
         goto fail;
@@ -383,6 +410,13 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     if (ret == GST_STATE_CHANGE_FAILURE) {
         LOGE("Failed to set pipeline to PLAYING");
         goto fail;
+    }
+
+    if (ps->udp_receiver != NULL) {
+        if (udp_receiver_start(ps->udp_receiver) != 0) {
+            LOGE("Failed to start UDP receiver");
+            goto fail;
+        }
     }
 
     ps->bus_thread_running = TRUE;
@@ -420,6 +454,10 @@ void pipeline_stop(PipelineState *ps, int wait_ms_total) {
     ps->state = PIPELINE_STOPPING;
     ps->stop_requested = TRUE;
     g_mutex_unlock(&ps->lock);
+
+    if (ps->udp_receiver != NULL) {
+        udp_receiver_stop(ps->udp_receiver);
+    }
 
     if (ps->pipeline != NULL) {
         gst_element_send_event(ps->pipeline, gst_event_new_eos());
@@ -472,4 +510,15 @@ void pipeline_poll_child(PipelineState *ps) {
             LOGI("Pipeline exited cleanly");
         }
     }
+}
+
+int pipeline_get_receiver_stats(const PipelineState *ps, UdpReceiverStats *stats) {
+    if (ps == NULL || stats == NULL) {
+        return -1;
+    }
+    if (ps->udp_receiver == NULL) {
+        return -1;
+    }
+    udp_receiver_get_stats(ps->udp_receiver, stats);
+    return 0;
 }
