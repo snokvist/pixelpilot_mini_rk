@@ -214,8 +214,8 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     LOGI("Chosen: %s id=%u  %dx%d@%d  CRTC=%d  plane=%d", cname, conn->connector_id, w, h, hz, crtc->crtc_id, cfg->plane_id);
 
     struct DumbFB fb = {0};
-    if (create_blue_fb(fd, w, h, &fb) != 0) {
-        LOGE("create_blue_fb failed: %s", strerror(errno));
+    if (create_argb_fb(fd, w, h, 0xFF000000u, &fb) != 0) {
+        LOGE("create_argb_fb failed: %s", strerror(errno));
         drmModeFreeConnector(conn);
         drmModeFreeCrtc(crtc);
         drmModeFreeResources(res);
@@ -313,11 +313,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         return -9;
     }
 
-    LOGI("Atomic COMMIT: %dx%d@%d on %s via plane %d — BLUE", w, h, hz, cname, cfg->plane_id);
-
-    if (cfg->blue_hold_ms > 0) {
-        usleep(cfg->blue_hold_ms * 1000);
-    }
+    LOGI("Atomic COMMIT: %dx%d@%d on %s via plane %d", w, h, hz, cname, cfg->plane_id);
 
     drmModeAtomicFree(req);
     drmModeDestroyPropertyBlob(fd, mode_blob);

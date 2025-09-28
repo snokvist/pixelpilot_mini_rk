@@ -14,7 +14,6 @@ struct DumbFB {
 };
 
 int create_argb_fb(int fd, int w, int h, uint32_t argb_fill, struct DumbFB *out);
-int create_blue_fb(int fd, int w, int h, struct DumbFB *out);
 void destroy_dumb_fb(int fd, struct DumbFB *fb);
 
 #endif // DRM_FB_H

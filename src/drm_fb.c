@@ -65,61 +65,6 @@ int create_argb_fb(int fd, int w, int h, uint32_t argb_fill, struct DumbFB *out)
     return 0;
 }
 
-int create_blue_fb(int fd, int w, int h, struct DumbFB *out) {
-    struct drm_mode_create_dumb creq = {0};
-    creq.width = w;
-    creq.height = h;
-    creq.bpp = 32;
-    if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq) < 0) {
-        return -1;
-    }
-
-    uint32_t handles[4] = {creq.handle, 0, 0, 0};
-    uint32_t pitches[4] = {creq.pitch, 0, 0, 0};
-    uint32_t offsets[4] = {0, 0, 0, 0};
-    uint32_t fb_id = 0;
-
-    if (drmModeAddFB2(fd, w, h, DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb_id, 0) != 0) {
-        if (drmModeAddFB(fd, w, h, 24, 32, creq.pitch, creq.handle, &fb_id) != 0) {
-            struct drm_mode_destroy_dumb dreq = {.handle = creq.handle};
-            ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-            return -1;
-        }
-    }
-
-    struct drm_mode_map_dumb mreq = {.handle = creq.handle};
-    if (ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq) < 0) {
-        drmModeRmFB(fd, fb_id);
-        struct drm_mode_destroy_dumb dreq = {.handle = creq.handle};
-        ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-        return -1;
-    }
-
-    void *map = mmap(0, creq.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mreq.offset);
-    if (map == MAP_FAILED) {
-        drmModeRmFB(fd, fb_id);
-        struct drm_mode_destroy_dumb dreq = {.handle = creq.handle};
-        ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-        return -1;
-    }
-
-    uint32_t *px = (uint32_t *)map;
-    uint32_t blue = 0x000000FFu;
-    size_t count = creq.size / 4;
-    for (size_t i = 0; i < count; ++i) {
-        px[i] = blue;
-    }
-
-    out->fb_id = fb_id;
-    out->handle = creq.handle;
-    out->pitch = creq.pitch;
-    out->size = creq.size;
-    out->map = map;
-    out->w = w;
-    out->h = h;
-    return 0;
-}
-
 void destroy_dumb_fb(int fd, struct DumbFB *fb) {
     if (!fb) {
         return;

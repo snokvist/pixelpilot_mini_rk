@@ -69,15 +69,11 @@ int main(int argc, char **argv) {
             if (cfg.osd_enable) {
                 osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd);
             }
-            if (!cfg.stay_blue) {
-                if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
-                    LOGE("Failed to start pipeline");
-                }
-                clock_gettime(CLOCK_MONOTONIC, &window_start);
-                restart_count = 0;
-            } else {
-                LOGI("--stay-blue set, not starting pipeline");
+            if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
+                LOGE("Failed to start pipeline");
             }
+            clock_gettime(CLOCK_MONOTONIC, &window_start);
+            restart_count = 0;
         } else {
             LOGE("Initial modeset failed; will wait for hotplug events");
         }
@@ -130,16 +126,14 @@ int main(int argc, char **argv) {
                                 osd_teardown(fd, &osd);
                                 osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd);
                             }
-                            if (!cfg.stay_blue) {
-                                if (ps.state != PIPELINE_STOPPED) {
-                                    pipeline_stop(&ps, 700);
-                                }
-                                if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
-                                    LOGE("Failed to start pipeline after hotplug");
-                                }
-                                clock_gettime(CLOCK_MONOTONIC, &window_start);
-                                restart_count = 0;
+                            if (ps.state != PIPELINE_STOPPED) {
+                                pipeline_stop(&ps, 700);
                             }
+                            if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
+                                LOGE("Failed to start pipeline after hotplug");
+                            }
+                            clock_gettime(CLOCK_MONOTONIC, &window_start);
+                            restart_count = 0;
                             backoff_ms = 0;
                         } else {
                             backoff_ms = backoff_ms == 0 ? 250 : (backoff_ms * 2);
@@ -163,7 +157,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (!cfg.stay_blue && connected && ps.state == PIPELINE_STOPPED) {
+        if (connected && ps.state == PIPELINE_STOPPED) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             long long elapsed_ms = ms_since(now, window_start);

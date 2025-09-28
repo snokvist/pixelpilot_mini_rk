@@ -6,8 +6,6 @@ typedef struct {
     char connector_name[32];
     int plane_id;
     int blank_primary;
-    int stay_blue;
-    int blue_hold_ms;
     int use_udev;
 
     int udp_port;
