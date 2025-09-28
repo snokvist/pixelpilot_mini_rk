@@ -8,6 +8,20 @@
 #include "drm_modeset.h"
 #include "pipeline.h"
 
+typedef enum {
+    OSD_POS_TOP_LEFT = 0,
+    OSD_POS_TOP_MID,
+    OSD_POS_TOP_RIGHT,
+    OSD_POS_MID_LEFT,
+    OSD_POS_MID_MID,
+    OSD_POS_MID_RIGHT,
+    OSD_POS_BOTTOM_LEFT,
+    OSD_POS_BOTTOM_MID,
+    OSD_POS_BOTTOM_RIGHT,
+} OSDWidgetPosition;
+
+#define OSD_PLOT_MAX_SAMPLES 1024
+
 typedef struct OSD {
     int enabled;
     int active;
@@ -30,6 +44,26 @@ typedef struct OSD {
     uint64_t alpha_min, alpha_max;
     uint32_t p_blend;
     int have_blend;
+
+    /* Layout helpers */
+    int margin_px;
+
+    /* Bitrate plot state */
+    int plot_window_seconds;
+    int plot_capacity;
+    int plot_size;
+    int plot_cursor;
+    double plot_sum;
+    double plot_latest;
+    double plot_min;
+    double plot_max;
+    double plot_avg;
+    double plot_samples[OSD_PLOT_MAX_SAMPLES];
+    int plot_w;
+    int plot_h;
+    int plot_x;
+    int plot_y;
+    OSDWidgetPosition plot_position;
 } OSD;
 
 void osd_init(OSD *osd);

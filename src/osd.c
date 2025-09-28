@@ -7,6 +7,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <float.h>
+
 #include <libdrm/drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -23,6 +25,16 @@
 
 void osd_init(OSD *o) {
     memset(o, 0, sizeof(*o));
+}
+
+static int clampi(int v, int min_v, int max_v) {
+    if (v < min_v) {
+        return min_v;
+    }
+    if (v > max_v) {
+        return max_v;
+    }
+    return v;
 }
 
 static void osd_clear(OSD *o, uint32_t argb) {
@@ -156,6 +168,382 @@ static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, in
         }
         osd_draw_char(o, pen_x, pen_y, *p, argb, scale);
         pen_x += advance;
+    }
+}
+
+static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
+    if (!o->fb.map || w <= 0 || h <= 0) {
+        return;
+    }
+    int x0 = clampi(x, 0, o->w);
+    int y0 = clampi(y, 0, o->h);
+    int x1 = clampi(x + w, 0, o->w);
+    int y1 = clampi(y + h, 0, o->h);
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+    uint32_t *fb = (uint32_t *)o->fb.map;
+    int pitch = o->fb.pitch / 4;
+    for (int py = y0; py < y1; ++py) {
+        uint32_t *row = fb + py * pitch;
+        for (int px = x0; px < x1; ++px) {
+            row[px] = argb;
+        }
+    }
+}
+
+static void osd_draw_hline(OSD *o, int x, int y, int w, uint32_t argb) {
+    osd_fill_rect(o, x, y, w, o->scale > 0 ? o->scale : 1, argb);
+}
+
+static void osd_draw_vline(OSD *o, int x, int y, int h, uint32_t argb) {
+    osd_fill_rect(o, x, y, o->scale > 0 ? o->scale : 1, h, argb);
+}
+
+static void osd_draw_line(OSD *o, int x0, int y0, int x1, int y1, uint32_t argb) {
+    if (!o->fb.map) {
+        return;
+    }
+    int dx = x1 > x0 ? (x1 - x0) : (x0 - x1);
+    int sx = x0 < x1 ? 1 : -1;
+    int dy = y1 > y0 ? (y0 - y1) : (y1 - y0);
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+
+    int cx = x0;
+    int cy = y0;
+    while (1) {
+        osd_fill_rect(o, cx, cy, o->scale > 0 ? o->scale : 1, o->scale > 0 ? o->scale : 1, argb);
+        if (cx == x1 && cy == y1) {
+            break;
+        }
+        int e2 = 2 * err;
+        if (e2 >= dy) {
+            err += dy;
+            cx += sx;
+        }
+        if (e2 <= dx) {
+            err += dx;
+            cy += sy;
+        }
+        if (cx < 0 || cy < 0 || cx >= o->w || cy >= o->h) {
+            if (cx < 0 && sx < 0) {
+                cx = 0;
+            }
+            if (cy < 0 && sy < 0) {
+                cy = 0;
+            }
+            if (cx >= o->w && sx > 0) {
+                cx = o->w - 1;
+            }
+            if (cy >= o->h && sy > 0) {
+                cy = o->h - 1;
+            }
+        }
+    }
+}
+
+static void osd_draw_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    osd_draw_hline(o, x, y, w, argb);
+    osd_draw_hline(o, x, y + h - (o->scale > 0 ? o->scale : 1), w, argb);
+    osd_draw_vline(o, x, y, h, argb);
+    osd_draw_vline(o, x + w - (o->scale > 0 ? o->scale : 1), y, h, argb);
+}
+
+static void osd_compute_anchor(const OSD *o, int rect_w, int rect_h, OSDWidgetPosition pos, int *out_x, int *out_y) {
+    int margin = o->margin_px;
+    int inner_w = o->w - 2 * margin;
+    int inner_h = o->h - 2 * margin;
+    if (inner_w < 0) {
+        inner_w = 0;
+    }
+    if (inner_h < 0) {
+        inner_h = 0;
+    }
+
+    int x = margin;
+    int y = margin;
+
+    switch (pos) {
+    case OSD_POS_TOP_LEFT:
+        x = margin;
+        y = margin;
+        break;
+    case OSD_POS_TOP_MID:
+        x = margin + (inner_w - rect_w) / 2;
+        y = margin;
+        break;
+    case OSD_POS_TOP_RIGHT:
+        x = o->w - margin - rect_w;
+        y = margin;
+        break;
+    case OSD_POS_MID_LEFT:
+        x = margin;
+        y = margin + (inner_h - rect_h) / 2;
+        break;
+    case OSD_POS_MID_MID:
+        x = margin + (inner_w - rect_w) / 2;
+        y = margin + (inner_h - rect_h) / 2;
+        break;
+    case OSD_POS_MID_RIGHT:
+        x = o->w - margin - rect_w;
+        y = margin + (inner_h - rect_h) / 2;
+        break;
+    case OSD_POS_BOTTOM_LEFT:
+        x = margin;
+        y = o->h - margin - rect_h;
+        break;
+    case OSD_POS_BOTTOM_MID:
+        x = margin + (inner_w - rect_w) / 2;
+        y = o->h - margin - rect_h;
+        break;
+    case OSD_POS_BOTTOM_RIGHT:
+    default:
+        x = o->w - margin - rect_w;
+        y = o->h - margin - rect_h;
+        break;
+    }
+
+    if (x < margin) {
+        x = margin;
+    }
+    if (y < margin) {
+        y = margin;
+    }
+
+    if (x + rect_w > o->w - margin) {
+        x = o->w - margin - rect_w;
+    }
+    if (y + rect_h > o->h - margin) {
+        y = o->h - margin - rect_h;
+    }
+
+    if (x < 0) {
+        x = 0;
+    }
+    if (y < 0) {
+        y = 0;
+    }
+
+    *out_x = x;
+    *out_y = y;
+}
+
+static void osd_plot_reset(OSD *o, const AppCfg *cfg) {
+    o->plot_window_seconds = 60;
+    o->plot_position = OSD_POS_BOTTOM_LEFT;
+    o->plot_sum = 0.0;
+    o->plot_size = 0;
+    o->plot_cursor = 0;
+    o->plot_latest = 0.0;
+    o->plot_min = 0.0;
+    o->plot_max = 0.0;
+    o->plot_avg = 0.0;
+    memset(o->plot_samples, 0, sizeof(o->plot_samples));
+
+    int margin = o->margin_px;
+    int max_columns_by_width = o->scale > 0 ? (o->w - 2 * margin) / o->scale : (o->w - 2 * margin);
+    if (max_columns_by_width < 2) {
+        max_columns_by_width = 2;
+    }
+
+    int desired_columns = cfg->osd_refresh_ms > 0
+                              ? (int)((o->plot_window_seconds * 1000 + cfg->osd_refresh_ms - 1) / cfg->osd_refresh_ms)
+                              : o->plot_window_seconds;
+    if (desired_columns < 2) {
+        desired_columns = 2;
+    }
+
+    int capacity = desired_columns;
+    if (capacity > max_columns_by_width) {
+        capacity = max_columns_by_width;
+    }
+    if (capacity > OSD_PLOT_MAX_SAMPLES) {
+        capacity = OSD_PLOT_MAX_SAMPLES;
+    }
+    if (capacity < 2) {
+        capacity = 2;
+    }
+
+    o->plot_capacity = capacity;
+    o->plot_w = o->plot_capacity * (o->scale > 0 ? o->scale : 1);
+    int plot_target_h = 120 * (o->scale > 0 ? o->scale : 1);
+    if (plot_target_h > o->h - 2 * margin) {
+        plot_target_h = o->h - 2 * margin;
+    }
+    if (plot_target_h < 40 * (o->scale > 0 ? o->scale : 1)) {
+        plot_target_h = 40 * (o->scale > 0 ? o->scale : 1);
+    }
+    o->plot_h = plot_target_h;
+    osd_compute_anchor(o, o->plot_w, o->plot_h, o->plot_position, &o->plot_x, &o->plot_y);
+}
+
+static void osd_plot_push(OSD *o, double value) {
+    if (o->plot_capacity <= 0) {
+        return;
+    }
+    int next = o->plot_cursor;
+    if (o->plot_size >= o->plot_capacity) {
+        double removed = o->plot_samples[next];
+        o->plot_sum -= removed;
+        if (o->plot_sum < 0.0) {
+            o->plot_sum = 0.0;
+        }
+    } else {
+        o->plot_size++;
+    }
+    o->plot_samples[next] = value;
+    o->plot_sum += value;
+    o->plot_cursor = (next + 1) % o->plot_capacity;
+    o->plot_latest = value;
+
+    int limit = o->plot_size;
+    if (limit > o->plot_capacity) {
+        limit = o->plot_capacity;
+    }
+    double min_v = DBL_MAX;
+    double max_v = 0.0;
+    for (int i = 0; i < limit; ++i) {
+        double v = o->plot_samples[i];
+        if (v < min_v) {
+            min_v = v;
+        }
+        if (v > max_v) {
+            max_v = v;
+        }
+    }
+    if (limit == 0) {
+        min_v = 0.0;
+        max_v = 0.0;
+    } else if (min_v == DBL_MAX) {
+        min_v = 0.0;
+    }
+    o->plot_min = min_v;
+    o->plot_max = max_v;
+    o->plot_avg = limit > 0 ? (o->plot_sum / (double)limit) : 0.0;
+}
+
+static void osd_plot_draw(OSD *o) {
+    if (o->plot_capacity <= 0) {
+        return;
+    }
+    uint32_t bg = 0x40202020u;
+    uint32_t border = 0x60FFFFFFu;
+    uint32_t axis = 0x60FFFFFFu;
+    uint32_t grid = 0x30909090u;
+    uint32_t plot_color = 0xB0FF4040u;
+    uint32_t avg_color = 0x80FFD070u;
+
+    osd_fill_rect(o, o->plot_x, o->plot_y, o->plot_w, o->plot_h, bg);
+    osd_draw_rect(o, o->plot_x, o->plot_y, o->plot_w, o->plot_h, border);
+
+    int limit = o->plot_size;
+    if (limit > o->plot_capacity) {
+        limit = o->plot_capacity;
+    }
+    if (limit <= 0) {
+        return;
+    }
+
+    double max_v = o->plot_max;
+    double min_v = 0.0;
+    if (max_v < 0.1) {
+        max_v = 0.1;
+    }
+    double range = max_v - min_v;
+    if (range < 0.1) {
+        range = max_v * 0.5;
+        if (range < 0.1) {
+            range = 0.1;
+        }
+    }
+
+    int base_x = o->plot_x;
+    int base_y = o->plot_y;
+    int plot_w = o->plot_w;
+    int plot_h = o->plot_h;
+
+    // Horizontal grid lines (quartiles)
+    int grid_lines = 4;
+    for (int i = 1; i < grid_lines; ++i) {
+        int gy = base_y + (plot_h * i) / grid_lines;
+        osd_draw_hline(o, base_x, gy, plot_w, grid);
+    }
+
+    // Vertical grid lines based on window seconds (every 10s if possible)
+    int desired_secs = 10;
+    int columns_per_second = o->plot_window_seconds > 0 ? o->plot_capacity / o->plot_window_seconds : 0;
+    if (columns_per_second > 0) {
+        int step_cols = columns_per_second * desired_secs;
+        if (step_cols < columns_per_second) {
+            step_cols = columns_per_second;
+        }
+        if (step_cols > 0) {
+            for (int col = step_cols; col < o->plot_capacity; col += step_cols) {
+                int gx = base_x + col * (o->scale > 0 ? o->scale : 1);
+                if (gx >= base_x + plot_w) {
+                    break;
+                }
+                osd_draw_vline(o, gx, base_y, plot_h, grid);
+            }
+        }
+    }
+
+    // Axis lines
+    osd_draw_hline(o, base_x, base_y + plot_h - (o->scale > 0 ? o->scale : 1), plot_w, axis);
+    osd_draw_vline(o, base_x, base_y, plot_h, axis);
+
+    // Average line
+    if (o->plot_avg > 0.0) {
+        double norm = (o->plot_avg - min_v) / range;
+        if (norm < 0.0) {
+            norm = 0.0;
+        }
+        if (norm > 1.0) {
+            norm = 1.0;
+        }
+        int ay = base_y + plot_h - 1 - (int)(norm * (plot_h - 1));
+        osd_draw_hline(o, base_x, ay, plot_w, avg_color);
+    }
+
+    int start_idx = (o->plot_size >= o->plot_capacity) ? o->plot_cursor : 0;
+    int prev_x = -1;
+    int prev_y = -1;
+    int prev_idx = -1;
+    int scale = o->scale > 0 ? o->scale : 1;
+
+    for (int i = 0; i < limit; ++i) {
+        int idx = (start_idx + i) % o->plot_capacity;
+        double value = o->plot_samples[idx];
+        double norm = (value - min_v) / range;
+        if (norm < 0.0) {
+            norm = 0.0;
+        }
+        if (norm > 1.0) {
+            norm = 1.0;
+        }
+        int x = base_x + idx * scale;
+        if (x >= base_x + plot_w) {
+            continue;
+        }
+        int y = base_y + plot_h - 1 - (int)(norm * (plot_h - 1));
+        if (prev_x >= 0 && idx > prev_idx) {
+            osd_draw_line(o, prev_x, prev_y, x, y, plot_color);
+        }
+        osd_fill_rect(o, x, y, scale, scale, plot_color);
+        prev_x = x;
+        prev_y = y;
+        prev_idx = idx;
+        if (i + 1 < limit) {
+            int next_idx = (start_idx + i + 1) % o->plot_capacity;
+            if (next_idx < idx) {
+                prev_x = -1;
+                prev_idx = -1;
+            }
+        }
     }
 }
 
@@ -517,14 +905,26 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
 
     o->scale = (ms->mode_w >= 1280) ? 2 : 1;
-    o->w = 800 * o->scale;
-    o->h = 160 * o->scale;
+    o->w = 960 * o->scale;
+    o->h = 360 * o->scale;
+    o->margin_px = 12 * o->scale;
+
+    if (o->w > ms->mode_w) {
+        o->w = ms->mode_w / 2;
+    }
+    if (o->h > ms->mode_h) {
+        o->h = ms->mode_h / 2;
+    }
+
+    o->margin_px = clampi(o->margin_px, 8, o->w / 4);
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");
         o->enabled = 0;
         return -1;
     }
+
+    osd_plot_reset(o, cfg);
 
     osd_clear(o, 0x80000000u);
     if (osd_commit_enable(fd, ms->crtc_id, o) != 0) {
@@ -546,21 +946,31 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
 
     osd_clear(o, 0x20000000u);
 
+    int margin = o->margin_px;
+    int text_x = margin;
+    int text_y = margin;
+    int line_advance = (8 + 1) * o->scale;
+    uint32_t text_color = 0xB0FFFFFFu;
+
     char line1[128];
     snprintf(line1, sizeof(line1), "HDMI %dx%d@%d plane=%d", ms->mode_w, ms->mode_h, ms->mode_hz, cfg->plane_id);
-    osd_draw_text(o, 10 * o->scale, 10 * o->scale, line1, 0xB0FFFFFFu, o->scale);
+    osd_draw_text(o, text_x, text_y, line1, text_color, o->scale);
+    text_y += line_advance;
 
     char line2[128];
     snprintf(line2, sizeof(line2), "UDP:%d PTv=%d PTa=%d lat=%dms", cfg->udp_port, cfg->vid_pt, cfg->aud_pt, cfg->latency_ms);
-    osd_draw_text(o, 10 * o->scale, 30 * o->scale, line2, 0xB0FFFFFFu, o->scale);
+    osd_draw_text(o, text_x, text_y, line2, text_color, o->scale);
+    text_y += line_advance;
 
     char line3[128];
     snprintf(line3, sizeof(line3), "Pipeline: %s restarts=%d%s", ps->state == PIPELINE_RUNNING ? "RUN" : "STOP",
              restart_count, audio_disabled ? " audio=fakesink" : "");
-    osd_draw_text(o, 10 * o->scale, 50 * o->scale, line3, 0xB0FFFFFFu, o->scale);
+    osd_draw_text(o, text_x, text_y, line3, text_color, o->scale);
+    text_y += line_advance;
 
     UdpReceiverStats stats;
-    if (pipeline_get_receiver_stats(ps, &stats) == 0) {
+    int have_stats = (pipeline_get_receiver_stats(ps, &stats) == 0);
+    if (have_stats) {
         double jitter_ms = stats.jitter / 90.0;
         double jitter_avg_ms = stats.jitter_avg / 90.0;
         char line4[160];
@@ -569,13 +979,34 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
                  (unsigned long long)stats.video_packets, (unsigned long long)stats.lost_packets,
                  (unsigned long long)stats.reordered_packets, (unsigned long long)stats.duplicate_packets, jitter_ms,
                  jitter_avg_ms, stats.bitrate_mbps, stats.bitrate_avg_mbps);
-        osd_draw_text(o, 10 * o->scale, 70 * o->scale, line4, 0xB0FFFFFFu, o->scale);
+        osd_draw_text(o, text_x, text_y, line4, text_color, o->scale);
+        text_y += line_advance;
 
         char line5[160];
         snprintf(line5, sizeof(line5), "Frames=%llu incomplete=%llu last=%lluB avg=%.0fB seq=%u",
                  (unsigned long long)stats.frame_count, (unsigned long long)stats.incomplete_frames,
                  (unsigned long long)stats.last_frame_bytes, stats.frame_size_avg, stats.expected_sequence);
-        osd_draw_text(o, 10 * o->scale, 90 * o->scale, line5, 0xB0FFFFFFu, o->scale);
+        osd_draw_text(o, text_x, text_y, line5, text_color, o->scale);
+
+        osd_plot_push(o, stats.bitrate_mbps);
+    }
+
+    osd_plot_draw(o);
+
+    int plot_text_x = o->plot_x + 6 * o->scale;
+    int plot_text_y = o->plot_y + 6 * o->scale;
+    if (o->plot_size > 0) {
+        char plot_line1[160];
+        snprintf(plot_line1, sizeof(plot_line1), "Bitrate %.2f Mbps avg=%.2f", o->plot_latest, o->plot_avg);
+        osd_draw_text(o, plot_text_x, plot_text_y, plot_line1, text_color, o->scale);
+        plot_text_y += line_advance;
+        char plot_line2[160];
+        snprintf(plot_line2, sizeof(plot_line2), "min=%.2f max=%.2f window=%ds", o->plot_min, o->plot_max,
+                 o->plot_window_seconds);
+        osd_draw_text(o, plot_text_x, plot_text_y, plot_line2, text_color, o->scale);
+    } else {
+        const char *waiting = have_stats ? "Collecting bitrate samples..." : "Bitrate stats unavailable";
+        osd_draw_text(o, plot_text_x, plot_text_y, waiting, text_color, o->scale);
     }
 
     osd_commit_touch(fd, o->crtc_id, o);
