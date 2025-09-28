@@ -2,6 +2,8 @@ CC ?= gcc
 PKG_CONFIG ?= pkg-config
 PKG_DRMCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags libdrm libudev)
 PKG_DRMLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs libdrm libudev)
+PKG_GSTCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags gstreamer-1.0 gstreamer-video-1.0)
+PKG_GSTLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs gstreamer-1.0 gstreamer-video-1.0)
 
 CFLAGS ?= -O2 -Wall
 CFLAGS += -Iinclude
@@ -11,10 +13,20 @@ else
 CFLAGS += $(PKG_DRMCFLAGS)
 endif
 
+ifneq ($(strip $(PKG_GSTCFLAGS)),)
+CFLAGS += $(PKG_GSTCFLAGS)
+endif
+
 ifneq ($(strip $(PKG_DRMLIBS)),)
 LDFLAGS += $(PKG_DRMLIBS)
 else
 LDFLAGS += -ldrm -ludev
+endif
+
+ifneq ($(strip $(PKG_GSTLIBS)),)
+LDFLAGS += $(PKG_GSTLIBS)
+else
+LDFLAGS += -lgstreamer-1.0 -lgstvideo-1.0 -lgobject-2.0 -lglib-2.0
 endif
 
 SRC := $(wildcard src/*.c)
