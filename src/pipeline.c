@@ -29,14 +29,22 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
     GstElement *appsrc_elem = gst_element_factory_make("appsrc", "udp_appsrc");
     CHECK_ELEM(appsrc_elem, "appsrc");
 
-    GstCaps *caps = gst_caps_new_simple("application/x-rtp", NULL);
-    g_object_set(appsrc_elem, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
-                 GST_APP_STREAM_TYPE_STREAM, "block", TRUE, "caps", caps, NULL);
-    gst_caps_unref(caps);
+    GstCaps *caps = gst_caps_new_empty_simple("application/x-rtp");
+    if (caps == NULL) {
+        LOGE("Failed to allocate RTP caps for appsrc");
+        goto fail;
+    }
+
+    g_object_set(appsrc_elem, "is-live", TRUE, "format", GST_FORMAT_BYTES, "stream-type",
+                 GST_APP_STREAM_TYPE_STREAM, "block", FALSE, "max-bytes", (guint64)(4 * 1024 * 1024),
+                 NULL);
 
     GstAppSrc *appsrc = GST_APP_SRC(appsrc_elem);
+    gst_app_src_set_caps(appsrc, caps);
+    gst_caps_unref(caps);
+    caps = NULL;
     gst_app_src_set_latency(appsrc, 0, 0);
-    gst_app_src_set_max_bytes(appsrc, 0);
+    gst_app_src_set_max_bytes(appsrc, 4 * 1024 * 1024);
 
     UdpReceiver *receiver = udp_receiver_create(cfg->udp_port, cfg->vid_pt, cfg->aud_pt, appsrc);
     if (receiver == NULL) {
@@ -52,6 +60,9 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
     return appsrc_elem;
 
 fail:
+    if (caps != NULL) {
+        gst_caps_unref(caps);
+    }
     if (receiver != NULL) {
         udp_receiver_destroy(receiver);
     }

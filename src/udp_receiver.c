@@ -393,8 +393,8 @@ static int setup_socket(struct UdpReceiver *ur) {
         LOGW("UDP receiver: setsockopt(SO_RCVTIMEO) failed: %s", g_strerror(errno));
     }
 
-    int buf_kb = 4 * 1024;
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_kb, sizeof(buf_kb)) < 0) {
+    int buf_bytes = 4 * 1024 * 1024;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_bytes, sizeof(buf_bytes)) < 0) {
         LOGW("UDP receiver: setsockopt(SO_RCVBUF) failed: %s", g_strerror(errno));
     }
 
