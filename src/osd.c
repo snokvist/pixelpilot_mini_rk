@@ -77,9 +77,11 @@ static const uint8_t *font5x7(char c) {
     static const uint8_t COL[7] = {0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00};
     static const uint8_t SLH[7] = {0x01, 0x02, 0x04, 0x04, 0x08, 0x10, 0x10};
     static const uint8_t DASH[7] = {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00};
+    static const uint8_t UND[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1F};
     static const uint8_t DOT[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x06};
-    static const uint8_t LBR[7] = {0x06, 0x04, 0x04, 0x04, 0x04, 0x04, 0x06};
-    static const uint8_t RBR[7] = {0x18, 0x08, 0x08, 0x08, 0x08, 0x08, 0x18};
+    static const uint8_t AT[7] = {0x0E, 0x11, 0x17, 0x15, 0x17, 0x10, 0x0E};
+    static const uint8_t LBR[7] = {0x06, 0x08, 0x10, 0x10, 0x10, 0x08, 0x06};
+    static const uint8_t RBR[7] = {0x18, 0x04, 0x02, 0x02, 0x02, 0x04, 0x18};
     static const uint8_t SPC2[7] = {0, 0, 0, 0, 0, 0, 0};
 
     switch (c) {
@@ -122,7 +124,11 @@ static const uint8_t *font5x7(char c) {
     case ':': return COL;
     case '/': return SLH;
     case '-': return DASH;
+    case '_': return UND;
     case '.': return DOT;
+    case '@': return AT;
+    case '(': return LBR;
+    case ')': return RBR;
     case '[': return LBR;
     case ']': return RBR;
     case ' ': return SPC;
@@ -131,19 +137,28 @@ static const uint8_t *font5x7(char c) {
 }
 
 static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale) {
+    if (c >= 'a' && c <= 'z') {
+        c = (char)(c - 'a' + 'A');
+    }
     const uint8_t *glyph = font5x7(c);
     uint32_t *fb = (uint32_t *)o->fb.map;
     int pitch = o->fb.pitch / 4;
     for (int row = 0; row < 7; ++row) {
         uint8_t bits = glyph[row];
         for (int col = 0; col < 5; ++col) {
-            uint32_t color = (bits & (1 << (4 - col))) ? argb : (argb & 0x00FFFFFFu);
+            if (!(bits & (1 << (4 - col)))) {
+                continue;
+            }
             for (int sy = 0; sy < scale; ++sy) {
+                int py = y + row * scale + sy;
+                if (py < 0 || py >= o->h) {
+                    continue;
+                }
+                uint32_t *row_px = fb + py * pitch;
                 for (int sx = 0; sx < scale; ++sx) {
                     int px = x + col * scale + sx;
-                    int py = y + row * scale + sy;
-                    if (px >= 0 && px < o->w && py >= 0 && py < o->h) {
-                        fb[py * pitch + px] = color;
+                    if (px >= 0 && px < o->w) {
+                        row_px[px] = argb;
                     }
                 }
             }
