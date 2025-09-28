@@ -51,7 +51,8 @@ int main(int argc, char **argv) {
     struct timespec window_start = {0, 0};
 
     ModesetResult ms = {0};
-    PipelineState ps = {.pid = 0, .pgid = 0, .state = PIPELINE_STOPPED};
+    PipelineState ps = {0};
+    ps.state = PIPELINE_STOPPED;
     UdevMonitor um = {0};
     OSD osd;
     osd_init(&osd);
