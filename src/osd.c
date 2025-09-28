@@ -517,8 +517,8 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
 
     o->scale = (ms->mode_w >= 1280) ? 2 : 1;
-    o->w = 480 * o->scale;
-    o->h = 120 * o->scale;
+    o->w = 800 * o->scale;
+    o->h = 160 * o->scale;
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");
@@ -558,6 +558,25 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     snprintf(line3, sizeof(line3), "Pipeline: %s restarts=%d%s", ps->state == PIPELINE_RUNNING ? "RUN" : "STOP",
              restart_count, audio_disabled ? " audio=fakesink" : "");
     osd_draw_text(o, 10 * o->scale, 50 * o->scale, line3, 0xB0FFFFFFu, o->scale);
+
+    UdpReceiverStats stats;
+    if (pipeline_get_receiver_stats(ps, &stats) == 0) {
+        double jitter_ms = stats.jitter / 90.0;
+        double jitter_avg_ms = stats.jitter_avg / 90.0;
+        char line4[160];
+        snprintf(line4, sizeof(line4),
+                 "RTP vpkts=%llu loss=%llu reo=%llu dup=%llu jitter=%.2f/%.2fms br=%.2f/%.2fMbps",
+                 (unsigned long long)stats.video_packets, (unsigned long long)stats.lost_packets,
+                 (unsigned long long)stats.reordered_packets, (unsigned long long)stats.duplicate_packets, jitter_ms,
+                 jitter_avg_ms, stats.bitrate_mbps, stats.bitrate_avg_mbps);
+        osd_draw_text(o, 10 * o->scale, 70 * o->scale, line4, 0xB0FFFFFFu, o->scale);
+
+        char line5[160];
+        snprintf(line5, sizeof(line5), "Frames=%llu incomplete=%llu last=%lluB avg=%.0fB seq=%u",
+                 (unsigned long long)stats.frame_count, (unsigned long long)stats.incomplete_frames,
+                 (unsigned long long)stats.last_frame_bytes, stats.frame_size_avg, stats.expected_sequence);
+        osd_draw_text(o, 10 * o->scale, 90 * o->scale, line5, 0xB0FFFFFFu, o->scale);
+    }
 
     osd_commit_touch(fd, o->crtc_id, o);
 }
