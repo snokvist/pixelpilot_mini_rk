@@ -362,17 +362,13 @@ static void osd_plot_reset(OSD *o, const AppCfg *cfg) {
     o->plot_size = 0;
     o->plot_cursor = 0;
     o->plot_latest = 0.0;
-    o->plot_min = 0.0;
+    o->plot_min = DBL_MAX;
     o->plot_max = 0.0;
     o->plot_avg = 0.0;
     memset(o->plot_samples, 0, sizeof(o->plot_samples));
+    o->plot_clear_on_next_draw = 0;
 
     int margin = o->margin_px;
-    int max_columns_by_width = o->scale > 0 ? (o->w - 2 * margin) / o->scale : (o->w - 2 * margin);
-    if (max_columns_by_width < 2) {
-        max_columns_by_width = 2;
-    }
-
     int desired_columns = cfg->osd_refresh_ms > 0
                               ? (int)((o->plot_window_seconds * 1000 + cfg->osd_refresh_ms - 1) / cfg->osd_refresh_ms)
                               : o->plot_window_seconds;
@@ -381,9 +377,6 @@ static void osd_plot_reset(OSD *o, const AppCfg *cfg) {
     }
 
     int capacity = desired_columns;
-    if (capacity > max_columns_by_width) {
-        capacity = max_columns_by_width;
-    }
     if (capacity > OSD_PLOT_MAX_SAMPLES) {
         capacity = OSD_PLOT_MAX_SAMPLES;
     }
@@ -392,62 +385,72 @@ static void osd_plot_reset(OSD *o, const AppCfg *cfg) {
     }
 
     o->plot_capacity = capacity;
-    o->plot_w = o->plot_capacity * (o->scale > 0 ? o->scale : 1);
-    int plot_target_h = 80 * (o->scale > 0 ? o->scale : 1);
+    int scale = o->scale > 0 ? o->scale : 1;
+    int target_plot_w = 360 * scale;
+    int available_w = o->w - 2 * margin;
+    int min_plot_w = 160 * scale;
+    if (available_w <= 0) {
+        target_plot_w = min_plot_w;
+    } else {
+        if (target_plot_w > available_w) {
+            target_plot_w = available_w;
+        }
+        if (target_plot_w < min_plot_w) {
+            target_plot_w = available_w < min_plot_w ? available_w : min_plot_w;
+        }
+        if (target_plot_w <= 0) {
+            target_plot_w = available_w;
+        }
+    }
+    if (target_plot_w <= 0) {
+        target_plot_w = min_plot_w;
+    }
+    o->plot_w = target_plot_w;
+    int plot_target_h = 80 * scale;
     if (plot_target_h > o->h - 2 * margin) {
         plot_target_h = o->h - 2 * margin;
     }
-    if (plot_target_h < 48 * (o->scale > 0 ? o->scale : 1)) {
-        plot_target_h = 48 * (o->scale > 0 ? o->scale : 1);
+    if (plot_target_h < 48 * scale) {
+        plot_target_h = 48 * scale;
     }
     o->plot_h = plot_target_h;
     osd_compute_anchor(o, o->plot_w, o->plot_h, o->plot_position, &o->plot_x, &o->plot_y);
     osd_store_rect(&o->plot_rect, 0, 0, 0, 0);
+    osd_store_rect(&o->plot_label_rect, 0, 0, 0, 0);
+    osd_store_rect(&o->plot_stats_rect, 0, 0, 0, 0);
 }
 
 static void osd_plot_push(OSD *o, double value) {
     if (o->plot_capacity <= 0) {
         return;
     }
-    int next = o->plot_cursor;
-    if (o->plot_size >= o->plot_capacity) {
-        double removed = o->plot_samples[next];
-        o->plot_sum -= removed;
-        if (o->plot_sum < 0.0) {
-            o->plot_sum = 0.0;
-        }
-    } else {
-        o->plot_size++;
+    if (o->plot_cursor >= o->plot_capacity) {
+        o->plot_cursor = 0;
     }
-    o->plot_samples[next] = value;
-    o->plot_sum += value;
-    o->plot_cursor = (next + 1) % o->plot_capacity;
-    o->plot_latest = value;
+    if (o->plot_cursor == 0 && o->plot_size >= o->plot_capacity) {
+        o->plot_clear_on_next_draw = 1;
+        o->plot_size = 0;
+        o->plot_sum = 0.0;
+        o->plot_min = DBL_MAX;
+        o->plot_max = 0.0;
+        o->plot_avg = 0.0;
+        o->plot_latest = 0.0;
+    }
 
-    int limit = o->plot_size;
-    if (limit > o->plot_capacity) {
-        limit = o->plot_capacity;
+    o->plot_samples[o->plot_cursor] = value;
+    o->plot_cursor++;
+    if (o->plot_size < o->plot_cursor) {
+        o->plot_size = o->plot_cursor;
     }
-    double min_v = DBL_MAX;
-    double max_v = 0.0;
-    for (int i = 0; i < limit; ++i) {
-        double v = o->plot_samples[i];
-        if (v < min_v) {
-            min_v = v;
-        }
-        if (v > max_v) {
-            max_v = v;
-        }
+    o->plot_sum += value;
+    if (o->plot_size == 1 || value < o->plot_min) {
+        o->plot_min = value;
     }
-    if (limit == 0) {
-        min_v = 0.0;
-        max_v = 0.0;
-    } else if (min_v == DBL_MAX) {
-        min_v = 0.0;
+    if (value > o->plot_max) {
+        o->plot_max = value;
     }
-    o->plot_min = min_v;
-    o->plot_max = max_v;
-    o->plot_avg = limit > 0 ? (o->plot_sum / (double)limit) : 0.0;
+    o->plot_avg = o->plot_size > 0 ? (o->plot_sum / (double)o->plot_size) : 0.0;
+    o->plot_latest = value;
 }
 
 static void osd_plot_draw(OSD *o) {
@@ -473,17 +476,18 @@ static void osd_plot_draw(OSD *o) {
     osd_store_rect(&o->plot_rect, base_x, base_y, plot_w, plot_h);
 
     int limit = o->plot_size;
-    if (limit > o->plot_capacity) {
-        limit = o->plot_capacity;
-    }
-    if (limit <= 0) {
-        return;
+    if (o->plot_clear_on_next_draw) {
+        o->plot_clear_on_next_draw = 0;
+        limit = 0;
     }
 
-    double max_v = o->plot_max;
-    double min_v = 0.0;
+    double max_v = (limit > 0) ? o->plot_max : 0.0;
+    double min_v = (limit > 0 && o->plot_min != DBL_MAX) ? o->plot_min : 0.0;
     if (max_v < 0.1) {
         max_v = 0.1;
+    }
+    if (max_v < min_v) {
+        max_v = min_v;
     }
     double range = max_v - min_v;
     if (range < 0.1) {
@@ -502,26 +506,26 @@ static void osd_plot_draw(OSD *o) {
 
     // Vertical grid lines based on window seconds (every 10s if possible)
     int desired_secs = 10;
-    int columns_per_second = o->plot_window_seconds > 0 ? o->plot_capacity / o->plot_window_seconds : 0;
-    if (columns_per_second > 0) {
-        int step_cols = columns_per_second * desired_secs;
-        if (step_cols < columns_per_second) {
-            step_cols = columns_per_second;
+    double px_per_sec = (o->plot_window_seconds > 0 && plot_w > 1)
+                            ? (double)(plot_w - 1) / (double)o->plot_window_seconds
+                            : 0.0;
+    if (px_per_sec > 0.0) {
+        int step_px = (int)(px_per_sec * desired_secs + 0.5);
+        if (step_px < (o->scale > 0 ? o->scale : 1)) {
+            step_px = (o->scale > 0 ? o->scale : 1);
         }
-        if (step_cols > 0) {
-            for (int col = step_cols; col < o->plot_capacity; col += step_cols) {
-                int gx = base_x + col * (o->scale > 0 ? o->scale : 1);
-                if (gx >= base_x + plot_w) {
-                    break;
-                }
-                osd_draw_vline(o, gx, base_y, plot_h, grid);
-            }
+        for (int gx = step_px; gx < plot_w; gx += step_px) {
+            osd_draw_vline(o, base_x + gx, base_y, plot_h, grid);
         }
     }
 
     // Axis lines
     osd_draw_hline(o, base_x, base_y + plot_h - (o->scale > 0 ? o->scale : 1), plot_w, axis);
     osd_draw_vline(o, base_x, base_y, plot_h, axis);
+
+    if (limit <= 0) {
+        return;
+    }
 
     // Average line
     if (o->plot_avg > 0.0) {
@@ -536,15 +540,13 @@ static void osd_plot_draw(OSD *o) {
         osd_draw_hline(o, base_x, ay, plot_w, avg_color);
     }
 
-    int start_idx = (o->plot_size >= o->plot_capacity) ? o->plot_cursor : 0;
     int prev_x = -1;
     int prev_y = -1;
-    int prev_idx = -1;
     int scale = o->scale > 0 ? o->scale : 1;
+    double step = (o->plot_capacity > 1) ? (double)(plot_w - 1) / (double)(o->plot_capacity - 1) : 0.0;
 
     for (int i = 0; i < limit; ++i) {
-        int idx = (start_idx + i) % o->plot_capacity;
-        double value = o->plot_samples[idx];
+        double value = o->plot_samples[i];
         double norm = (value - min_v) / range;
         if (norm < 0.0) {
             norm = 0.0;
@@ -552,26 +554,109 @@ static void osd_plot_draw(OSD *o) {
         if (norm > 1.0) {
             norm = 1.0;
         }
-        int x = base_x + idx * scale;
+        int x = base_x + (int)(i * step + 0.5);
         if (x >= base_x + plot_w) {
-            continue;
+            x = base_x + plot_w - 1;
         }
         int y = base_y + plot_h - 1 - (int)(norm * (plot_h - 1));
-        if (prev_x >= 0 && idx > prev_idx) {
+        if (prev_x >= 0 && x >= prev_x) {
             osd_draw_line(o, prev_x, prev_y, x, y, plot_color);
         }
         osd_fill_rect(o, x, y, scale, scale, plot_color);
         prev_x = x;
         prev_y = y;
-        prev_idx = idx;
-        if (i + 1 < limit) {
-            int next_idx = (start_idx + i + 1) % o->plot_capacity;
-            if (next_idx < idx) {
-                prev_x = -1;
-                prev_idx = -1;
-            }
+    }
+}
+
+static void osd_plot_draw_label(OSD *o, const char *text) {
+    osd_clear_rect(o, &o->plot_label_rect);
+    if (text == NULL || text[0] == '\0') {
+        osd_store_rect(&o->plot_label_rect, 0, 0, 0, 0);
+        return;
+    }
+    int scale = o->scale > 0 ? o->scale : 1;
+    int pad = 4 * scale;
+    int line_height = 8 * scale;
+    int text_w = (int)strlen(text) * (8 + 1) * scale;
+    int box_w = text_w + 2 * pad;
+    int box_h = line_height + 2 * pad;
+    int x = o->plot_x + pad;
+    int y = o->plot_y + pad;
+    if (x + box_w > o->plot_x + o->plot_w - pad) {
+        x = o->plot_x + o->plot_w - pad - box_w;
+    }
+    if (y + box_h > o->plot_y + o->plot_h - pad) {
+        y = o->plot_y + o->plot_h - pad - box_h;
+    }
+    if (x < o->margin_px) {
+        x = o->margin_px;
+    }
+    if (y < o->margin_px) {
+        y = o->margin_px;
+    }
+    uint32_t bg = 0x50202020u;
+    uint32_t border = 0x60FFFFFFu;
+    uint32_t text_color = 0xB0FFFFFFu;
+    osd_fill_rect(o, x, y, box_w, box_h, bg);
+    osd_draw_rect(o, x, y, box_w, box_h, border);
+    osd_draw_text(o, x + pad, y + pad, text, text_color, o->scale);
+    osd_store_rect(&o->plot_label_rect, x, y, box_w, box_h);
+}
+
+static void osd_plot_draw_footer(OSD *o, const char **lines, int line_count) {
+    osd_clear_rect(o, &o->plot_stats_rect);
+    if (lines == NULL || line_count <= 0) {
+        osd_store_rect(&o->plot_stats_rect, 0, 0, 0, 0);
+        return;
+    }
+    int scale = o->scale > 0 ? o->scale : 1;
+    int pad = 6 * scale;
+    int line_advance = (8 + 1) * scale;
+    int max_line_w = 0;
+    for (int i = 0; i < line_count; ++i) {
+        if (lines[i] == NULL) {
+            continue;
+        }
+        int len = (int)strlen(lines[i]);
+        int w = len * (8 + 1) * scale;
+        if (w > max_line_w) {
+            max_line_w = w;
         }
     }
+    if (max_line_w <= 0) {
+        osd_store_rect(&o->plot_stats_rect, 0, 0, 0, 0);
+        return;
+    }
+    int box_w = max_line_w + 2 * pad;
+    int box_h = line_count * line_advance + 2 * pad;
+    int x = o->plot_x;
+    int y = o->plot_y + o->plot_h + scale * 4;
+    if (y + box_h > o->h - o->margin_px) {
+        y = o->plot_y + o->plot_h - box_h - scale * 4;
+        if (y < o->margin_px) {
+            y = o->margin_px;
+        }
+    }
+    if (x + box_w > o->w - o->margin_px) {
+        x = o->w - o->margin_px - box_w;
+        if (x < o->margin_px) {
+            x = o->margin_px;
+        }
+    }
+    uint32_t bg = 0x40202020u;
+    uint32_t border = 0x60FFFFFFu;
+    uint32_t text_color = 0xB0FFFFFFu;
+    osd_fill_rect(o, x, y, box_w, box_h, bg);
+    osd_draw_rect(o, x, y, box_w, box_h, border);
+    int draw_y = y + pad;
+    for (int i = 0; i < line_count; ++i) {
+        if (lines[i] == NULL) {
+            continue;
+        }
+        osd_draw_text(o, x + pad, draw_y, lines[i], text_color, o->scale);
+        draw_y += line_advance;
+    }
+    osd_store_rect(&o->plot_stats_rect, x, y, box_w, box_h);
 }
 
 typedef struct {
@@ -985,6 +1070,10 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     char text_lines[12][192];
     const char *line_ptrs[12];
     int line_count = 0;
+    char plot_lines[3][128];
+    const char *plot_line_ptrs[3];
+    int plot_line_count = 0;
+    int plot_line_cap = (int)(sizeof(plot_line_ptrs) / sizeof(plot_line_ptrs[0]));
 
     snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "HDMI %dx%d@%d plane=%d", ms->mode_w,
              ms->mode_h, ms->mode_hz, cfg->plane_id);
@@ -1029,20 +1118,31 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     }
 
     if (o->plot_size > 0) {
-        snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "Bitrate %.2f Mbps avg=%.2f", o->plot_latest,
-                 o->plot_avg);
-        line_ptrs[line_count] = text_lines[line_count];
-        line_count++;
-
-        snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "min=%.2f max=%.2f window=%ds", o->plot_min,
-                 o->plot_max, o->plot_window_seconds);
-        line_ptrs[line_count] = text_lines[line_count];
-        line_count++;
+        if (plot_line_count < plot_line_cap) {
+            snprintf(plot_lines[plot_line_count], sizeof(plot_lines[plot_line_count]), "Latest %.2f Mbps  Avg %.2f",
+                     o->plot_latest, o->plot_avg);
+            plot_line_ptrs[plot_line_count] = plot_lines[plot_line_count];
+            plot_line_count++;
+        }
+        if (plot_line_count < plot_line_cap) {
+            double min_v = (o->plot_min == DBL_MAX) ? 0.0 : o->plot_min;
+            snprintf(plot_lines[plot_line_count], sizeof(plot_lines[plot_line_count]), "Min %.2f  Max %.2f",
+                     min_v, o->plot_max);
+            plot_line_ptrs[plot_line_count] = plot_lines[plot_line_count];
+            plot_line_count++;
+        }
+        if (plot_line_count < plot_line_cap) {
+            snprintf(plot_lines[plot_line_count], sizeof(plot_lines[plot_line_count]), "Window %ds", o->plot_window_seconds);
+            plot_line_ptrs[plot_line_count] = plot_lines[plot_line_count];
+            plot_line_count++;
+        }
     } else {
-        const char *waiting = have_stats ? "Collecting bitrate samples..." : "Bitrate stats unavailable";
-        snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "%s", waiting);
-        line_ptrs[line_count] = text_lines[line_count];
-        line_count++;
+        if (plot_line_count < plot_line_cap) {
+            const char *waiting = have_stats ? "Collecting bitrate samples..." : "Bitrate stats unavailable";
+            snprintf(plot_lines[plot_line_count], sizeof(plot_lines[plot_line_count]), "%s", waiting);
+            plot_line_ptrs[plot_line_count] = plot_lines[plot_line_count];
+            plot_line_count++;
+        }
     }
 
     osd_clear_rect(o, &o->text_rect);
@@ -1091,6 +1191,8 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     osd_store_rect(&o->text_rect, text_box_x, text_box_y, text_box_w, text_box_h);
 
     osd_plot_draw(o);
+    osd_plot_draw_label(o, "Mbit/s");
+    osd_plot_draw_footer(o, plot_line_ptrs, plot_line_count);
 
     osd_commit_touch(fd, o->crtc_id, o);
 }

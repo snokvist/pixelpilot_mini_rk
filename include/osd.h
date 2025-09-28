@@ -72,7 +72,10 @@ typedef struct OSD {
     int plot_y;
     OSDWidgetPosition plot_position;
     OSDRect plot_rect;
+    OSDRect plot_label_rect;
+    OSDRect plot_stats_rect;
     OSDRect text_rect;
+    int plot_clear_on_next_draw;
 } OSD;
 
 void osd_init(OSD *osd);
