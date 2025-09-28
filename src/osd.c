@@ -123,7 +123,7 @@ static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale
             continue;
         }
         for (int col = 0; col < 8; ++col) {
-            if (!(bits & (1u << (7 - col)))) {
+            if (!(bits & (1u << col))) {
                 continue;
             }
             for (int sy = 0; sy < scale; ++sy) {
