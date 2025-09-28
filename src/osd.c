@@ -21,30 +21,6 @@
 #define DRM_PLANE_TYPE_CURSOR 2
 #endif
 
-struct OSD {
-    int enabled;
-    int active;
-    uint32_t requested_plane_id;
-    uint32_t plane_id;
-    struct DumbFB fb;
-    int w;
-    int h;
-    int scale;
-    int refresh_ms;
-    uint32_t crtc_id;
-
-    uint32_t p_fb_id, p_crtc_id, p_crtc_x, p_crtc_y, p_crtc_w, p_crtc_h;
-    uint32_t p_src_x, p_src_y, p_src_w, p_src_h;
-    uint32_t p_zpos;
-    int have_zpos;
-    uint64_t zmin, zmax;
-    uint32_t p_alpha;
-    int have_alpha;
-    uint64_t alpha_min, alpha_max;
-    uint32_t p_blend;
-    int have_blend;
-};
-
 void osd_init(OSD *o) {
     memset(o, 0, sizeof(*o));
 }
