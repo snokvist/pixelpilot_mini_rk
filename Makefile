@@ -1,8 +1,21 @@
 CC ?= gcc
+PKG_CONFIG ?= pkg-config
+PKG_DRMCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags libdrm libudev)
+PKG_DRMLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs libdrm libudev)
+
 CFLAGS ?= -O2 -Wall
 CFLAGS += -Iinclude
-CFLAGS += $(shell pkg-config --cflags libdrm libudev)
-LDFLAGS += $(shell pkg-config --libs libdrm libudev)
+ifeq ($(strip $(PKG_DRMCFLAGS)),)
+CFLAGS += -I/usr/include/libdrm
+else
+CFLAGS += $(PKG_DRMCFLAGS)
+endif
+
+ifneq ($(strip $(PKG_DRMLIBS)),)
+LDFLAGS += $(PKG_DRMLIBS)
+else
+LDFLAGS += -ldrm -ludev
+endif
 
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)

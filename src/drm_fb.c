@@ -9,6 +9,7 @@
 #include <sys/mman.h>
 
 #include <libdrm/drm.h>
+#include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
