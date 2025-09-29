@@ -332,6 +332,117 @@ static gpointer receiver_thread(gpointer data) {
             break;
         }
 
+#ifdef __linux__
+        const guint batch_size = 8;
+        struct mmsghdr msgs[batch_size];
+        struct iovec iovecs[batch_size];
+        struct sockaddr_in srcs[batch_size];
+        GstBuffer *buffers[batch_size];
+        GstMapInfo maps[batch_size];
+        guint64 arrivals[batch_size];
+        guint prepared = 0;
+        gboolean fall_back_to_single = FALSE;
+        gboolean processed_batch = FALSE;
+
+        for (guint i = 0; i < batch_size; ++i) {
+            GstBuffer *buf = gst_buffer_new_allocate(NULL, max_pkt, NULL);
+            if (buf == NULL) {
+                LOGE("UDP receiver: allocation failed");
+                g_usleep(1000);
+                fall_back_to_single = TRUE;
+                break;
+            }
+
+            GstMapInfo map;
+            if (!gst_buffer_map(buf, &map, GST_MAP_WRITE)) {
+                LOGE("UDP receiver: buffer map failed");
+                gst_buffer_unref(buf);
+                g_usleep(1000);
+                fall_back_to_single = TRUE;
+                break;
+            }
+
+            buffers[prepared] = buf;
+            maps[prepared] = map;
+            iovecs[prepared].iov_base = map.data;
+            iovecs[prepared].iov_len = max_pkt;
+            memset(&msgs[prepared], 0, sizeof(struct mmsghdr));
+            msgs[prepared].msg_hdr.msg_iov = &iovecs[prepared];
+            msgs[prepared].msg_hdr.msg_iovlen = 1;
+            msgs[prepared].msg_hdr.msg_name = &srcs[prepared];
+            msgs[prepared].msg_hdr.msg_namelen = sizeof(struct sockaddr_in);
+            prepared++;
+        }
+
+        if (prepared == 0 && !fall_back_to_single) {
+            fall_back_to_single = TRUE;
+        }
+
+        if (!fall_back_to_single && prepared > 0) {
+            int received = recvmmsg(ur->sockfd, msgs, prepared, 0, NULL);
+            if (received > 0) {
+                guint count = (guint)received;
+                for (guint i = 0; i < count; ++i) {
+                    gsize len = (gsize)msgs[i].msg_len;
+                    gst_buffer_set_size(buffers[i], len);
+                    arrivals[i] = get_time_ns();
+                }
+
+                g_mutex_lock(&ur->lock);
+                for (guint i = 0; i < count; ++i) {
+                    process_rtp(ur, maps[i].data, (gsize)msgs[i].msg_len, arrivals[i]);
+                }
+                g_mutex_unlock(&ur->lock);
+
+                for (guint i = 0; i < count; ++i) {
+                    gst_buffer_unmap(buffers[i], &maps[i]);
+                    GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, buffers[i]);
+                    if (flow != GST_FLOW_OK) {
+                        LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
+                        if (flow == GST_FLOW_FLUSHING) {
+                            g_usleep(1000);
+                        }
+                    }
+                }
+
+                for (guint i = count; i < prepared; ++i) {
+                    gst_buffer_unmap(buffers[i], &maps[i]);
+                    gst_buffer_unref(buffers[i]);
+                }
+
+                processed_batch = TRUE;
+            } else {
+                int err = errno;
+                for (guint i = 0; i < prepared; ++i) {
+                    gst_buffer_unmap(buffers[i], &maps[i]);
+                    gst_buffer_unref(buffers[i]);
+                }
+
+                if (received == 0 || err == EINTR || err == EAGAIN || err == EWOULDBLOCK) {
+                    fall_back_to_single = TRUE;
+                } else {
+                    if (!ur->stop_requested) {
+                        LOGE("UDP receiver: recvmmsg failed: %s", g_strerror(err));
+                    }
+                    break;
+                }
+            }
+        } else {
+            for (guint i = 0; i < prepared; ++i) {
+                gst_buffer_unmap(buffers[i], &maps[i]);
+                gst_buffer_unref(buffers[i]);
+            }
+        }
+
+        if (processed_batch) {
+            continue;
+        }
+
+        if (!fall_back_to_single) {
+            continue;
+        }
+#endif
+
         GstBuffer *gstbuf = gst_buffer_new_allocate(NULL, max_pkt, NULL);
         if (gstbuf == NULL) {
             LOGE("UDP receiver: allocation failed");
