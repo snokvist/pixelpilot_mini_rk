@@ -339,7 +339,6 @@ static gpointer receiver_thread(gpointer data) {
         struct sockaddr_in srcs[batch_size];
         GstBuffer *buffers[batch_size];
         GstMapInfo maps[batch_size];
-        guint64 arrivals[batch_size];
         guint prepared = 0;
         gboolean fall_back_to_single = FALSE;
         gboolean processed_batch = FALSE;
@@ -385,16 +384,12 @@ static gpointer receiver_thread(gpointer data) {
                 for (guint i = 0; i < count; ++i) {
                     gsize len = (gsize)msgs[i].msg_len;
                     gst_buffer_set_size(buffers[i], len);
-                    arrivals[i] = get_time_ns();
-                }
+                    guint64 arrival_ns = get_time_ns();
 
-                g_mutex_lock(&ur->lock);
-                for (guint i = 0; i < count; ++i) {
-                    process_rtp(ur, maps[i].data, (gsize)msgs[i].msg_len, arrivals[i]);
-                }
-                g_mutex_unlock(&ur->lock);
+                    g_mutex_lock(&ur->lock);
+                    process_rtp(ur, maps[i].data, len, arrival_ns);
+                    g_mutex_unlock(&ur->lock);
 
-                for (guint i = 0; i < count; ++i) {
                     gst_buffer_unmap(buffers[i], &maps[i]);
                     GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, buffers[i]);
                     if (flow != GST_FLOW_OK) {
