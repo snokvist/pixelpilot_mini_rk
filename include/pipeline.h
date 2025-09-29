@@ -39,5 +39,6 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps);
 void pipeline_stop(PipelineState *ps, int wait_ms_total);
 void pipeline_poll_child(PipelineState *ps);
 int pipeline_get_receiver_stats(const PipelineState *ps, UdpReceiverStats *stats);
+void pipeline_set_receiver_stats_enabled(PipelineState *ps, gboolean enabled);
 
 #endif // PIPELINE_H

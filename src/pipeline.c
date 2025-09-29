@@ -587,6 +587,19 @@ void pipeline_poll_child(PipelineState *ps) {
     }
 }
 
+void pipeline_set_receiver_stats_enabled(PipelineState *ps, gboolean enabled) {
+    if (ps == NULL) {
+        return;
+    }
+
+    g_mutex_lock(&ps->lock);
+    UdpReceiver *receiver = ps->udp_receiver;
+    if (receiver != NULL) {
+        udp_receiver_set_stats_enabled(receiver, enabled);
+    }
+    g_mutex_unlock(&ps->lock);
+}
+
 int pipeline_get_receiver_stats(const PipelineState *ps, UdpReceiverStats *stats) {
     if (ps == NULL || stats == NULL) {
         return -1;

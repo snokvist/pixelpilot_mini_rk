@@ -77,10 +77,19 @@ int main(int argc, char **argv) {
     if (connected) {
         if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
             if (cfg.osd_enable) {
-                osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd);
+                if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
+                    pipeline_set_receiver_stats_enabled(&ps, TRUE);
+                } else {
+                    pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                }
+            } else {
+                pipeline_set_receiver_stats_enabled(&ps, FALSE);
             }
             if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
                 LOGE("Failed to start pipeline");
+                pipeline_set_receiver_stats_enabled(&ps, FALSE);
+            } else {
+                pipeline_set_receiver_stats_enabled(&ps, osd_is_active(&osd) ? TRUE : FALSE);
             }
             clock_gettime(CLOCK_MONOTONIC, &window_start);
             restart_count = 0;
@@ -126,6 +135,7 @@ int main(int argc, char **argv) {
                             pipeline_stop(&ps, 700);
                         }
                         if (osd_is_active(&osd)) {
+                            pipeline_set_receiver_stats_enabled(&ps, FALSE);
                             osd_disable(fd, &osd);
                         }
                         connected = 0;
@@ -133,14 +143,22 @@ int main(int argc, char **argv) {
                         if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
                             connected = 1;
                             if (cfg.osd_enable) {
+                                pipeline_set_receiver_stats_enabled(&ps, FALSE);
                                 osd_teardown(fd, &osd);
-                                osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd);
+                                if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
+                                    pipeline_set_receiver_stats_enabled(&ps, TRUE);
+                                } else {
+                                    pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                                }
                             }
                             if (ps.state != PIPELINE_STOPPED) {
                                 pipeline_stop(&ps, 700);
                             }
                             if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
                                 LOGE("Failed to start pipeline after hotplug");
+                                pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                            } else {
+                                pipeline_set_receiver_stats_enabled(&ps, osd_is_active(&osd) ? TRUE : FALSE);
                             }
                             clock_gettime(CLOCK_MONOTONIC, &window_start);
                             restart_count = 0;
@@ -152,6 +170,7 @@ int main(int argc, char **argv) {
                             }
                             LOGW("Modeset failed; retry in %d ms", backoff_ms);
                             usleep(backoff_ms * 1000);
+                            pipeline_set_receiver_stats_enabled(&ps, FALSE);
                         }
                     }
                 }
@@ -183,6 +202,9 @@ int main(int argc, char **argv) {
             LOGW("Pipeline not running; restarting%s...", audio_disabled ? " (audio=fakesink)" : "");
             if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
                 LOGE("Restart failed");
+                pipeline_set_receiver_stats_enabled(&ps, FALSE);
+            } else {
+                pipeline_set_receiver_stats_enabled(&ps, osd_is_active(&osd) ? TRUE : FALSE);
             }
         }
     }
@@ -191,8 +213,10 @@ int main(int argc, char **argv) {
         pipeline_stop(&ps, 700);
     }
     if (osd_is_active(&osd)) {
+        pipeline_set_receiver_stats_enabled(&ps, FALSE);
         osd_disable(fd, &osd);
     }
+    pipeline_set_receiver_stats_enabled(&ps, FALSE);
     osd_teardown(fd, &osd);
     if (cfg.use_udev) {
         udev_monitor_close(&um);
