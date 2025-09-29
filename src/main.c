@@ -12,6 +12,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -34,6 +35,14 @@ int main(int argc, char **argv) {
     AppCfg cfg;
     if (parse_cli(argc, argv, &cfg) != 0) {
         return 2;
+    }
+
+    if (cfg_has_cpu_affinity(&cfg)) {
+        cpu_set_t mask;
+        cfg_get_process_affinity(&cfg, &mask);
+        if (sched_setaffinity(0, sizeof(mask), &mask) != 0) {
+            LOGW("sched_setaffinity failed: %s", strerror(errno));
+        }
     }
 
     signal(SIGINT, on_sigint);

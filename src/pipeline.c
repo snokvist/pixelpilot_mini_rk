@@ -1,10 +1,16 @@
+#define _GNU_SOURCE
+
 #include "pipeline.h"
 #include "logging.h"
 
+#include <errno.h>
 #include <glib.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define CHECK_ELEM(elem, name)                                                                      \
     do {                                                                                            \
@@ -296,6 +302,13 @@ static void release_request_pad(GstElement *tee, GstPad **pad) {
 
 static gpointer bus_thread_func(gpointer data) {
     PipelineState *ps = (PipelineState *)data;
+    cpu_set_t thread_mask;
+    if (cfg_get_thread_affinity(ps->cfg, ps->bus_thread_cpu_slot, &thread_mask)) {
+        int err = pthread_setaffinity_np(pthread_self(), sizeof(thread_mask), &thread_mask);
+        if (err != 0) {
+            LOGW("Pipeline bus thread: pthread_setaffinity_np failed: %s", g_strerror(err));
+        }
+    }
     GstBus *bus = gst_element_get_bus(ps->pipeline);
     if (bus == NULL) {
         LOGE("Failed to get pipeline bus");
@@ -421,6 +434,8 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->video_pad = NULL;
     ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
+    ps->cfg = cfg;
+    ps->bus_thread_cpu_slot = 0;
 
     UdpReceiver *receiver = NULL;
     GstElement *source = create_udp_app_source(cfg, &receiver);
@@ -468,17 +483,21 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
         }
     }
 
+    int cpu_slot = 0;
+
     if (ps->udp_receiver != NULL) {
-        if (udp_receiver_start(ps->udp_receiver) != 0) {
+        if (udp_receiver_start(ps->udp_receiver, cfg, cpu_slot) != 0) {
             LOGE("Failed to start UDP receiver");
             goto fail;
         }
+        cpu_slot++;
     }
 
     ps->bus_thread_running = TRUE;
     ps->stop_requested = FALSE;
     ps->encountered_error = FALSE;
     ps->audio_disabled = audio_disabled ? 1 : 0;
+    ps->bus_thread_cpu_slot = cpu_slot;
     ps->bus_thread = g_thread_new("gst-bus", bus_thread_func, ps);
     if (ps->bus_thread == NULL) {
         LOGE("Failed to start bus thread");
