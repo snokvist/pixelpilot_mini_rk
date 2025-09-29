@@ -286,11 +286,6 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
 static gpointer receiver_thread(gpointer data) {
     struct UdpReceiver *ur = (struct UdpReceiver *)data;
     const size_t max_pkt = 4096;
-    guint8 *buffer = g_malloc(max_pkt);
-    if (buffer == NULL) {
-        LOGE("UDP receiver: allocation failed");
-        return NULL;
-    }
 
     while (TRUE) {
         g_mutex_lock(&ur->lock);
@@ -300,33 +295,50 @@ static gpointer receiver_thread(gpointer data) {
             break;
         }
 
+        GstBuffer *gstbuf = gst_buffer_new_allocate(NULL, max_pkt, NULL);
+        if (gstbuf == NULL) {
+            LOGE("UDP receiver: allocation failed");
+            g_usleep(1000);
+            continue;
+        }
+
+        GstMapInfo map;
+        if (!gst_buffer_map(gstbuf, &map, GST_MAP_WRITE)) {
+            LOGE("UDP receiver: buffer map failed");
+            gst_buffer_unref(gstbuf);
+            g_usleep(1000);
+            continue;
+        }
+
         struct sockaddr_in src;
         socklen_t slen = sizeof(src);
-        ssize_t n = recvfrom(ur->sockfd, buffer, max_pkt, 0, (struct sockaddr *)&src, &slen);
+        ssize_t n = recvfrom(ur->sockfd, map.data, max_pkt, 0, (struct sockaddr *)&src, &slen);
         if (n < 0) {
-            if (errno == EINTR) {
+            int err = errno;
+            gst_buffer_unmap(gstbuf, &map);
+            gst_buffer_unref(gstbuf);
+            if (err == EINTR) {
                 continue;
             }
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if (err == EAGAIN || err == EWOULDBLOCK) {
                 g_usleep(1000);
                 continue;
             }
             if (!ur->stop_requested) {
-                LOGE("UDP receiver: recvfrom failed: %s", g_strerror(errno));
+                LOGE("UDP receiver: recvfrom failed: %s", g_strerror(err));
             }
             break;
         }
 
+        gst_buffer_set_size(gstbuf, (gsize)n);
+
         guint64 arrival_ns = get_time_ns();
         g_mutex_lock(&ur->lock);
-        process_rtp(ur, buffer, (gsize)n, arrival_ns);
+        process_rtp(ur, map.data, (gsize)n, arrival_ns);
         g_mutex_unlock(&ur->lock);
 
-        GstBuffer *gstbuf = gst_buffer_new_allocate(NULL, (gsize)n, NULL);
-        if (gstbuf == NULL) {
-            continue;
-        }
-        gst_buffer_fill(gstbuf, 0, buffer, (gsize)n);
+        gst_buffer_unmap(gstbuf, &map);
+
         GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
         if (flow != GST_FLOW_OK) {
             LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
@@ -340,8 +352,6 @@ static gpointer receiver_thread(gpointer data) {
     ur->running = FALSE;
     ur->stop_requested = FALSE;
     g_mutex_unlock(&ur->lock);
-
-    g_free(buffer);
     return NULL;
 }
 
