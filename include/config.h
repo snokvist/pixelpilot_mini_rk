@@ -2,6 +2,11 @@
 #define CONFIG_H
 
 #include <sched.h>
+#include <limits.h>
+
+#ifndef CPU_SETSIZE
+#define CPU_SETSIZE ((int)(sizeof(cpu_set_t) * CHAR_BIT))
+#endif
 
 typedef struct {
     char card_path[64];
