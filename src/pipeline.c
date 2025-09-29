@@ -371,6 +371,41 @@ static gpointer bus_thread_func(gpointer data) {
             }
             break;
         }
+        case GST_MESSAGE_ELEMENT: {
+            const GstStructure *structure = gst_message_get_structure(msg);
+            if (structure != NULL && gst_structure_has_name(structure, "drop-msg")) {
+                guint seqnum = 0;
+                guint num_too_late = 0;
+                guint num_drop_on_latency = 0;
+                GstClockTime timestamp = GST_CLOCK_TIME_NONE;
+                const gchar *reason = gst_structure_get_string(structure, "reason");
+                gst_structure_get_uint(structure, "seqnum", &seqnum);
+                gst_structure_get_uint(structure, "num-too-late", &num_too_late);
+                gst_structure_get_uint(structure, "num-drop-on-latency", &num_drop_on_latency);
+                gst_structure_get_clock_time(structure, "timestamp", &timestamp);
+
+                if (ps->udp_receiver != NULL) {
+                    udp_receiver_record_pipeline_drop(ps->udp_receiver, seqnum, (guint64)timestamp, reason,
+                                                      num_too_late, num_drop_on_latency);
+                }
+
+                if (num_too_late > 0 || num_drop_on_latency > 0) {
+                    const gchar *src_name = GST_OBJECT_NAME(GST_MESSAGE_SRC(msg));
+                    unsigned long long total_late = 0;
+                    unsigned long long total_latency = 0;
+                    if (ps->udp_receiver != NULL) {
+                        UdpReceiverStats stats_snapshot;
+                        udp_receiver_get_stats(ps->udp_receiver, &stats_snapshot);
+                        total_late = (unsigned long long)stats_snapshot.pipeline_dropped_too_late;
+                        total_latency = (unsigned long long)stats_snapshot.pipeline_dropped_on_latency;
+                    }
+                    LOGW("rtpjitterbuffer drop (%s): reason=%s seq=%u late=%u latency=%u totals late=%llu latency=%llu",
+                         src_name != NULL ? src_name : "unknown", reason != NULL ? reason : "unknown", seqnum,
+                         num_too_late, num_drop_on_latency, total_late, total_latency);
+                }
+            }
+            break;
+        }
         default:
             break;
         }
