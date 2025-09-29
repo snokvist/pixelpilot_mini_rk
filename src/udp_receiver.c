@@ -48,6 +48,7 @@ struct UdpReceiver {
     GMutex lock;
     gboolean running;
     gboolean stop_requested;
+    gboolean stats_enabled;
 
     int udp_port;
     int vid_pt;
@@ -155,6 +156,23 @@ static void history_push(struct UdpReceiver *ur, const UdpReceiverPacketSample *
     }
 }
 
+static void reset_stats_locked(struct UdpReceiver *ur) {
+    ur->seq_initialized = FALSE;
+    ur->have_last_seq = FALSE;
+    ur->expected_seq = 0;
+    ur->last_seq = 0;
+    ur->frame_active = FALSE;
+    ur->frame_timestamp = 0;
+    ur->frame_bytes = 0;
+    ur->frame_missing = FALSE;
+    ur->transit_initialized = FALSE;
+    ur->last_transit = 0.0;
+    ur->bitrate_window_start_ns = 0;
+    ur->bitrate_window_bytes = 0;
+    memset(&ur->stats, 0, sizeof(ur->stats));
+    memset(ur->history, 0, sizeof(ur->history));
+}
+
 static void update_bitrate(struct UdpReceiver *ur, guint64 arrival_ns, guint32 bytes) {
     if (ur->bitrate_window_start_ns == 0) {
         ur->bitrate_window_start_ns = arrival_ns;
@@ -201,6 +219,10 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
 
     gboolean is_video = (rtp.payload_type == ur->vid_pt);
     gboolean is_audio = (rtp.payload_type == ur->aud_pt);
+
+    if (!ur->stats_enabled) {
+        return;
+    }
 
     UdpReceiverPacketSample sample = {0};
     sample.sequence = rtp.sequence;
@@ -384,6 +406,7 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     ur->sockfd = -1;
     g_mutex_init(&ur->lock);
     ur->appsrc = GST_APP_SRC(gst_object_ref(appsrc));
+    ur->stats_enabled = FALSE;
     return ur;
 }
 
@@ -435,22 +458,9 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         g_mutex_unlock(&ur->lock);
         return 0;
     }
-    ur->seq_initialized = FALSE;
-    ur->have_last_seq = FALSE;
-    ur->expected_seq = 0;
-    ur->last_seq = 0;
-    ur->frame_active = FALSE;
-    ur->frame_timestamp = 0;
-    ur->frame_bytes = 0;
-    ur->frame_missing = FALSE;
-    ur->transit_initialized = FALSE;
-    ur->last_transit = 0.0;
-    ur->bitrate_window_start_ns = 0;
-    ur->bitrate_window_bytes = 0;
+    reset_stats_locked(ur);
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
-    memset(&ur->stats, 0, sizeof(ur->stats));
-    memset(ur->history, 0, sizeof(ur->history));
     g_mutex_unlock(&ur->lock);
 
     if (setup_socket(ur) != 0) {
@@ -529,5 +539,20 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
     g_mutex_lock(&ur->lock);
     *stats = ur->stats;
     memcpy(stats->history, ur->history, sizeof(ur->history));
+    g_mutex_unlock(&ur->lock);
+}
+
+void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
+    if (ur == NULL) {
+        return;
+    }
+
+    g_mutex_lock(&ur->lock);
+    gboolean new_state = enabled ? TRUE : FALSE;
+    gboolean changed = (ur->stats_enabled != new_state);
+    ur->stats_enabled = new_state;
+    if (changed && new_state) {
+        reset_stats_locked(ur);
+    }
     g_mutex_unlock(&ur->lock);
 }

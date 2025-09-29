@@ -64,6 +64,7 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot);
 void udp_receiver_stop(UdpReceiver *ur);
 void udp_receiver_destroy(UdpReceiver *ur);
 void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats);
+void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled);
 
 #ifdef __cplusplus
 }
