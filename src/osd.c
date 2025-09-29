@@ -1219,10 +1219,22 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         double jitter_ms = stats.jitter / 90.0;
         double jitter_avg_ms = stats.jitter_avg / 90.0;
         snprintf(text_lines[line_count], sizeof(text_lines[line_count]),
-                 "RTP vpkts=%llu loss=%llu reo=%llu dup=%llu jitter=%.2f/%.2fms br=%.2f/%.2fMbps",
+                 "RTP vpkts=%llu net-loss=%llu reo=%llu dup=%llu jitter=%.2f/%.2fms br=%.2f/%.2fMbps",
                  (unsigned long long)stats.video_packets, (unsigned long long)stats.lost_packets,
                  (unsigned long long)stats.reordered_packets, (unsigned long long)stats.duplicate_packets, jitter_ms,
                  jitter_avg_ms, stats.bitrate_mbps, stats.bitrate_avg_mbps);
+        line_ptrs[line_count] = text_lines[line_count];
+        line_count++;
+
+        const char *drop_reason = stats.pipeline_last_drop_reason[0] != '\0'
+                                      ? stats.pipeline_last_drop_reason
+                                      : "n/a";
+        snprintf(text_lines[line_count], sizeof(text_lines[line_count]),
+                 "Pipe drop=%llu late=%llu latency=%llu last=%s seq=%u",
+                 (unsigned long long)stats.pipeline_dropped_total,
+                 (unsigned long long)stats.pipeline_dropped_too_late,
+                 (unsigned long long)stats.pipeline_dropped_on_latency, drop_reason,
+                 stats.pipeline_last_drop_seqnum);
         line_ptrs[line_count] = text_lines[line_count];
         line_count++;
 
