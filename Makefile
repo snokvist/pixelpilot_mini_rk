@@ -29,6 +29,8 @@ else
 LDFLAGS += -lgstreamer-1.0 -lgstvideo-1.0 -lgstapp-1.0 -lgobject-2.0 -lglib-2.0
 endif
 
+LDFLAGS += -lpthread
+
 SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
 TARGET := pixelpilot_mini_rk
