@@ -1,8 +1,10 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-#include <sched.h>
 #include <limits.h>
+#include <sched.h>
+
+#include "osd_layout.h"
 
 #ifndef CPU_SETSIZE
 #define CPU_SETSIZE ((int)(sizeof(cpu_set_t) * CHAR_BIT))
@@ -11,6 +13,7 @@
 typedef struct {
     char card_path[64];
     char connector_name[32];
+    char config_path[PATH_MAX];
     int plane_id;
     int blank_primary;
     int use_udev;
@@ -44,10 +47,14 @@ typedef struct {
     cpu_set_t cpu_affinity_mask;
     int cpu_affinity_order[CPU_SETSIZE];
     int cpu_affinity_count;
+
+    OsdLayout osd_layout;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);
 void cfg_defaults(AppCfg *cfg);
+int cfg_load_file(const char *path, AppCfg *cfg);
+int cfg_parse_cpu_list(const char *list, AppCfg *cfg);
 int cfg_has_cpu_affinity(const AppCfg *cfg);
 void cfg_get_process_affinity(const AppCfg *cfg, cpu_set_t *set_out);
 int cfg_get_thread_affinity(const AppCfg *cfg, int slot, cpu_set_t *set_out);
