@@ -55,6 +55,7 @@ typedef struct {
     int window_seconds;
     char metric[64];
     char label[32];
+    int show_info_box;
     uint32_t fg;
     uint32_t grid;
     uint32_t bg;

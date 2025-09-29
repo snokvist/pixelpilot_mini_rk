@@ -1077,33 +1077,54 @@ static void osd_line_draw(OSD *o, int idx) {
     osd_line_draw_latest(o, idx, fg);
 }
 
-static void osd_line_draw_label(OSD *o, int idx, const char *text) {
+static void osd_line_draw_label(OSD *o, int idx, const OsdLineConfig *cfg) {
     OsdLineState *state = &o->elements[idx].data.line;
     osd_clear_rect(o, &state->label_rect);
+    if (!cfg || !cfg->show_info_box) {
+        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+        return;
+    }
+    const char *text = cfg->label;
     if (text == NULL || text[0] == '\0') {
         osd_store_rect(&state->label_rect, 0, 0, 0, 0);
         return;
     }
     int scale = o->scale > 0 ? o->scale : 1;
     int pad = 4 * scale;
+    int gap = 4 * scale;
     int line_height = 8 * scale;
     int text_w = (int)strlen(text) * (8 + 1) * scale;
+    if (text_w < 0) {
+        text_w = 0;
+    }
     int box_w = text_w + 2 * pad;
     int box_h = line_height + 2 * pad;
-    int x = state->x + pad;
-    int y = state->y + pad;
-    if (x + box_w > state->x + state->width - pad) {
-        x = state->x + state->width - pad - box_w;
-    }
-    if (y + box_h > state->y + state->height - pad) {
-        y = state->y + state->height - pad - box_h;
+
+    int x = state->x;
+    if (x + box_w > state->x + state->width) {
+        x = state->x + state->width - box_w;
     }
     if (x < o->margin_px) {
         x = o->margin_px;
     }
-    if (y < o->margin_px) {
-        y = o->margin_px;
+    if (x + box_w > o->w - o->margin_px) {
+        x = o->w - o->margin_px - box_w;
+        if (x < o->margin_px) {
+            x = o->margin_px;
+        }
     }
+
+    int y = state->y - box_h - gap;
+    if (y < o->margin_px) {
+        y = state->y + state->height + gap;
+        if (y + box_h > o->h - o->margin_px) {
+            y = state->y + state->height - box_h - gap;
+            if (y < o->margin_px) {
+                y = o->margin_px;
+            }
+        }
+    }
+
     uint32_t bg = 0x50202020u;
     uint32_t border = 0x60FFFFFFu;
     uint32_t text_color = 0xB0FFFFFFu;
@@ -1240,7 +1261,18 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
 static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx) {
     OsdElementConfig *elem_cfg = &o->layout.elements[idx];
     OsdLineState *state = &o->elements[idx].data.line;
-    osd_clear_rect(o, &o->elements[idx].rect);
+
+    OSDRect prev_rect = o->elements[idx].rect;
+    int repositioned = (prev_rect.x != state->x) || (prev_rect.y != state->y) || (prev_rect.w != state->width) ||
+                       (prev_rect.h != state->height);
+    if (repositioned) {
+        if (prev_rect.w > 0 && prev_rect.h > 0) {
+            osd_clear_rect(o, &prev_rect);
+        }
+        state->background_ready = 0;
+        state->clear_on_next_draw = 1;
+        state->prev_valid = 0;
+    }
 
     double value = 0.0;
     int have_value = osd_metric_sample(ctx, elem_cfg->data.line.metric, &value);
@@ -1249,7 +1281,7 @@ static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx
     }
 
     osd_line_draw(o, idx);
-    osd_line_draw_label(o, idx, elem_cfg->data.line.label);
+    osd_line_draw_label(o, idx, &elem_cfg->data.line);
 
     char footer_lines[3][128];
     const char *footer_ptrs[3];
@@ -1649,18 +1681,15 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
 
     o->scale = (ms->mode_w >= 1280) ? 2 : 1;
-    o->w = 960 * o->scale;
-    o->h = 360 * o->scale;
-    o->margin_px = 12 * o->scale;
-
-    if (o->w > ms->mode_w) {
-        o->w = ms->mode_w / 2;
+    o->w = (ms->mode_w > 0) ? ms->mode_w : (960 * o->scale);
+    o->h = (ms->mode_h > 0) ? ms->mode_h : (360 * o->scale);
+    if (o->w <= 0) {
+        o->w = 960 * o->scale;
     }
-    if (o->h > ms->mode_h) {
-        o->h = ms->mode_h / 2;
+    if (o->h <= 0) {
+        o->h = 360 * o->scale;
     }
-
-    o->margin_px = clampi(o->margin_px, 8, o->w / 4);
+    o->margin_px = clampi(12 * o->scale, 8, o->h / 4);
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");

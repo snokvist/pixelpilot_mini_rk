@@ -102,6 +102,7 @@ static void builder_reset_line(OsdElementConfig *elem) {
     elem->data.line.window_seconds = 60;
     elem->data.line.metric[0] = '\0';
     elem->data.line.label[0] = '\0';
+    elem->data.line.show_info_box = 1;
     elem->data.line.fg = 0xFFFFFFFFu;
     elem->data.line.grid = 0x20FFFFFFu;
     elem->data.line.bg = 0x20000000u;
@@ -190,9 +191,53 @@ static int parse_bool(const char *value, int *out) {
     return -1;
 }
 
+static int parse_named_color(const char *value, uint32_t *out) {
+    static const struct {
+        const char *name;
+        uint32_t argb;
+    } table[] = {
+        {"white", 0xFFFFFFFFu},
+        {"black", 0xFF000000u},
+        {"blue", 0xFF2196F3u},
+        {"green", 0xFF4CAF50u},
+        {"red", 0xFFF44336u},
+        {"yellow", 0xFFFFEB3Bu},
+        {"orange", 0xFFFF9800u},
+        {"purple", 0xFF9C27B0u},
+        {"cyan", 0xFF00BCD4u},
+        {"magenta", 0xFFE91E63u},
+        {"grey", 0xFF9E9E9Eu},
+        {"gray", 0xFF9E9E9Eu},
+        {"light-grey", 0xFFBDBDBDu},
+        {"light-gray", 0xFFBDBDBDu},
+        {"dark-grey", 0xFF424242u},
+        {"dark-gray", 0xFF424242u},
+        {"transparent", 0x00000000u},
+        {"clear", 0x00000000u},
+        {"transparent-black", 0x80000000u},
+        {"transparent-grey", 0x80202020u},
+        {"transparent-gray", 0x80202020u},
+        {"transperant-grey", 0x80202020u},
+        {"transperant-gray", 0x80202020u},
+        {"transparent-white", 0x80FFFFFFu},
+        {"transparent-blue", 0x802196F3u},
+        {"transparent-green", 0x804CAF50u},
+    };
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+        if (strcasecmp(value, table[i].name) == 0) {
+            *out = table[i].argb;
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int parse_color(const char *value, uint32_t *out) {
     if (!value || !out) {
         return -1;
+    }
+    if (parse_named_color(value, out) == 0) {
+        return 0;
     }
     const char *p = value;
     if (p[0] == '#') {
@@ -201,12 +246,22 @@ static int parse_color(const char *value, uint32_t *out) {
         p += 2;
     }
     size_t len = strlen(p);
-    if (len != 8) {
+    if (len != 8 && len != 6) {
         return -1;
+    }
+    char digits[9];
+    if (len == 6) {
+        digits[0] = 'F';
+        digits[1] = 'F';
+        memcpy(digits + 2, p, 6);
+        digits[8] = '\0';
+    } else {
+        memcpy(digits, p, 8);
+        digits[8] = '\0';
     }
     char *endptr = NULL;
     errno = 0;
-    unsigned long v = strtoul(p, &endptr, 16);
+    unsigned long v = strtoul(digits, &endptr, 16);
     if (errno != 0 || !endptr || *endptr != '\0') {
         return -1;
     }
@@ -316,11 +371,19 @@ static int parse_osd_element_text(OsdElementConfig *elem, const char *key, const
 
 static int parse_osd_element_line(OsdElementConfig *elem, const char *key, const char *value) {
     if (strcasecmp(key, "metric") == 0) {
-    ini_copy_string(elem->data.line.metric, sizeof(elem->data.line.metric), value);
+        ini_copy_string(elem->data.line.metric, sizeof(elem->data.line.metric), value);
         return 0;
     }
     if (strcasecmp(key, "label") == 0) {
         ini_copy_string(elem->data.line.label, sizeof(elem->data.line.label), value);
+        return 0;
+    }
+    if (strcasecmp(key, "info-box") == 0 || strcasecmp(key, "show-info-box") == 0 || strcasecmp(key, "info_box") == 0) {
+        int enabled = 0;
+        if (parse_bool(value, &enabled) != 0) {
+            return -1;
+        }
+        elem->data.line.show_info_box = enabled;
         return 0;
     }
     if (strcasecmp(key, "window-seconds") == 0) {

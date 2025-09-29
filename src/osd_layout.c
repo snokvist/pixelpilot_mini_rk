@@ -22,6 +22,7 @@ static void line_defaults(OsdLineConfig *cfg) {
     cfg->window_seconds = 60;
     cfg->metric[0] = '\0';
     cfg->label[0] = '\0';
+    cfg->show_info_box = 1;
     cfg->fg = 0xFFFFFFFFu;
     cfg->grid = 0x20FFFFFFu;
     cfg->bg = 0x20000000u;

@@ -7,8 +7,8 @@ PixelPilot Mini RK is a lightweight receiver that ingests RTP video/audio over U
 All command-line options can be provided in an INI file and loaded with `--config /path/to/file.ini`. The parser merges the INI
 defaults first and then applies explicit CLI flags so ad-hoc overrides still work.
 
-The `config/osd-sample.ini` file documents every supported key, including the available OSD text tokens, line-plot metrics, and a
-quick reference for anchors, offsets, and color syntax.
+The `config/osd-sample.ini` file documents every supported key, including the available OSD text tokens, line-plot metrics, and a quick
+reference for anchors, offsets, color syntax, and the built-in named palette.
 Copy it next to the binary and launch the receiver as:
 
 ```sh
