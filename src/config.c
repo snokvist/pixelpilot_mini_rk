@@ -1,6 +1,10 @@
+#define _GNU_SOURCE
+
 #include "config.h"
 #include "logging.h"
 
+#include <ctype.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +30,7 @@ static void usage(const char *prog) {
             "  --osd-plane-id N             (force OSD plane id; default auto)\n"
             "  --osd-refresh-ms N           (default: 500)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
+            "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
             prog);
 }
@@ -56,6 +61,74 @@ void cfg_defaults(AppCfg *c) {
     c->osd_refresh_ms = 500;
 
     c->gst_log = 0;
+
+    c->cpu_affinity_present = 0;
+    CPU_ZERO(&c->cpu_affinity_mask);
+    c->cpu_affinity_count = 0;
+    memset(c->cpu_affinity_order, 0, sizeof(c->cpu_affinity_order));
+}
+
+static int parse_cpu_list(const char *list, AppCfg *cfg) {
+    if (list == NULL || *list == '\0') {
+        LOGE("--cpu-list requires at least one CPU id");
+        return -1;
+    }
+
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+
+    int order[CPU_SETSIZE];
+    int count = 0;
+
+    const char *p = list;
+    while (*p != '\0') {
+        while (isspace((unsigned char)*p)) {
+            ++p;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        char *end = NULL;
+        long cpu = strtol(p, &end, 10);
+        if (end == p) {
+            LOGE("Invalid token in --cpu-list: '%s'", p);
+            return -1;
+        }
+        if (cpu < 0 || cpu >= CPU_SETSIZE) {
+            LOGE("CPU index %ld out of range (0-%d)", cpu, CPU_SETSIZE - 1);
+            return -1;
+        }
+        if (!CPU_ISSET((int)cpu, &mask)) {
+            if (count >= CPU_SETSIZE) {
+                LOGE("Too many CPUs specified in --cpu-list (max %d)", CPU_SETSIZE);
+                return -1;
+            }
+            order[count++] = (int)cpu;
+        }
+        CPU_SET((int)cpu, &mask);
+        p = end;
+        while (isspace((unsigned char)*p)) {
+            ++p;
+        }
+        if (*p == ',') {
+            ++p;
+        } else if (*p != '\0') {
+            LOGE("Unexpected character '%c' in --cpu-list", *p);
+            return -1;
+        }
+    }
+
+    if (count == 0) {
+        LOGE("--cpu-list did not contain any CPUs");
+        return -1;
+    }
+
+    cfg->cpu_affinity_present = 1;
+    cfg->cpu_affinity_mask = mask;
+    cfg->cpu_affinity_count = count;
+    memset(cfg->cpu_affinity_order, 0, sizeof(cfg->cpu_affinity_order));
+    memcpy(cfg->cpu_affinity_order, order, count * sizeof(int));
+    return 0;
 }
 
 int parse_cli(int argc, char **argv, AppCfg *cfg) {
@@ -97,6 +170,10 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->osd_refresh_ms = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
+        } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {
+            if (parse_cpu_list(argv[++i], cfg) != 0) {
+                return -1;
+            }
         } else if (!strcmp(argv[i], "--verbose")) {
             log_set_verbose(1);
         } else {
@@ -105,4 +182,35 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         }
     }
     return 0;
+}
+
+int cfg_has_cpu_affinity(const AppCfg *cfg) {
+    return cfg != NULL && cfg->cpu_affinity_present && cfg->cpu_affinity_count > 0;
+}
+
+void cfg_get_process_affinity(const AppCfg *cfg, cpu_set_t *set_out) {
+    if (set_out == NULL) {
+        return;
+    }
+    if (cfg_has_cpu_affinity(cfg)) {
+        *set_out = cfg->cpu_affinity_mask;
+    } else {
+        CPU_ZERO(set_out);
+    }
+}
+
+int cfg_get_thread_affinity(const AppCfg *cfg, int slot, cpu_set_t *set_out) {
+    if (!cfg_has_cpu_affinity(cfg) || set_out == NULL) {
+        return 0;
+    }
+    CPU_ZERO(set_out);
+    if (cfg->cpu_affinity_count == 1) {
+        int cpu = cfg->cpu_affinity_order[0];
+        CPU_SET(cpu, set_out);
+    } else {
+        int idx = slot % cfg->cpu_affinity_count;
+        int cpu = cfg->cpu_affinity_order[idx];
+        CPU_SET(cpu, set_out);
+    }
+    return 1;
 }

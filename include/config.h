@@ -1,6 +1,8 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include <sched.h>
+
 typedef struct {
     char card_path[64];
     char connector_name[32];
@@ -27,9 +29,17 @@ typedef struct {
     int osd_refresh_ms;
 
     int gst_log;
+
+    int cpu_affinity_present;
+    cpu_set_t cpu_affinity_mask;
+    int cpu_affinity_order[CPU_SETSIZE];
+    int cpu_affinity_count;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);
 void cfg_defaults(AppCfg *cfg);
+int cfg_has_cpu_affinity(const AppCfg *cfg);
+void cfg_get_process_affinity(const AppCfg *cfg, cpu_set_t *set_out);
+int cfg_get_thread_affinity(const AppCfg *cfg, int slot, cpu_set_t *set_out);
 
 #endif // CONFIG_H

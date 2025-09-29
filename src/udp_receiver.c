@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include "udp_receiver.h"
 #include "logging.h"
 
@@ -5,6 +7,8 @@
 #include <errno.h>
 #include <math.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +72,9 @@ struct UdpReceiver {
     UdpReceiverStats stats;
 
     UdpReceiverPacketSample history[UDP_RECEIVER_HISTORY];
+
+    const AppCfg *cfg;
+    int cpu_slot;
 };
 
 static gboolean parse_rtp(const guint8 *data, gsize len, RtpParseResult *out) {
@@ -287,6 +294,14 @@ static gpointer receiver_thread(gpointer data) {
     struct UdpReceiver *ur = (struct UdpReceiver *)data;
     const size_t max_pkt = 4096;
 
+    cpu_set_t thread_mask;
+    if (cfg_get_thread_affinity(ur->cfg, ur->cpu_slot, &thread_mask)) {
+        int err = pthread_setaffinity_np(pthread_self(), sizeof(thread_mask), &thread_mask);
+        if (err != 0) {
+            LOGW("UDP receiver: pthread_setaffinity_np failed: %s", g_strerror(err));
+        }
+    }
+
     while (TRUE) {
         g_mutex_lock(&ur->lock);
         gboolean stop = ur->stop_requested;
@@ -411,7 +426,7 @@ static int setup_socket(struct UdpReceiver *ur) {
     return 0;
 }
 
-int udp_receiver_start(UdpReceiver *ur) {
+int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
     if (ur == NULL) {
         return -1;
     }
@@ -432,6 +447,8 @@ int udp_receiver_start(UdpReceiver *ur) {
     ur->last_transit = 0.0;
     ur->bitrate_window_start_ns = 0;
     ur->bitrate_window_bytes = 0;
+    ur->cfg = cfg;
+    ur->cpu_slot = cpu_slot;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
     g_mutex_unlock(&ur->lock);

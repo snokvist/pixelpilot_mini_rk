@@ -8,6 +8,8 @@
 
 #include <gst/app/gstappsrc.h>
 
+#include "config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -58,7 +60,7 @@ typedef struct {
 typedef struct UdpReceiver UdpReceiver;
 
 UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *appsrc);
-int udp_receiver_start(UdpReceiver *ur);
+int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot);
 void udp_receiver_stop(UdpReceiver *ur);
 void udp_receiver_destroy(UdpReceiver *ur);
 void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats);

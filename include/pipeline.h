@@ -29,6 +29,8 @@ typedef struct {
     gboolean stop_requested;
     gboolean encountered_error;
     int audio_disabled;
+    const AppCfg *cfg;
+    int bus_thread_cpu_slot;
 } PipelineState;
 
 #include "config.h"
