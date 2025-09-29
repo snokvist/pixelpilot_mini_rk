@@ -21,6 +21,12 @@ static void usage(const char *prog) {
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --latency-ms N               (default: 8)\n"
+            "  --video-queue-leaky MODE     (0=none,1=upstream,2=downstream; default: 2)\n"
+            "  --video-queue-pre-buffers N  (default: 96)\n"
+            "  --video-queue-post-buffers N (default: 8)\n"
+            "  --video-queue-sink-buffers N (default: 8)\n"
+            "  --video-drop-on-latency      (enable jitter drops; default)\n"
+            "  --no-video-drop-on-latency   (disable jitter drops)\n"
             "  --max-lateness NANOSECS      (default: 20000000)\n"
             "  --aud-dev STR                (default: plughw:CARD=rockchiphdmi0,DEV=0)\n"
             "  --no-audio                   (drop audio branch entirely)\n"
@@ -49,6 +55,11 @@ void cfg_defaults(AppCfg *c) {
     c->kmssink_sync = 0;
     c->kmssink_qos = 1;
     c->max_lateness_ns = 20000000;
+    c->video_queue_leaky = 2;
+    c->video_queue_pre_buffers = 96;
+    c->video_queue_post_buffers = 8;
+    c->video_queue_sink_buffers = 8;
+    c->video_drop_on_latency = 1;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 
     c->no_audio = 0;
@@ -152,6 +163,18 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->aud_pt = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--latency-ms") && i + 1 < argc) {
             cfg->latency_ms = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--video-queue-leaky") && i + 1 < argc) {
+            cfg->video_queue_leaky = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--video-queue-pre-buffers") && i + 1 < argc) {
+            cfg->video_queue_pre_buffers = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--video-queue-post-buffers") && i + 1 < argc) {
+            cfg->video_queue_post_buffers = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--video-queue-sink-buffers") && i + 1 < argc) {
+            cfg->video_queue_sink_buffers = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--video-drop-on-latency")) {
+            cfg->video_drop_on_latency = 1;
+        } else if (!strcmp(argv[i], "--no-video-drop-on-latency")) {
+            cfg->video_drop_on_latency = 0;
         } else if (!strcmp(argv[i], "--max-lateness") && i + 1 < argc) {
             cfg->max_lateness_ns = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-dev") && i + 1 < argc) {

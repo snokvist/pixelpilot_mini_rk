@@ -171,15 +171,15 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstE
     CHECK_ELEM(queue_sink, "queue");
     CHECK_ELEM(sink, "kmssink");
 
-    g_object_set(queue_pre, "leaky", 2, "max-size-buffers", 96, "max-size-time", (guint64)0, "max-size-bytes",
-                 (guint64)0, NULL);
-    g_object_set(queue_post, "leaky", 2, "max-size-buffers", 8, "max-size-time", (guint64)0, "max-size-bytes",
-                 (guint64)0, NULL);
-    g_object_set(queue_sink, "leaky", 2, "max-size-buffers", 8, "max-size-time", (guint64)0, "max-size-bytes",
-                 (guint64)0, NULL);
+    g_object_set(queue_pre, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_pre_buffers,
+                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
+    g_object_set(queue_post, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_post_buffers,
+                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
+    g_object_set(queue_sink, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_sink_buffers,
+                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
     GstCaps *caps_rtp_cfg = make_rtp_caps(cfg->vid_pt, 90000, "H265");
-    g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", TRUE, "do-lost", TRUE,
+    g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", cfg->video_drop_on_latency ? TRUE : FALSE, "do-lost", TRUE,
                  "post-drop-messages", TRUE, NULL);
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
 

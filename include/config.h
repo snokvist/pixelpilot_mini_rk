@@ -22,6 +22,11 @@ typedef struct {
     int kmssink_sync;
     int kmssink_qos;
     int max_lateness_ns;
+    int video_queue_leaky;
+    int video_queue_pre_buffers;
+    int video_queue_post_buffers;
+    int video_queue_sink_buffers;
+    int video_drop_on_latency;
     char aud_dev[128];
 
     int no_audio;
