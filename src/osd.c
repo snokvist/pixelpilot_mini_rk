@@ -671,7 +671,7 @@ static void osd_compute_placement(const OSD *o, int rect_w, int rect_h, const Os
         x = margin;
         y = margin + (inner_h - rect_h) / 2;
         break;
-    case OSD_POS_MID_MID:
+    case OSD_POS_MID:
         x = margin + (inner_w - rect_w) / 2;
         y = margin + (inner_h - rect_h) / 2;
         break;
@@ -1267,20 +1267,24 @@ static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx
         osd_format_metric_value(elem_cfg->data.line.metric, state->max_v, max_buf, sizeof(max_buf));
 
         snprintf(footer_lines[footer_count], sizeof(footer_lines[footer_count]), "Latest %s  Avg %s", latest_buf, avg_buf);
-        footer_ptrs[footer_count++] = footer_lines[footer_count - 1];
+        footer_ptrs[footer_count] = footer_lines[footer_count];
+        footer_count++;
         if (footer_count < 3) {
             snprintf(footer_lines[footer_count], sizeof(footer_lines[footer_count]), "Min %s  Max %s", min_buf, max_buf);
-            footer_ptrs[footer_count++] = footer_lines[footer_count - 1];
+            footer_ptrs[footer_count] = footer_lines[footer_count];
+            footer_count++;
         }
         if (footer_count < 3) {
             int window_seconds = elem_cfg->data.line.window_seconds > 0 ? elem_cfg->data.line.window_seconds : 60;
             snprintf(footer_lines[footer_count], sizeof(footer_lines[footer_count]), "Window %ds", window_seconds);
-            footer_ptrs[footer_count++] = footer_lines[footer_count - 1];
+            footer_ptrs[footer_count] = footer_lines[footer_count];
+            footer_count++;
         }
     } else {
         const char *msg = ctx->have_stats && have_value ? "Collecting samples..." : "Metric unavailable";
         snprintf(footer_lines[0], sizeof(footer_lines[0]), "%s", msg);
-        footer_ptrs[footer_count++] = footer_lines[0];
+        footer_ptrs[footer_count] = footer_lines[0];
+        footer_count++;
     }
 
     osd_line_draw_footer(o, idx, footer_ptrs, footer_count);
