@@ -53,6 +53,11 @@ static const struct DumbFB *osd_front_fb_const(const OSD *o) {
     return &o->fb[idx];
 }
 
+static struct DumbFB *osd_back_fb(OSD *o) {
+    int idx = (o->front_idx ^ 1) & 1;
+    return &o->fb[idx];
+}
+
 static void osd_copy_fb(struct DumbFB *dst, const struct DumbFB *src) {
     if (!dst || !src || !dst->map || !src->map) {
         return;
@@ -64,9 +69,6 @@ static void osd_copy_fb(struct DumbFB *dst, const struct DumbFB *src) {
 static void osd_prepare_draw_buffer(OSD *o) {
     int next = (o->front_idx ^ 1) & 1;
     o->draw_idx = next;
-    struct DumbFB *dst = osd_draw_fb(o);
-    const struct DumbFB *src = osd_front_fb_const(o);
-    osd_copy_fb(dst, src);
 }
 
 static void osd_clear(OSD *o, uint32_t argb) {
@@ -1785,25 +1787,32 @@ static int osd_commit_disable(int fd, OSD *o) {
     return ret;
 }
 
-static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
+static int osd_commit_present(int fd, uint32_t crtc_id, OSD *o, const struct DumbFB *fb) {
+    if (!fb || !fb->fb_id) {
+        return -1;
+    }
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req) {
-        return;
+        return -1;
     }
-    const struct DumbFB *front = osd_front_fb_const(o);
-    if (!front || !front->fb_id) {
-        drmModeAtomicFree(req);
-        return;
-    }
-    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, front->fb_id);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, fb->fb_id);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
-    drmModeAtomicCommit(fd, req, 0, NULL);
+    int ret = drmModeAtomicCommit(fd, req, 0, NULL);
     drmModeAtomicFree(req);
+    return ret;
 }
 
 static void osd_present(int fd, uint32_t crtc_id, OSD *o) {
+    struct DumbFB *draw = osd_draw_fb(o);
+    if (!draw || !draw->map || !draw->fb_id) {
+        return;
+    }
+    if (osd_commit_present(fd, crtc_id, o, draw) != 0) {
+        return;
+    }
     o->front_idx = o->draw_idx & 1;
-    osd_commit_touch(fd, crtc_id, o);
+    struct DumbFB *back = osd_back_fb(o);
+    osd_copy_fb(back, draw);
 }
 
 static void osd_destroy_fb(int fd, OSD *o) {
