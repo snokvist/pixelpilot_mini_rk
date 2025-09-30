@@ -387,7 +387,7 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
     gst_caps_unref(caps_rtp_cfg);
     gst_caps_unref(caps_raw_cfg);
     g_object_set(queue_sink, "leaky", 2, NULL);
-    g_object_set(alsa, "device", cfg->aud_dev, "sync", FALSE, NULL);
+    g_object_set(alsa, "device", cfg->aud_dev, "sync", FALSE, "provide-clock", FALSE, NULL);
 
     gst_bin_add_many(GST_BIN(pipeline), queue_start, caps_rtp, jitter, depay, decoder, aconv, ares, caps_raw,
                      queue_sink, alsa, NULL);
