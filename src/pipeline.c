@@ -119,56 +119,155 @@ static GstCaps *make_raw_audio_caps(void) {
                                "channels", G_TYPE_INT, 2, NULL);
 }
 
-static gboolean link_demux_branch(GstElement *demux, GstElement *branch, GstPad **stored_src_pad, const char *name,
-                                 gint payload_type) {
+static gint get_pad_payload_type(GstPad *pad) {
+    gint payload_type = -1;
+    if (pad == NULL) {
+        return payload_type;
+    }
+
+    GObjectClass *klass = G_OBJECT_GET_CLASS(pad);
+    if (klass != NULL && g_object_class_find_property(klass, "pt") != NULL) {
+        g_object_get(pad, "pt", &payload_type, NULL);
+    }
+
     if (payload_type < 0) {
-        LOGE("Invalid payload type for %s branch", name);
-        return FALSE;
-    }
-    gchar *pad_name = g_strdup_printf("src_%u", payload_type);
-    if (pad_name == NULL) {
-        LOGE("Failed to allocate pad name for %s branch", name);
-        return FALSE;
+        const gchar *pad_name = GST_OBJECT_NAME(pad);
+        if (pad_name != NULL && g_str_has_prefix(pad_name, "src_")) {
+            payload_type = (gint)g_ascii_strtoll(pad_name + 4, NULL, 10);
+        }
     }
 
-    GstPadTemplate *pad_template =
-        gst_element_class_get_pad_template(GST_ELEMENT_GET_CLASS(demux), "src_%u");
-    if (pad_template == NULL) {
-        LOGE("Failed to get pad template for %s branch", name);
-        g_free(pad_name);
-        return FALSE;
-    }
+    return payload_type;
+}
 
-    GstPad *src_pad = gst_element_request_pad(demux, pad_template, pad_name, NULL);
-    g_free(pad_name);
-    if (src_pad == NULL) {
-        LOGE("Failed to request demux pad for %s branch", name);
+static gboolean link_pad_to_branch(GstPad *src_pad, GstElement *branch, GstPad **stored_pad, const char *name) {
+    if (branch == NULL) {
+        LOGE("Cannot link %s branch: branch element is NULL", name);
         return FALSE;
     }
-    g_object_set(src_pad, "pt", payload_type, NULL);
+    if (stored_pad != NULL && *stored_pad != NULL) {
+        return TRUE;
+    }
 
     GstPad *sink_pad = gst_element_get_static_pad(branch, "sink");
     if (sink_pad == NULL) {
         LOGE("Failed to get sink pad for %s branch", name);
-        gst_element_release_request_pad(demux, src_pad);
-        gst_object_unref(src_pad);
         return FALSE;
     }
-    if (gst_pad_link(src_pad, sink_pad) != GST_PAD_LINK_OK) {
-        LOGE("Failed to link demux to %s branch", name);
-        gst_object_unref(sink_pad);
-        gst_element_release_request_pad(demux, src_pad);
-        gst_object_unref(src_pad);
-        return FALSE;
-    }
+
+    GstPadLinkReturn link_ret = gst_pad_link(src_pad, sink_pad);
     gst_object_unref(sink_pad);
-    if (stored_src_pad != NULL) {
-        *stored_src_pad = src_pad;
-    } else {
-        gst_element_release_request_pad(demux, src_pad);
-        gst_object_unref(src_pad);
+    if (link_ret != GST_PAD_LINK_OK) {
+        LOGE("Failed to link demux pad to %s branch (ret=%d)", name, link_ret);
+        return FALSE;
+    }
+
+    if (stored_pad != NULL) {
+        *stored_pad = gst_object_ref(src_pad);
     }
     return TRUE;
+}
+
+static gboolean try_link_demux_pad(PipelineState *ps, GstPad *pad) {
+    gint payload_type = get_pad_payload_type(pad);
+    if (payload_type < 0) {
+        LOGW("Ignoring demux pad with unknown payload type (pad=%s)", GST_OBJECT_NAME(pad));
+        return FALSE;
+    }
+
+    if (payload_type == ps->cfg->vid_pt) {
+        if (ps->video_branch_entry == NULL) {
+            LOGW("Video branch not ready for payload type %d", payload_type);
+            return FALSE;
+        }
+        if (ps->video_pad != NULL) {
+            return TRUE;
+        }
+        if (link_pad_to_branch(pad, ps->video_branch_entry, &ps->video_pad, "video")) {
+            LOGI("Linked demux video pad (PT=%d)", payload_type);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    if (payload_type == ps->cfg->aud_pt && ps->cfg->aud_pt >= 0) {
+        if (ps->audio_branch_entry == NULL) {
+            LOGW("Audio branch not ready for payload type %d", payload_type);
+            return FALSE;
+        }
+        if (ps->audio_pad != NULL) {
+            return TRUE;
+        }
+        if (link_pad_to_branch(pad, ps->audio_branch_entry, &ps->audio_pad, "audio")) {
+            LOGI("Linked demux audio pad (PT=%d)", payload_type);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    LOGW("Unhandled demux pad with payload type %d", payload_type);
+    return FALSE;
+}
+
+static void demux_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_data) {
+    PipelineState *ps = (PipelineState *)user_data;
+    if (!try_link_demux_pad(ps, pad)) {
+        LOGW("Failed to link newly added demux pad %s", GST_OBJECT_NAME(pad));
+    }
+}
+
+static void demux_pad_removed_cb(GstElement *element, GstPad *pad, gpointer user_data) {
+    PipelineState *ps = (PipelineState *)user_data;
+    if (ps->video_pad == pad) {
+        gst_object_unref(ps->video_pad);
+        ps->video_pad = NULL;
+        LOGI("Demux video pad removed");
+    } else if (ps->audio_pad == pad) {
+        gst_object_unref(ps->audio_pad);
+        ps->audio_pad = NULL;
+        LOGI("Demux audio pad removed");
+    }
+}
+
+static void connect_existing_demux_pads(PipelineState *ps) {
+    GstIterator *it = gst_element_iterate_src_pads(ps->demux);
+    if (it == NULL) {
+        return;
+    }
+
+    GValue item = G_VALUE_INIT;
+    gboolean done = FALSE;
+    while (!done) {
+        switch (gst_iterator_next(it, &item)) {
+        case GST_ITERATOR_OK: {
+            GstPad *pad = g_value_get_object(&item);
+            if (pad != NULL) {
+                gst_object_ref(pad);
+                try_link_demux_pad(ps, pad);
+                gst_object_unref(pad);
+            }
+            g_value_reset(&item);
+            break;
+        }
+        case GST_ITERATOR_RESYNC:
+            gst_iterator_resync(it);
+            break;
+        case GST_ITERATOR_ERROR:
+        case GST_ITERATOR_DONE:
+            done = TRUE;
+            break;
+        }
+    }
+
+    g_value_unset(&item);
+    gst_iterator_free(it);
+}
+
+static void clear_stored_pad(GstPad **pad) {
+    if (pad != NULL && *pad != NULL) {
+        gst_object_unref(*pad);
+        *pad = NULL;
+    }
 }
 
 static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstElement *demux, const AppCfg *cfg) {
@@ -227,20 +326,20 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstE
         return FALSE;
     }
 
-    if (!link_demux_branch(demux, queue_pre, &ps->video_pad, "video", cfg->vid_pt)) {
-        return FALSE;
-    }
-
+    ps->video_branch_entry = queue_pre;
     ps->video_sink = sink;
     return TRUE;
 
 fail:
+    ps->video_branch_entry = NULL;
     return FALSE;
 }
 
 static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstElement *demux, const AppCfg *cfg,
                                    int audio_disabled) {
     if (cfg->no_audio) {
+        ps->audio_branch_entry = NULL;
+        ps->audio_pad = NULL;
         return TRUE;
     }
 
@@ -258,9 +357,7 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
             LOGE("Failed to link audio fakesink branch");
             return FALSE;
         }
-        if (!link_demux_branch(demux, queue_start, &ps->audio_pad, "audio", cfg->aud_pt)) {
-            return FALSE;
-        }
+        ps->audio_branch_entry = queue_start;
         ps->audio_disabled = 1;
         return TRUE;
     }
@@ -304,23 +401,13 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
         return FALSE;
     }
 
-    if (!link_demux_branch(demux, queue_start, &ps->audio_pad, "audio", cfg->aud_pt)) {
-        return FALSE;
-    }
-
+    ps->audio_branch_entry = queue_start;
     ps->audio_disabled = 0;
     return TRUE;
 
 fail:
+    ps->audio_branch_entry = NULL;
     return FALSE;
-}
-
-static void release_request_pad(GstElement *demux, GstPad **pad) {
-    if (demux != NULL && pad != NULL && *pad != NULL) {
-        gst_element_release_request_pad(demux, *pad);
-        gst_object_unref(*pad);
-        *pad = NULL;
-    }
 }
 
 static gpointer bus_thread_func(gpointer data) {
@@ -454,8 +541,13 @@ static void cleanup_pipeline(PipelineState *ps) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
     }
-    release_request_pad(ps->demux, &ps->video_pad);
-    release_request_pad(ps->demux, &ps->audio_pad);
+    if (ps->demux != NULL) {
+        g_signal_handlers_disconnect_by_data(ps->demux, ps);
+    }
+    clear_stored_pad(&ps->video_pad);
+    clear_stored_pad(&ps->audio_pad);
+    ps->video_branch_entry = NULL;
+    ps->audio_branch_entry = NULL;
     ps->video_sink = NULL;
     ps->demux = NULL;
     ps->source = NULL;
@@ -489,6 +581,8 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->pipeline = pipeline;
     ps->source = NULL;
     ps->demux = NULL;
+    ps->video_branch_entry = NULL;
+    ps->audio_branch_entry = NULL;
     ps->video_pad = NULL;
     ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
@@ -525,6 +619,10 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     if (!build_audio_branch(ps, pipeline, demux, cfg, audio_disabled)) {
         goto fail;
     }
+
+    g_signal_connect(demux, "pad-added", G_CALLBACK(demux_pad_added_cb), ps);
+    g_signal_connect(demux, "pad-removed", G_CALLBACK(demux_pad_removed_cb), ps);
+    connect_existing_demux_pads(ps);
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
