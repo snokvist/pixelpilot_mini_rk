@@ -99,7 +99,7 @@ static void builder_reset_line(OsdElementConfig *elem) {
     elem->type = OSD_WIDGET_LINE;
     elem->data.line.width = 360;
     elem->data.line.height = 80;
-    elem->data.line.window_seconds = 60;
+    elem->data.line.sample_stride_px = 4;
     elem->data.line.metric[0] = '\0';
     elem->data.line.label[0] = '\0';
     elem->data.line.show_info_box = 1;
@@ -154,8 +154,8 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
             if (elem->data.line.height <= 0) {
                 elem->data.line.height = 80;
             }
-            if (elem->data.line.window_seconds <= 0) {
-                elem->data.line.window_seconds = 60;
+            if (elem->data.line.sample_stride_px <= 0) {
+                elem->data.line.sample_stride_px = 4;
             }
         } else {
             LOGE("config: osd element '%s' has unsupported type", elem->name);
@@ -386,8 +386,9 @@ static int parse_osd_element_line(OsdElementConfig *elem, const char *key, const
         elem->data.line.show_info_box = enabled;
         return 0;
     }
-    if (strcasecmp(key, "window-seconds") == 0) {
-        elem->data.line.window_seconds = atoi(value);
+    if (strcasecmp(key, "sample-spacing") == 0 || strcasecmp(key, "sample-stride") == 0 ||
+        strcasecmp(key, "sample_stride") == 0 || strcasecmp(key, "sample-spacing-px") == 0) {
+        elem->data.line.sample_stride_px = atoi(value);
         return 0;
     }
     if (strcasecmp(key, "size") == 0) {

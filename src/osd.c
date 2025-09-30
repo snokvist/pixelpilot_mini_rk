@@ -735,38 +735,11 @@ static void osd_line_reset(OSD *o, const AppCfg *cfg, int idx) {
         return;
     }
 
+    (void)cfg;
+
     int scale = o->scale > 0 ? o->scale : 1;
     OsdLineState *state = &o->elements[idx].data.line;
     memset(state, 0, sizeof(*state));
-
-    int window_seconds = elem_cfg->data.line.window_seconds > 0 ? elem_cfg->data.line.window_seconds : 60;
-    int refresh_ms = cfg->osd_refresh_ms > 0 ? cfg->osd_refresh_ms : 500;
-    int desired_columns = (window_seconds * 1000 + refresh_ms - 1) / refresh_ms;
-    if (desired_columns < 2) {
-        desired_columns = 2;
-    }
-    state->capacity = desired_columns;
-    if (state->capacity > OSD_PLOT_MAX_SAMPLES) {
-        state->capacity = OSD_PLOT_MAX_SAMPLES;
-    }
-    if (state->capacity < 2) {
-        state->capacity = 2;
-    }
-
-    state->size = 0;
-    state->cursor = 0;
-    state->sum = 0.0;
-    state->latest = 0.0;
-    state->min_v = DBL_MAX;
-    state->max_v = 0.0;
-    state->avg = 0.0;
-    state->scale_min = 0.0;
-    state->scale_max = 1.0;
-    state->step_px = 0.0;
-    state->clear_on_next_draw = 0;
-    state->background_ready = 0;
-    state->prev_valid = 0;
-    state->rescale_countdown = 0;
 
     int width = elem_cfg->data.line.width;
     int height = elem_cfg->data.line.height;
@@ -780,6 +753,10 @@ static void osd_line_reset(OSD *o, const AppCfg *cfg, int idx) {
     height *= scale;
 
     int margin = o->margin_px;
+    if (margin < 0) {
+        margin = 0;
+    }
+
     if (width > o->w - 2 * margin) {
         width = o->w - 2 * margin;
     }
@@ -807,12 +784,51 @@ static void osd_line_reset(OSD *o, const AppCfg *cfg, int idx) {
     osd_store_rect(&state->label_rect, 0, 0, 0, 0);
     osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
 
-    if (state->capacity > 1 && state->width > 1) {
-        state->step_px = (double)(state->width - 1) / (double)(state->capacity - 1);
-    } else {
-        state->step_px = 0.0;
+    int stride = elem_cfg->data.line.sample_stride_px;
+    if (stride <= 0) {
+        stride = 4;
     }
+    stride *= scale;
+    if (stride < scale) {
+        stride = scale;
+    }
+    if (width > 1 && stride > width - 1) {
+        stride = width - 1;
+    }
+    if (stride <= 0) {
+        stride = scale;
+    }
+
+    int capacity = 0;
+    if (width > 1 && stride > 0) {
+        capacity = ((width - 1) / stride) + 1;
+    }
+    if (capacity < 2) {
+        capacity = 2;
+    }
+    if (capacity > OSD_PLOT_MAX_SAMPLES) {
+        capacity = OSD_PLOT_MAX_SAMPLES;
+    }
+
+    state->capacity = capacity;
+    state->step_px = (double)stride;
+    state->size = 0;
+    state->cursor = 0;
+    state->sum = 0.0;
+    state->latest = 0.0;
+    state->min_v = DBL_MAX;
+    state->max_v = 0.0;
+    state->avg = 0.0;
+    state->scale_min = 0.0;
+    state->scale_max = 1.0;
+    state->clear_on_next_draw = 0;
+    state->background_ready = 0;
+    state->prev_valid = 0;
+    state->prev_x = 0;
+    state->prev_y = 0;
+    state->rescale_countdown = 0;
 }
+
 
 static void osd_line_push(OsdLineState *state, double value) {
     if (!state || state->capacity <= 0) {
@@ -910,8 +926,13 @@ typedef enum {
     OSD_LINE_BOX_PREF_ABOVE
 } OsdLineBoxPreference;
 
+typedef enum {
+    OSD_LINE_BOX_ALIGN_LEFT = 0,
+    OSD_LINE_BOX_ALIGN_RIGHT
+} OsdLineBoxAlign;
+
 static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int box_h, OsdLineBoxPreference pref,
-                                  int *out_x, int *out_y) {
+                                  OsdLineBoxAlign align, int *out_x, int *out_y) {
     int scale = o->scale > 0 ? o->scale : 1;
     int gap = 4 * scale;
     int margin = o->margin_px;
@@ -919,8 +940,10 @@ static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int bo
         margin = 0;
     }
 
-    int right = state->x + state->width;
-    int base_x = right - box_w;
+    int base_x = state->x;
+    if (align == OSD_LINE_BOX_ALIGN_RIGHT) {
+        base_x = state->x + state->width - box_w;
+    }
     int max_x = o->w - margin - box_w;
     if (max_x < margin) {
         max_x = margin;
@@ -1055,15 +1078,12 @@ static void osd_line_draw_background(OSD *o, int idx) {
         osd_draw_hline(o, base_x, gy, plot_w, grid);
     }
 
-    int desired_secs = 10;
-    int window_seconds = cfg->window_seconds > 0 ? cfg->window_seconds : 60;
-    double px_per_sec = (window_seconds > 0 && plot_w > 1) ? (double)(plot_w - 1) / (double)window_seconds : 0.0;
-    if (px_per_sec > 0.0) {
-        int step_px = (int)(px_per_sec * desired_secs + 0.5);
-        int scale = o->scale > 0 ? o->scale : 1;
-        if (step_px < scale) {
-            step_px = scale;
-        }
+    int scale = o->scale > 0 ? o->scale : 1;
+    int step_px = (int)(state->step_px + 0.5);
+    if (step_px < scale) {
+        step_px = scale;
+    }
+    if (step_px > 0) {
         for (int gx = step_px; gx < plot_w; gx += step_px) {
             osd_draw_vline(o, base_x + gx, base_y, plot_h, grid);
         }
@@ -1226,7 +1246,7 @@ static void osd_line_draw_label(OSD *o, int idx, const OsdLineConfig *cfg) {
 
     int x = 0;
     int y = 0;
-    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_ABOVE, &x, &y);
+    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_ABOVE, OSD_LINE_BOX_ALIGN_LEFT, &x, &y);
 
     uint32_t bg = 0x50202020u;
     uint32_t border = 0x60FFFFFFu;
@@ -1266,7 +1286,7 @@ static void osd_line_draw_footer(OSD *o, int idx, const char **lines, int line_c
     int box_h = line_count * line_advance + 2 * pad;
     int x = 0;
     int y = 0;
-    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_BELOW, &x, &y);
+    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_BELOW, OSD_LINE_BOX_ALIGN_RIGHT, &x, &y);
     uint32_t bg = 0x40202020u;
     uint32_t border = 0x60FFFFFFu;
     uint32_t text_color = 0xB0FFFFFFu;
