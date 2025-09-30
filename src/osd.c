@@ -573,17 +573,27 @@ static const char *osd_metric_normalize(const char *metric_key, char *buf, size_
     }
 
     size_t len = strnlen(metric_key, buf_sz - 1);
-    for (size_t i = 0; i < len; ++i) {
-        char c = metric_key[i];
-        if (c == '_') {
-            c = '.';
-        }
-        buf[i] = c;
-    }
+    memcpy(buf, metric_key, len);
     buf[len] = '\0';
 
     if (metric_key[len] != '\0') {
         return metric_key;
+    }
+
+    int has_dot = 0;
+    for (size_t i = 0; i < len; ++i) {
+        if (metric_key[i] == '.') {
+            has_dot = 1;
+            break;
+        }
+    }
+
+    if (!has_dot) {
+        for (size_t i = 0; i < len; ++i) {
+            if (buf[i] == '_') {
+                buf[i] = '.';
+            }
+        }
     }
 
     return buf;

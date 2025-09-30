@@ -28,19 +28,6 @@ static void line_defaults(OsdLineConfig *cfg) {
     cfg->bg = 0x20000000u;
 }
 
-static void bar_defaults(OsdBarConfig *cfg) {
-    cfg->width = 360;
-    cfg->height = 80;
-    cfg->sample_stride_px = 12;
-    cfg->bar_width_px = 8;
-    cfg->metric[0] = '\0';
-    cfg->label[0] = '\0';
-    cfg->show_info_box = 1;
-    cfg->fg = 0xFF4CAF50u;
-    cfg->grid = 0x20FFFFFFu;
-    cfg->bg = 0x20000000u;
-}
-
 void osd_layout_defaults(OsdLayout *layout) {
     if (!layout) {
         return;
