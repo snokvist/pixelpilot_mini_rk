@@ -108,6 +108,20 @@ static void builder_reset_line(OsdElementConfig *elem) {
     elem->data.line.bg = 0x20000000u;
 }
 
+static void builder_reset_bar(OsdElementConfig *elem) {
+    elem->type = OSD_WIDGET_BAR;
+    elem->data.bar.width = 360;
+    elem->data.bar.height = 80;
+    elem->data.bar.sample_stride_px = 12;
+    elem->data.bar.bar_width_px = 8;
+    elem->data.bar.metric[0] = '\0';
+    elem->data.bar.label[0] = '\0';
+    elem->data.bar.show_info_box = 1;
+    elem->data.bar.fg = 0xFF4CAF50u;
+    elem->data.bar.grid = 0x20FFFFFFu;
+    elem->data.bar.bg = 0x20000000u;
+}
+
 static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
     if (!out_layout) {
         return -1;
@@ -156,6 +170,19 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
             }
             if (elem->data.line.sample_stride_px <= 0) {
                 elem->data.line.sample_stride_px = 4;
+            }
+        } else if (elem->type == OSD_WIDGET_BAR) {
+            if (elem->data.bar.width <= 0) {
+                elem->data.bar.width = 360;
+            }
+            if (elem->data.bar.height <= 0) {
+                elem->data.bar.height = 80;
+            }
+            if (elem->data.bar.sample_stride_px <= 0) {
+                elem->data.bar.sample_stride_px = 12;
+            }
+            if (elem->data.bar.bar_width_px <= 0) {
+                elem->data.bar.bar_width_px = 8;
             }
         } else {
             LOGE("config: osd element '%s' has unsupported type", elem->name);
@@ -427,6 +454,70 @@ static int parse_osd_element_line(OsdElementConfig *elem, const char *key, const
     return -1;
 }
 
+static int parse_osd_element_bar(OsdElementConfig *elem, const char *key, const char *value) {
+    if (strcasecmp(key, "metric") == 0) {
+        ini_copy_string(elem->data.bar.metric, sizeof(elem->data.bar.metric), value);
+        return 0;
+    }
+    if (strcasecmp(key, "label") == 0) {
+        ini_copy_string(elem->data.bar.label, sizeof(elem->data.bar.label), value);
+        return 0;
+    }
+    if (strcasecmp(key, "show-info-box") == 0 || strcasecmp(key, "show_info_box") == 0 ||
+        strcasecmp(key, "info-box") == 0 || strcasecmp(key, "info_box") == 0) {
+        int v = 0;
+        if (parse_bool(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.bar.show_info_box = v;
+        return 0;
+    }
+    if (strcasecmp(key, "size") == 0) {
+        int w = 0, h = 0;
+        if (parse_size(value, &w, &h) != 0) {
+            return -1;
+        }
+        elem->data.bar.width = w;
+        elem->data.bar.height = h;
+        return 0;
+    }
+    if (strcasecmp(key, "sample-spacing") == 0 || strcasecmp(key, "sample-stride") == 0 ||
+        strcasecmp(key, "sample_stride") == 0 || strcasecmp(key, "sample-spacing-px") == 0) {
+        elem->data.bar.sample_stride_px = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "bar-width") == 0 || strcasecmp(key, "bar_width") == 0 ||
+        strcasecmp(key, "bar-width-px") == 0) {
+        elem->data.bar.bar_width_px = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "foreground") == 0 || strcasecmp(key, "bar-color") == 0) {
+        uint32_t color = 0;
+        if (parse_color(value, &color) != 0) {
+            return -1;
+        }
+        elem->data.bar.fg = color;
+        return 0;
+    }
+    if (strcasecmp(key, "grid") == 0) {
+        uint32_t color = 0;
+        if (parse_color(value, &color) != 0) {
+            return -1;
+        }
+        elem->data.bar.grid = color;
+        return 0;
+    }
+    if (strcasecmp(key, "background") == 0) {
+        uint32_t color = 0;
+        if (parse_color(value, &color) != 0) {
+            return -1;
+        }
+        elem->data.bar.bg = color;
+        return 0;
+    }
+    return -1;
+}
+
 static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name, const char *key, const char *value) {
     const char *prefix = "osd.element.";
     size_t prefix_len = strlen(prefix);
@@ -452,7 +543,7 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
             return 0;
         }
         if (strcasecmp(value, "bar") == 0) {
-            elem->type = OSD_WIDGET_BAR;
+            builder_reset_bar(elem);
             builder->type_set[idx] = 1;
             return 0;
         }
@@ -481,6 +572,9 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
     }
     if (elem->type == OSD_WIDGET_LINE) {
         return parse_osd_element_line(elem, key, value);
+    }
+    if (elem->type == OSD_WIDGET_BAR) {
+        return parse_osd_element_bar(elem, key, value);
     }
     return -1;
 }
