@@ -38,12 +38,44 @@ static int clampi(int v, int min_v, int max_v) {
     return v;
 }
 
-static void osd_clear(OSD *o, uint32_t argb) {
-    if (!o->fb.map) {
+static struct DumbFB *osd_draw_fb(OSD *o) {
+    int idx = o->draw_idx & 1;
+    return &o->fb[idx];
+}
+
+static struct DumbFB *osd_front_fb(OSD *o) {
+    int idx = o->front_idx & 1;
+    return &o->fb[idx];
+}
+
+static const struct DumbFB *osd_front_fb_const(const OSD *o) {
+    int idx = o->front_idx & 1;
+    return &o->fb[idx];
+}
+
+static void osd_copy_fb(struct DumbFB *dst, const struct DumbFB *src) {
+    if (!dst || !src || !dst->map || !src->map) {
         return;
     }
-    uint32_t *px = (uint32_t *)o->fb.map;
-    size_t count = o->fb.size / 4;
+    size_t copy_sz = dst->size < src->size ? dst->size : src->size;
+    memcpy(dst->map, src->map, copy_sz);
+}
+
+static void osd_prepare_draw_buffer(OSD *o) {
+    int next = (o->front_idx ^ 1) & 1;
+    o->draw_idx = next;
+    struct DumbFB *dst = osd_draw_fb(o);
+    const struct DumbFB *src = osd_front_fb_const(o);
+    osd_copy_fb(dst, src);
+}
+
+static void osd_clear(OSD *o, uint32_t argb) {
+    struct DumbFB *fb = osd_draw_fb(o);
+    if (!fb->map) {
+        return;
+    }
+    uint32_t *px = (uint32_t *)fb->map;
+    size_t count = fb->size / 4;
     for (size_t i = 0; i < count; ++i) {
         px[i] = argb;
     }
@@ -128,8 +160,9 @@ static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale
         c = (char)(c - 'a' + 'A');
     }
     const uint8_t *glyph = font8x8_basic[(unsigned char)c];
-    uint32_t *fb = (uint32_t *)o->fb.map;
-    int pitch = o->fb.pitch / 4;
+    struct DumbFB *draw_fb = osd_draw_fb(o);
+    uint32_t *fb = (uint32_t *)draw_fb->map;
+    int pitch = draw_fb->pitch / 4;
     for (int row = 0; row < 8; ++row) {
         uint8_t bits = glyph[row];
         if (!bits) {
@@ -173,7 +206,8 @@ static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, in
 }
 
 static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
-    if (!o->fb.map || w <= 0 || h <= 0) {
+    struct DumbFB *draw_fb = osd_draw_fb(o);
+    if (!draw_fb->map || w <= 0 || h <= 0) {
         return;
     }
     int x0 = clampi(x, 0, o->w);
@@ -183,8 +217,8 @@ static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
     if (x0 >= x1 || y0 >= y1) {
         return;
     }
-    uint32_t *fb = (uint32_t *)o->fb.map;
-    int pitch = o->fb.pitch / 4;
+    uint32_t *fb = (uint32_t *)draw_fb->map;
+    int pitch = draw_fb->pitch / 4;
     for (int py = y0; py < y1; ++py) {
         uint32_t *row = fb + py * pitch;
         for (int px = x0; px < x1; ++px) {
@@ -586,7 +620,8 @@ static void osd_draw_vline(OSD *o, int x, int y, int h, uint32_t argb) {
 }
 
 static void osd_draw_line(OSD *o, int x0, int y0, int x1, int y1, uint32_t argb) {
-    if (!o->fb.map) {
+    struct DumbFB *draw_fb = osd_draw_fb(o);
+    if (!draw_fb->map) {
         return;
     }
     int dx = x1 > x0 ? (x1 - x0) : (x0 - x1);
@@ -1690,7 +1725,12 @@ static int osd_commit_enable(int fd, uint32_t crtc_id, OSD *o) {
     if (!req) {
         return -1;
     }
-    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, o->fb.fb_id);
+    const struct DumbFB *front = osd_front_fb_const(o);
+    if (!front || !front->fb_id) {
+        drmModeAtomicFree(req);
+        return -1;
+    }
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, front->fb_id);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_x, 0);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_y, 0);
@@ -1750,15 +1790,28 @@ static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
     if (!req) {
         return;
     }
-    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, o->fb.fb_id);
+    const struct DumbFB *front = osd_front_fb_const(o);
+    if (!front || !front->fb_id) {
+        drmModeAtomicFree(req);
+        return;
+    }
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, front->fb_id);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
     drmModeAtomicCommit(fd, req, 0, NULL);
     drmModeAtomicFree(req);
 }
 
+static void osd_present(int fd, uint32_t crtc_id, OSD *o) {
+    o->front_idx = o->draw_idx & 1;
+    osd_commit_touch(fd, crtc_id, o);
+}
+
 static void osd_destroy_fb(int fd, OSD *o) {
-    destroy_dumb_fb(fd, &o->fb);
-    o->fb.map = NULL;
+    for (int i = 0; i < 2; ++i) {
+        destroy_dumb_fb(fd, &o->fb[i]);
+    }
+    o->front_idx = 0;
+    o->draw_idx = 0;
 }
 
 int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plane_id, OSD *o) {
@@ -1800,11 +1853,19 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
     o->margin_px = clampi(12 * o->scale, 8, o->h / 4);
 
-    if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
-        LOGW("OSD: create fb failed. Disabling OSD.");
-        o->enabled = 0;
-        return -1;
+    for (int i = 0; i < 2; ++i) {
+        if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb[i]) != 0) {
+            LOGW("OSD: create fb %d failed. Disabling OSD.", i);
+            for (int j = 0; j < i; ++j) {
+                destroy_dumb_fb(fd, &o->fb[j]);
+            }
+            o->enabled = 0;
+            return -1;
+        }
     }
+
+    o->front_idx = 0;
+    o->draw_idx = 0;
 
     o->layout = cfg->osd_layout;
     if (o->layout.element_count > OSD_MAX_ELEMENTS) {
@@ -1822,6 +1883,7 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
 
     osd_clear(o, 0x00000000u);
+    osd_copy_fb(&o->fb[1], &o->fb[0]);
     if (osd_commit_enable(fd, ms->crtc_id, o) != 0) {
         LOGW("OSD: atomic enable failed. Disabling OSD.");
         osd_destroy_fb(fd, o);
@@ -1838,6 +1900,8 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     if (!o->enabled || !o->active) {
         return;
     }
+
+    osd_prepare_draw_buffer(o);
 
     OsdRenderContext ctx = {
         .cfg = cfg,
@@ -1869,7 +1933,7 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         }
     }
 
-    osd_commit_touch(fd, o->crtc_id, o);
+    osd_present(fd, o->crtc_id, o);
 }
 
 int osd_is_enabled(const OSD *o) {

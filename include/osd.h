@@ -55,7 +55,9 @@ typedef struct OSD {
     int active;
     uint32_t requested_plane_id;
     uint32_t plane_id;
-    struct DumbFB fb;
+    struct DumbFB fb[2];
+    int front_idx;
+    int draw_idx;
     int w;
     int h;
     int scale;
