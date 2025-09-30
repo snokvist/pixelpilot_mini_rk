@@ -50,6 +50,32 @@ typedef struct {
     OSDRect footer_rect;
 } OsdLineState;
 
+typedef struct {
+    double samples[OSD_PLOT_MAX_SAMPLES];
+    int capacity;
+    int size;
+    int cursor;
+    double sum;
+    double latest;
+    double min_v;
+    double max_v;
+    double avg;
+    double scale_min;
+    double scale_max;
+    double step_px;
+    int clear_on_next_draw;
+    int background_ready;
+    int rescale_countdown;
+    int width;
+    int height;
+    int bar_width;
+    int x;
+    int y;
+    OSDRect plot_rect;
+    OSDRect label_rect;
+    OSDRect footer_rect;
+} OsdBarState;
+
 typedef struct OSD {
     int enabled;
     int active;
@@ -84,6 +110,7 @@ typedef struct OSD {
         union {
             OsdTextState text;
             OsdLineState line;
+            OsdBarState bar;
         } data;
     } elements[OSD_MAX_ELEMENTS];
 } OSD;

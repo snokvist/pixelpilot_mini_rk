@@ -829,6 +829,122 @@ static void osd_line_reset(OSD *o, const AppCfg *cfg, int idx) {
     state->rescale_countdown = 0;
 }
 
+static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
+    if (idx < 0 || idx >= o->layout.element_count) {
+        return;
+    }
+    OsdElementConfig *elem_cfg = &o->layout.elements[idx];
+    o->elements[idx].type = elem_cfg->type;
+    if (elem_cfg->type != OSD_WIDGET_BAR) {
+        return;
+    }
+
+    (void)cfg;
+
+    int scale = o->scale > 0 ? o->scale : 1;
+    OsdBarState *state = &o->elements[idx].data.bar;
+    memset(state, 0, sizeof(*state));
+
+    int width = elem_cfg->data.bar.width;
+    int height = elem_cfg->data.bar.height;
+    if (width <= 0) {
+        width = 360;
+    }
+    if (height <= 0) {
+        height = 80;
+    }
+    width *= scale;
+    height *= scale;
+
+    int margin = o->margin_px;
+    if (margin < 0) {
+        margin = 0;
+    }
+
+    if (width > o->w - 2 * margin) {
+        width = o->w - 2 * margin;
+    }
+    if (width < scale * 60) {
+        width = scale * 60;
+    }
+    if (width <= 0) {
+        width = scale * 60;
+    }
+
+    if (height > o->h - 2 * margin) {
+        height = o->h - 2 * margin;
+    }
+    if (height < scale * 40) {
+        height = scale * 40;
+    }
+    if (height <= 0) {
+        height = scale * 40;
+    }
+
+    state->width = width;
+    state->height = height;
+    osd_compute_placement(o, width, height, &elem_cfg->placement, &state->x, &state->y);
+    osd_store_rect(&state->plot_rect, 0, 0, 0, 0);
+    osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+    osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+
+    int stride = elem_cfg->data.bar.sample_stride_px;
+    if (stride <= 0) {
+        stride = 12;
+    }
+    stride *= scale;
+    if (stride < scale) {
+        stride = scale;
+    }
+
+    int bar_width = elem_cfg->data.bar.bar_width_px;
+    if (bar_width <= 0) {
+        bar_width = 8;
+    }
+    bar_width *= scale;
+    if (bar_width < scale) {
+        bar_width = scale;
+    }
+    if (bar_width > width) {
+        bar_width = width;
+    }
+
+    if (stride < bar_width) {
+        stride = bar_width;
+    }
+
+    int capacity = 0;
+    if (width > 0 && stride > 0) {
+        if (width <= bar_width) {
+            capacity = 1;
+        } else {
+            capacity = ((width - bar_width) / stride) + 1;
+        }
+    }
+    if (capacity < 1) {
+        capacity = 1;
+    }
+    if (capacity > OSD_PLOT_MAX_SAMPLES) {
+        capacity = OSD_PLOT_MAX_SAMPLES;
+    }
+
+    state->capacity = capacity;
+    state->step_px = (double)stride;
+    state->bar_width = bar_width;
+    state->size = 0;
+    state->cursor = 0;
+    state->sum = 0.0;
+    state->latest = 0.0;
+    state->min_v = DBL_MAX;
+    state->max_v = 0.0;
+    state->avg = 0.0;
+    state->scale_min = 0.0;
+    state->scale_max = 1.0;
+    state->clear_on_next_draw = 0;
+    state->background_ready = 0;
+    state->rescale_countdown = 0;
+}
+
 
 static void osd_line_push(OsdLineState *state, double value) {
     if (!state || state->capacity <= 0) {
@@ -903,6 +1019,94 @@ static void osd_line_compute_scale(const OsdLineState *state, double *out_min, d
     *out_max = max_v;
 }
 
+static void osd_bar_push(OsdBarState *state, double value) {
+    if (!state || state->capacity <= 0) {
+        return;
+    }
+    if (state->cursor >= state->capacity) {
+        state->cursor = 0;
+    }
+    if (state->cursor == 0 && state->size >= state->capacity) {
+        state->clear_on_next_draw = 1;
+        state->background_ready = 0;
+        state->size = 0;
+        state->sum = 0.0;
+        state->min_v = DBL_MAX;
+        state->max_v = 0.0;
+        state->avg = 0.0;
+        state->latest = 0.0;
+    }
+
+    state->samples[state->cursor] = value;
+    state->cursor++;
+    if (state->size < state->cursor) {
+        state->size = state->cursor;
+    }
+    state->sum += value;
+    if (state->size == 1 || value < state->min_v) {
+        state->min_v = value;
+    }
+    if (value > state->max_v) {
+        state->max_v = value;
+    }
+    state->avg = state->size > 0 ? (state->sum / (double)state->size) : 0.0;
+    state->latest = value;
+}
+
+static void osd_bar_compute_scale(const OsdBarState *state, double *out_min, double *out_max) {
+    double min_v = 0.0;
+    double max_v = 1.0;
+    if (state->size > 0) {
+        if (state->min_v != DBL_MAX) {
+            min_v = state->min_v;
+        }
+        max_v = state->max_v;
+        if (max_v < 0.1) {
+            max_v = 0.1;
+        }
+        if (min_v > max_v) {
+            min_v = max_v * 0.5;
+        }
+    }
+
+    double span = max_v - min_v;
+    if (span <= 0.0) {
+        span = (max_v > 0.0) ? (max_v * 0.5) : 0.5;
+    }
+    double pad = span * 0.1;
+    if (pad < 0.05) {
+        pad = 0.05;
+    }
+    min_v -= pad;
+    max_v += pad;
+    if (min_v < 0.0) {
+        min_v = 0.0;
+    }
+    if (max_v <= min_v) {
+        max_v = min_v + 0.1;
+    }
+    *out_min = min_v;
+    *out_max = max_v;
+}
+
+static int osd_bar_value_to_y(const OsdBarState *state, double value) {
+    double min_v = state->scale_min;
+    double max_v = state->scale_max;
+    if (max_v <= min_v) {
+        max_v = min_v + 0.1;
+    }
+    double norm = (value - min_v) / (max_v - min_v);
+    if (norm < 0.0) {
+        norm = 0.0;
+    }
+    if (norm > 1.0) {
+        norm = 1.0;
+    }
+    int plot_h = state->height;
+    int base_y = state->y;
+    return base_y + plot_h - 1 - (int)(norm * (plot_h - 1) + 0.5);
+}
+
 static int osd_line_value_to_y(const OsdLineState *state, double value) {
     double min_v = state->scale_min;
     double max_v = state->scale_max;
@@ -931,8 +1135,8 @@ typedef enum {
     OSD_LINE_BOX_ALIGN_RIGHT
 } OsdLineBoxAlign;
 
-static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int box_h, OsdLineBoxPreference pref,
-                                  OsdLineBoxAlign align, int *out_x, int *out_y) {
+static void osd_plot_position_box(OSD *o, int plot_x, int plot_y, int plot_w, int plot_h, int box_w, int box_h,
+                                  OsdLineBoxPreference pref, OsdLineBoxAlign align, int *out_x, int *out_y) {
     int scale = o->scale > 0 ? o->scale : 1;
     int gap = 4 * scale;
     int margin = o->margin_px;
@@ -940,9 +1144,9 @@ static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int bo
         margin = 0;
     }
 
-    int base_x = state->x;
+    int base_x = plot_x;
     if (align == OSD_LINE_BOX_ALIGN_RIGHT) {
-        base_x = state->x + state->width - box_w;
+        base_x = plot_x + plot_w - box_w;
     }
     int max_x = o->w - margin - box_w;
     if (max_x < margin) {
@@ -970,7 +1174,7 @@ static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int bo
         int mode = order[i];
         switch (mode) {
         case 0: { // below
-            int y = state->y + state->height + gap;
+            int y = plot_y + plot_h + gap;
             if (y + box_h <= o->h - margin) {
                 *out_x = base_x;
                 *out_y = y;
@@ -979,7 +1183,7 @@ static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int bo
             break;
         }
         case 1: { // above
-            int y = state->y - box_h - gap;
+            int y = plot_y - box_h - gap;
             if (y >= margin) {
                 *out_x = base_x;
                 *out_y = y;
@@ -988,9 +1192,9 @@ static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int bo
             break;
         }
         case 2: { // right
-            int x = state->x + state->width + gap;
+            int x = plot_x + plot_w + gap;
             if (x + box_w <= o->w - margin) {
-                int y = state->y;
+                int y = plot_y;
                 if (y < margin) {
                     y = margin;
                 }
@@ -1007,9 +1211,9 @@ static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int bo
             break;
         }
         case 3: { // left
-            int x = state->x - box_w - gap;
+            int x = plot_x - box_w - gap;
             if (x >= margin) {
-                int y = state->y;
+                int y = plot_y;
                 if (y < margin) {
                     y = margin;
                 }
@@ -1134,6 +1338,97 @@ static void osd_line_draw_all(OSD *o, int idx, uint32_t color) {
     }
 }
 
+static void osd_bar_draw_background(OSD *o, int idx) {
+    OsdBarState *state = &o->elements[idx].data.bar;
+    const OsdBarConfig *cfg = &o->layout.elements[idx].data.bar;
+    uint32_t bg = cfg->bg ? cfg->bg : 0x40202020u;
+    uint32_t border = 0x60FFFFFFu;
+    uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
+    uint32_t grid = cfg->grid ? cfg->grid : 0x30909090u;
+
+    osd_clear_rect(o, &state->plot_rect);
+
+    int base_x = state->x;
+    int base_y = state->y;
+    int plot_w = state->width;
+    int plot_h = state->height;
+
+    osd_fill_rect(o, base_x, base_y, plot_w, plot_h, bg);
+    osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
+    osd_store_rect(&state->plot_rect, base_x, base_y, plot_w, plot_h);
+
+    int grid_lines = 4;
+    for (int i = 1; i < grid_lines; ++i) {
+        int gy = base_y + (plot_h * i) / grid_lines;
+        osd_draw_hline(o, base_x, gy, plot_w, grid);
+    }
+
+    int scale = o->scale > 0 ? o->scale : 1;
+    int marker_count = 4;
+    int marker_height = 5 * scale;
+    if (marker_height > plot_h) {
+        marker_height = plot_h;
+    }
+    for (int i = 1; i <= marker_count; ++i) {
+        int gx = base_x + (plot_w * i) / (marker_count + 1);
+        osd_draw_vline(o, gx, base_y + plot_h - marker_height, marker_height, grid);
+    }
+
+    int axis_thickness = o->scale > 0 ? o->scale : 1;
+    osd_draw_hline(o, base_x, base_y + plot_h - axis_thickness, plot_w, axis);
+    osd_draw_vline(o, base_x, base_y, plot_h, axis);
+}
+
+static void osd_bar_draw_all(OSD *o, int idx, uint32_t color) {
+    OsdBarState *state = &o->elements[idx].data.bar;
+    int limit = state->size;
+    if (limit <= 0) {
+        return;
+    }
+
+    int base_x = state->x;
+    int base_y = state->y;
+    int plot_w = state->width;
+    int plot_h = state->height;
+    int bottom = base_y + plot_h;
+    int bar_width = state->bar_width;
+    if (bar_width <= 0) {
+        bar_width = 1;
+    }
+
+    double step = state->step_px;
+    if (step <= 0.0) {
+        step = (double)bar_width;
+    }
+
+    for (int i = 0; i < limit; ++i) {
+        double value = state->samples[i];
+        int left = base_x + (int)(i * step + 0.5);
+        if (left >= base_x + plot_w) {
+            break;
+        }
+        int width = bar_width;
+        if (left + width > base_x + plot_w) {
+            width = base_x + plot_w - left;
+        }
+        if (width <= 0) {
+            continue;
+        }
+        int top = osd_bar_value_to_y(state, value);
+        if (top < base_y) {
+            top = base_y;
+        }
+        if (top > bottom) {
+            top = bottom;
+        }
+        int h = bottom - top;
+        if (h <= 0) {
+            continue;
+        }
+        osd_fill_rect(o, left, top, width, h, color);
+    }
+}
+
 static void osd_line_draw_latest(OSD *o, int idx, uint32_t color) {
     OsdLineState *state = &o->elements[idx].data.line;
     int limit = state->size;
@@ -1246,7 +1541,8 @@ static void osd_line_draw_label(OSD *o, int idx, const OsdLineConfig *cfg) {
 
     int x = 0;
     int y = 0;
-    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_ABOVE, OSD_LINE_BOX_ALIGN_LEFT, &x, &y);
+    osd_plot_position_box(o, state->x, state->y, state->width, state->height, box_w, box_h, OSD_LINE_BOX_PREF_ABOVE,
+                          OSD_LINE_BOX_ALIGN_LEFT, &x, &y);
 
     uint32_t bg = 0x50202020u;
     uint32_t border = 0x60FFFFFFu;
@@ -1286,7 +1582,91 @@ static void osd_line_draw_footer(OSD *o, int idx, const char **lines, int line_c
     int box_h = line_count * line_advance + 2 * pad;
     int x = 0;
     int y = 0;
-    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_BELOW, OSD_LINE_BOX_ALIGN_RIGHT, &x, &y);
+    osd_plot_position_box(o, state->x, state->y, state->width, state->height, box_w, box_h, OSD_LINE_BOX_PREF_BELOW,
+                          OSD_LINE_BOX_ALIGN_RIGHT, &x, &y);
+    uint32_t bg = 0x40202020u;
+    uint32_t border = 0x60FFFFFFu;
+    uint32_t text_color = 0xB0FFFFFFu;
+    osd_fill_rect(o, x, y, box_w, box_h, bg);
+    osd_draw_rect(o, x, y, box_w, box_h, border);
+    int draw_y = y + pad;
+    for (int i = 0; i < line_count; ++i) {
+        if (lines[i] == NULL) {
+            continue;
+        }
+        osd_draw_text(o, x + pad, draw_y, lines[i], text_color, o->scale);
+        draw_y += line_advance;
+    }
+    osd_store_rect(&state->footer_rect, x, y, box_w, box_h);
+}
+
+static void osd_bar_draw_label(OSD *o, int idx, const OsdBarConfig *cfg) {
+    OsdBarState *state = &o->elements[idx].data.bar;
+    osd_clear_rect(o, &state->label_rect);
+    if (!cfg || !cfg->show_info_box) {
+        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+        return;
+    }
+    const char *text = cfg->label;
+    if (text == NULL || text[0] == '\0') {
+        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+        return;
+    }
+    int scale = o->scale > 0 ? o->scale : 1;
+    int pad = 4 * scale;
+    int line_height = 8 * scale;
+    int text_w = (int)strlen(text) * (8 + 1) * scale;
+    if (text_w < 0) {
+        text_w = 0;
+    }
+    int box_w = text_w + 2 * pad;
+    int box_h = line_height + 2 * pad;
+
+    int x = 0;
+    int y = 0;
+    osd_plot_position_box(o, state->x, state->y, state->width, state->height, box_w, box_h, OSD_LINE_BOX_PREF_ABOVE,
+                          OSD_LINE_BOX_ALIGN_LEFT, &x, &y);
+
+    uint32_t bg = 0x50202020u;
+    uint32_t border = 0x60FFFFFFu;
+    uint32_t text_color = 0xB0FFFFFFu;
+    osd_fill_rect(o, x, y, box_w, box_h, bg);
+    osd_draw_rect(o, x, y, box_w, box_h, border);
+    osd_draw_text(o, x + pad, y + pad, text, text_color, o->scale);
+    osd_store_rect(&state->label_rect, x, y, box_w, box_h);
+}
+
+static void osd_bar_draw_footer(OSD *o, int idx, const char **lines, int line_count) {
+    OsdBarState *state = &o->elements[idx].data.bar;
+    osd_clear_rect(o, &state->footer_rect);
+    if (lines == NULL || line_count <= 0) {
+        osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+        return;
+    }
+    int scale = o->scale > 0 ? o->scale : 1;
+    int pad = 6 * scale;
+    int line_advance = (8 + 1) * scale;
+    int max_line_w = 0;
+    for (int i = 0; i < line_count; ++i) {
+        if (lines[i] == NULL) {
+            continue;
+        }
+        int len = (int)strlen(lines[i]);
+        int w = len * (8 + 1) * scale;
+        if (w > max_line_w) {
+            max_line_w = w;
+        }
+    }
+    if (max_line_w <= 0) {
+        osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+        return;
+    }
+    int box_w = max_line_w + 2 * pad;
+    int box_h = line_count * line_advance + 2 * pad;
+    int x = 0;
+    int y = 0;
+    osd_plot_position_box(o, state->x, state->y, state->width, state->height, box_w, box_h, OSD_LINE_BOX_PREF_BELOW,
+                          OSD_LINE_BOX_ALIGN_RIGHT, &x, &y);
     uint32_t bg = 0x40202020u;
     uint32_t border = 0x60FFFFFFu;
     uint32_t text_color = 0xB0FFFFFFu;
@@ -1367,6 +1747,33 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
     o->elements[idx].data.text.last_line_count = actual_lines;
 }
 
+static void osd_bar_draw(OSD *o, int idx) {
+    OsdBarState *state = &o->elements[idx].data.bar;
+    const OsdBarConfig *cfg = &o->layout.elements[idx].data.bar;
+    if (state->capacity <= 0) {
+        return;
+    }
+
+    double scale_min = state->scale_min;
+    double scale_max = state->scale_max;
+    osd_bar_compute_scale(state, &scale_min, &scale_max);
+
+    osd_bar_draw_background(o, idx);
+
+    state->scale_min = scale_min;
+    state->scale_max = scale_max;
+    state->background_ready = 1;
+    state->clear_on_next_draw = 0;
+    state->rescale_countdown = OSD_PLOT_RESCALE_DELAY;
+
+    if (state->size <= 0) {
+        return;
+    }
+
+    uint32_t fg = cfg->fg ? cfg->fg : 0xFF4CAF50u;
+    osd_bar_draw_all(o, idx, fg);
+}
+
 static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx) {
     OsdElementConfig *elem_cfg = &o->layout.elements[idx];
     OsdLineState *state = &o->elements[idx].data.line;
@@ -1414,6 +1821,54 @@ static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx
     } else {
         osd_line_draw_footer(o, idx, NULL, 0);
     }
+    osd_store_rect(&o->elements[idx].rect, state->x, state->y, state->width, state->height);
+}
+
+static void osd_render_bar_element(OSD *o, int idx, const OsdRenderContext *ctx) {
+    OsdElementConfig *elem_cfg = &o->layout.elements[idx];
+    OsdBarState *state = &o->elements[idx].data.bar;
+
+    OSDRect prev_rect = o->elements[idx].rect;
+    int repositioned = (prev_rect.x != state->x) || (prev_rect.y != state->y) || (prev_rect.w != state->width) ||
+                       (prev_rect.h != state->height);
+    if (repositioned) {
+        if (prev_rect.w > 0 && prev_rect.h > 0) {
+            osd_clear_rect(o, &prev_rect);
+        }
+        state->background_ready = 0;
+        state->clear_on_next_draw = 1;
+    }
+
+    double value = 0.0;
+    int have_value = osd_metric_sample(ctx, elem_cfg->data.bar.metric, &value);
+    if (have_value) {
+        osd_bar_push(state, value);
+    }
+
+    osd_bar_draw(o, idx);
+    osd_bar_draw_label(o, idx, &elem_cfg->data.bar);
+
+    if (elem_cfg->data.bar.show_info_box) {
+        char footer_line[128];
+        const char *footer_ptrs[1];
+        int footer_count = 0;
+        if (state->size > 0) {
+            char latest_buf[32];
+            osd_format_metric_value(elem_cfg->data.bar.metric, state->latest, latest_buf, sizeof(latest_buf));
+            snprintf(footer_line, sizeof(footer_line), "%s", latest_buf);
+            footer_ptrs[0] = footer_line;
+            footer_count = 1;
+        } else {
+            const char *msg = ctx->have_stats && have_value ? "Collecting samples..." : "Metric unavailable";
+            snprintf(footer_line, sizeof(footer_line), "%s", msg);
+            footer_ptrs[0] = footer_line;
+            footer_count = 1;
+        }
+        osd_bar_draw_footer(o, idx, footer_ptrs, footer_count);
+    } else {
+        osd_bar_draw_footer(o, idx, NULL, 0);
+    }
+
     osd_store_rect(&o->elements[idx].rect, state->x, state->y, state->width, state->height);
 }
 
@@ -1801,6 +2256,8 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
         osd_store_rect(&o->elements[i].rect, 0, 0, 0, 0);
         if (o->elements[i].type == OSD_WIDGET_LINE) {
             osd_line_reset(o, cfg, i);
+        } else if (o->elements[i].type == OSD_WIDGET_BAR) {
+            osd_bar_reset(o, cfg, i);
         } else if (o->elements[i].type == OSD_WIDGET_TEXT) {
             o->elements[i].data.text.last_line_count = 0;
         }
@@ -1847,6 +2304,8 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
             osd_render_line_element(o, i, &ctx);
             break;
         case OSD_WIDGET_BAR:
+            osd_render_bar_element(o, i, &ctx);
+            break;
         default:
             osd_clear_rect(o, &o->elements[i].rect);
             osd_store_rect(&o->elements[i].rect, 0, 0, 0, 0);

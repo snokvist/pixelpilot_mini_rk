@@ -53,6 +53,7 @@ typedef struct {
     int width;
     int height;
     int sample_stride_px;
+    int bar_width_px;
     char metric[64];
     char label[32];
     int show_info_box;
@@ -62,12 +63,26 @@ typedef struct {
 } OsdLineConfig;
 
 typedef struct {
+    int width;
+    int height;
+    int sample_stride_px;
+    int bar_width_px;
+    char metric[64];
+    char label[32];
+    int show_info_box;
+    uint32_t fg;
+    uint32_t grid;
+    uint32_t bg;
+} OsdBarConfig;
+
+typedef struct {
     OsdElementType type;
     char name[48];
     OsdPlacement placement;
     union {
         OsdTextConfig text;
         OsdLineConfig line;
+        OsdBarConfig bar;
     } data;
 } OsdElementConfig;
 
