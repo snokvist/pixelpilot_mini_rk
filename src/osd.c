@@ -905,12 +905,137 @@ static int osd_line_value_to_y(const OsdLineState *state, double value) {
     return base_y + plot_h - 1 - (int)(norm * (plot_h - 1) + 0.5);
 }
 
+typedef enum {
+    OSD_LINE_BOX_PREF_BELOW = 0,
+    OSD_LINE_BOX_PREF_ABOVE
+} OsdLineBoxPreference;
+
+static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int box_h, OsdLineBoxPreference pref,
+                                  int *out_x, int *out_y) {
+    int scale = o->scale > 0 ? o->scale : 1;
+    int gap = 4 * scale;
+    int margin = o->margin_px;
+    if (margin < 0) {
+        margin = 0;
+    }
+
+    int right = state->x + state->width;
+    int base_x = right - box_w;
+    int max_x = o->w - margin - box_w;
+    if (max_x < margin) {
+        max_x = margin;
+    }
+    if (base_x < margin) {
+        base_x = margin;
+    }
+    if (base_x > max_x) {
+        base_x = max_x;
+    }
+
+    int order[4];
+    if (pref == OSD_LINE_BOX_PREF_BELOW) {
+        order[0] = 0;
+        order[1] = 1;
+    } else {
+        order[0] = 1;
+        order[1] = 0;
+    }
+    order[2] = 2;
+    order[3] = 3;
+
+    for (int i = 0; i < 4; ++i) {
+        int mode = order[i];
+        switch (mode) {
+        case 0: { // below
+            int y = state->y + state->height + gap;
+            if (y + box_h <= o->h - margin) {
+                *out_x = base_x;
+                *out_y = y;
+                return;
+            }
+            break;
+        }
+        case 1: { // above
+            int y = state->y - box_h - gap;
+            if (y >= margin) {
+                *out_x = base_x;
+                *out_y = y;
+                return;
+            }
+            break;
+        }
+        case 2: { // right
+            int x = state->x + state->width + gap;
+            if (x + box_w <= o->w - margin) {
+                int y = state->y;
+                if (y < margin) {
+                    y = margin;
+                }
+                if (y + box_h > o->h - margin) {
+                    y = o->h - margin - box_h;
+                    if (y < margin) {
+                        y = margin;
+                    }
+                }
+                *out_x = x;
+                *out_y = y;
+                return;
+            }
+            break;
+        }
+        case 3: { // left
+            int x = state->x - box_w - gap;
+            if (x >= margin) {
+                int y = state->y;
+                if (y < margin) {
+                    y = margin;
+                }
+                if (y + box_h > o->h - margin) {
+                    y = o->h - margin - box_h;
+                    if (y < margin) {
+                        y = margin;
+                    }
+                }
+                *out_x = x;
+                *out_y = y;
+                return;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    int fallback_x = base_x;
+    if (fallback_x < margin) {
+        fallback_x = margin;
+    }
+    if (fallback_x > o->w - margin - box_w) {
+        fallback_x = o->w - margin - box_w;
+    }
+    if (fallback_x < margin) {
+        fallback_x = margin;
+    }
+
+    int fallback_y = (pref == OSD_LINE_BOX_PREF_BELOW) ? (o->h - margin - box_h) : margin;
+    if (fallback_y + box_h > o->h - margin) {
+        fallback_y = o->h - margin - box_h;
+    }
+    if (fallback_y < margin) {
+        fallback_y = margin;
+    }
+
+    *out_x = fallback_x;
+    *out_y = fallback_y;
+}
+
 static void osd_line_draw_background(OSD *o, int idx) {
     OsdLineState *state = &o->elements[idx].data.line;
     const OsdLineConfig *cfg = &o->layout.elements[idx].data.line;
     uint32_t bg = cfg->bg ? cfg->bg : 0x40202020u;
     uint32_t border = 0x60FFFFFFu;
-    uint32_t axis = cfg->fg ? cfg->fg : 0x60FFFFFFu;
+    uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
     uint32_t grid = cfg->grid ? cfg->grid : 0x30909090u;
 
     osd_clear_rect(o, &state->plot_rect);
@@ -1091,7 +1216,6 @@ static void osd_line_draw_label(OSD *o, int idx, const OsdLineConfig *cfg) {
     }
     int scale = o->scale > 0 ? o->scale : 1;
     int pad = 4 * scale;
-    int gap = 4 * scale;
     int line_height = 8 * scale;
     int text_w = (int)strlen(text) * (8 + 1) * scale;
     if (text_w < 0) {
@@ -1100,30 +1224,9 @@ static void osd_line_draw_label(OSD *o, int idx, const OsdLineConfig *cfg) {
     int box_w = text_w + 2 * pad;
     int box_h = line_height + 2 * pad;
 
-    int x = state->x;
-    if (x + box_w > state->x + state->width) {
-        x = state->x + state->width - box_w;
-    }
-    if (x < o->margin_px) {
-        x = o->margin_px;
-    }
-    if (x + box_w > o->w - o->margin_px) {
-        x = o->w - o->margin_px - box_w;
-        if (x < o->margin_px) {
-            x = o->margin_px;
-        }
-    }
-
-    int y = state->y - box_h - gap;
-    if (y < o->margin_px) {
-        y = state->y + state->height + gap;
-        if (y + box_h > o->h - o->margin_px) {
-            y = state->y + state->height - box_h - gap;
-            if (y < o->margin_px) {
-                y = o->margin_px;
-            }
-        }
-    }
+    int x = 0;
+    int y = 0;
+    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_ABOVE, &x, &y);
 
     uint32_t bg = 0x50202020u;
     uint32_t border = 0x60FFFFFFu;
@@ -1161,23 +1264,9 @@ static void osd_line_draw_footer(OSD *o, int idx, const char **lines, int line_c
     }
     int box_w = max_line_w + 2 * pad;
     int box_h = line_count * line_advance + 2 * pad;
-    int x = state->x + state->width - box_w;
-    if (x < o->margin_px) {
-        x = o->margin_px;
-    }
-    if (x + box_w > o->w - o->margin_px) {
-        x = o->w - o->margin_px - box_w;
-        if (x < o->margin_px) {
-            x = o->margin_px;
-        }
-    }
-    int y = state->y + state->height + scale * 4;
-    if (y + box_h > o->h - o->margin_px) {
-        y = state->y + state->height - box_h - scale * 4;
-        if (y < o->margin_px) {
-            y = o->margin_px;
-        }
-    }
+    int x = 0;
+    int y = 0;
+    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_BELOW, &x, &y);
     uint32_t bg = 0x40202020u;
     uint32_t border = 0x60FFFFFFu;
     uint32_t text_color = 0xB0FFFFFFu;
@@ -1283,43 +1372,28 @@ static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx
     osd_line_draw(o, idx);
     osd_line_draw_label(o, idx, &elem_cfg->data.line);
 
-    char footer_lines[3][128];
-    const char *footer_ptrs[3];
-    int footer_count = 0;
+    if (elem_cfg->data.line.show_info_box) {
+        char footer_line[128];
+        const char *footer_ptrs[1];
+        int footer_count = 0;
 
-    if (state->size > 0) {
-        char latest_buf[32];
-        char avg_buf[32];
-        double min_v = (state->min_v == DBL_MAX) ? 0.0 : state->min_v;
-        char min_buf[32];
-        char max_buf[32];
-        osd_format_metric_value(elem_cfg->data.line.metric, state->latest, latest_buf, sizeof(latest_buf));
-        osd_format_metric_value(elem_cfg->data.line.metric, state->avg, avg_buf, sizeof(avg_buf));
-        osd_format_metric_value(elem_cfg->data.line.metric, min_v, min_buf, sizeof(min_buf));
-        osd_format_metric_value(elem_cfg->data.line.metric, state->max_v, max_buf, sizeof(max_buf));
+        if (state->size > 0) {
+            char latest_buf[32];
+            osd_format_metric_value(elem_cfg->data.line.metric, state->latest, latest_buf, sizeof(latest_buf));
+            snprintf(footer_line, sizeof(footer_line), "%s", latest_buf);
+            footer_ptrs[0] = footer_line;
+            footer_count = 1;
+        } else {
+            const char *msg = ctx->have_stats && have_value ? "Collecting samples..." : "Metric unavailable";
+            snprintf(footer_line, sizeof(footer_line), "%s", msg);
+            footer_ptrs[0] = footer_line;
+            footer_count = 1;
+        }
 
-        snprintf(footer_lines[footer_count], sizeof(footer_lines[footer_count]), "Latest %s  Avg %s", latest_buf, avg_buf);
-        footer_ptrs[footer_count] = footer_lines[footer_count];
-        footer_count++;
-        if (footer_count < 3) {
-            snprintf(footer_lines[footer_count], sizeof(footer_lines[footer_count]), "Min %s  Max %s", min_buf, max_buf);
-            footer_ptrs[footer_count] = footer_lines[footer_count];
-            footer_count++;
-        }
-        if (footer_count < 3) {
-            int window_seconds = elem_cfg->data.line.window_seconds > 0 ? elem_cfg->data.line.window_seconds : 60;
-            snprintf(footer_lines[footer_count], sizeof(footer_lines[footer_count]), "Window %ds", window_seconds);
-            footer_ptrs[footer_count] = footer_lines[footer_count];
-            footer_count++;
-        }
+        osd_line_draw_footer(o, idx, footer_ptrs, footer_count);
     } else {
-        const char *msg = ctx->have_stats && have_value ? "Collecting samples..." : "Metric unavailable";
-        snprintf(footer_lines[0], sizeof(footer_lines[0]), "%s", msg);
-        footer_ptrs[footer_count] = footer_lines[0];
-        footer_count++;
+        osd_line_draw_footer(o, idx, NULL, 0);
     }
-
-    osd_line_draw_footer(o, idx, footer_ptrs, footer_count);
     osd_store_rect(&o->elements[idx].rect, state->x, state->y, state->width, state->height);
 }
 
