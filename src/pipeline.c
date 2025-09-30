@@ -575,6 +575,12 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
 
     GstElement *pipeline = gst_pipeline_new("pixelpilot-pipeline");
     CHECK_ELEM(pipeline, "pipeline");
+
+    GstClock *clock = gst_system_clock_obtain();
+    gst_pipeline_use_clock(GST_PIPELINE(pipeline), clock);
+    gst_element_set_start_time(pipeline, GST_CLOCK_TIME_NONE);
+    gst_object_unref(clock);
+
     ps->pipeline = pipeline;
     ps->source = NULL;
     ps->demux = NULL;
