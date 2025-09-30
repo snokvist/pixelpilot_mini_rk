@@ -119,6 +119,23 @@ static GstCaps *make_raw_audio_caps(void) {
                                "channels", G_TYPE_INT, 2, NULL);
 }
 
+static GstCaps *caps_for_payload(const PipelineState *ps, gint payload_type) {
+    if (ps == NULL || ps->cfg == NULL) {
+        return NULL;
+    }
+
+    const AppCfg *cfg = ps->cfg;
+    if (payload_type == cfg->vid_pt) {
+        return make_rtp_caps(cfg->vid_pt, 90000, "H265");
+    }
+
+    if (payload_type == cfg->aud_pt && cfg->aud_pt >= 0) {
+        return make_rtp_caps(cfg->aud_pt, 48000, "OPUS");
+    }
+
+    return NULL;
+}
+
 static gint get_pad_payload_type(GstPad *pad) {
     gint payload_type = -1;
     if (pad == NULL) {
@@ -227,6 +244,15 @@ static void demux_pad_removed_cb(GstElement *element, GstPad *pad, gpointer user
         ps->audio_pad = NULL;
         LOGI("Demux audio pad removed");
     }
+}
+
+static GstCaps *demux_request_pt_map_cb(GstElement *element, guint payload_type, gpointer user_data) {
+    PipelineState *ps = (PipelineState *)user_data;
+    GstCaps *caps = caps_for_payload(ps, (gint)payload_type);
+    if (caps == NULL) {
+        LOGW("No caps mapping available for payload type %u", payload_type);
+    }
+    return caps;
 }
 
 static void connect_existing_demux_pads(PipelineState *ps) {
@@ -622,6 +648,7 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
 
     g_signal_connect(demux, "pad-added", G_CALLBACK(demux_pad_added_cb), ps);
     g_signal_connect(demux, "pad-removed", G_CALLBACK(demux_pad_removed_cb), ps);
+    g_signal_connect(demux, "request-pt-map", G_CALLBACK(demux_request_pt_map_cb), ps);
     connect_existing_demux_pads(ps);
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
