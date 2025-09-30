@@ -31,34 +31,8 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
     }
 }
 
-static GstCaps *build_appsrc_caps(const AppCfg *cfg) {
-    GstCaps *caps = gst_caps_new_empty();
-    if (caps == NULL) {
-        return NULL;
-    }
-
-    GstStructure *video = gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "video", "payload",
-                                            G_TYPE_INT, cfg->vid_pt, "clock-rate", G_TYPE_INT, 90000, "encoding-name",
-                                            G_TYPE_STRING, "H265", NULL);
-    if (video == NULL) {
-        gst_caps_unref(caps);
-        return NULL;
-    }
-    gst_caps_append_structure(caps, video);
-
-    if (cfg->aud_pt >= 0) {
-        GstStructure *audio =
-            gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "audio", "payload", G_TYPE_INT,
-                              cfg->aud_pt, "clock-rate", G_TYPE_INT, 48000, "encoding-name", G_TYPE_STRING, "OPUS",
-                              NULL);
-        if (audio == NULL) {
-            gst_caps_unref(caps);
-            return NULL;
-        }
-        gst_caps_append_structure(caps, audio);
-    }
-
-    return caps;
+static GstCaps *build_appsrc_caps(void) {
+    return gst_caps_new_empty_simple("application/x-rtp");
 }
 
 static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiver_out) {
@@ -67,7 +41,7 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
     GstCaps *caps = NULL;
     CHECK_ELEM(appsrc_elem, "appsrc");
 
-    caps = build_appsrc_caps(cfg);
+    caps = build_appsrc_caps();
     if (caps == NULL) {
         LOGE("Failed to allocate RTP caps for appsrc");
         goto fail;
@@ -109,9 +83,10 @@ fail:
     return NULL;
 }
 
-static GstCaps *make_rtp_caps(int payload_type, int clock_rate, const char *encoding_name) {
-    return gst_caps_new_simple("application/x-rtp", "payload", G_TYPE_INT, payload_type, "clock-rate",
-                               G_TYPE_INT, clock_rate, "encoding-name", G_TYPE_STRING, encoding_name, NULL);
+static GstCaps *make_rtp_caps(const char *media, int payload_type, int clock_rate, const char *encoding_name) {
+    return gst_caps_new_simple("application/x-rtp", "media", G_TYPE_STRING, media, "payload", G_TYPE_INT,
+                               payload_type, "clock-rate", G_TYPE_INT, clock_rate, "encoding-name", G_TYPE_STRING,
+                               encoding_name, NULL);
 }
 
 static GstCaps *make_raw_audio_caps(void) {
@@ -119,36 +94,184 @@ static GstCaps *make_raw_audio_caps(void) {
                                "channels", G_TYPE_INT, 2, NULL);
 }
 
-static gboolean link_tee_branch(GstElement *tee, GstElement *branch, GstPad **stored_src_pad, const char *name) {
-    GstPad *src_pad = gst_element_get_request_pad(tee, "src_%u");
-    if (src_pad == NULL) {
-        LOGE("Failed to request tee pad for %s branch", name);
+static GstCaps *caps_for_payload(const PipelineState *ps, gint payload_type) {
+    if (ps == NULL || ps->cfg == NULL) {
+        return NULL;
+    }
+
+    const AppCfg *cfg = ps->cfg;
+    if (payload_type == cfg->vid_pt) {
+        return make_rtp_caps("video", cfg->vid_pt, 90000, "H265");
+    }
+
+    if (payload_type == cfg->aud_pt && cfg->aud_pt >= 0) {
+        return make_rtp_caps("audio", cfg->aud_pt, 48000, "OPUS");
+    }
+
+    return NULL;
+}
+
+static gint get_pad_payload_type(GstPad *pad) {
+    gint payload_type = -1;
+    if (pad == NULL) {
+        return payload_type;
+    }
+
+    GObjectClass *klass = G_OBJECT_GET_CLASS(pad);
+    if (klass != NULL && g_object_class_find_property(klass, "pt") != NULL) {
+        g_object_get(pad, "pt", &payload_type, NULL);
+    }
+
+    if (payload_type < 0) {
+        const gchar *pad_name = GST_OBJECT_NAME(pad);
+        if (pad_name != NULL && g_str_has_prefix(pad_name, "src_")) {
+            payload_type = (gint)g_ascii_strtoll(pad_name + 4, NULL, 10);
+        }
+    }
+
+    return payload_type;
+}
+
+static gboolean link_pad_to_branch(GstPad *src_pad, GstElement *branch, GstPad **stored_pad, const char *name) {
+    if (branch == NULL) {
+        LOGE("Cannot link %s branch: branch element is NULL", name);
         return FALSE;
     }
+    if (stored_pad != NULL && *stored_pad != NULL) {
+        return TRUE;
+    }
+
     GstPad *sink_pad = gst_element_get_static_pad(branch, "sink");
     if (sink_pad == NULL) {
         LOGE("Failed to get sink pad for %s branch", name);
-        gst_element_release_request_pad(tee, src_pad);
-        gst_object_unref(src_pad);
         return FALSE;
     }
-    if (gst_pad_link(src_pad, sink_pad) != GST_PAD_LINK_OK) {
-        LOGE("Failed to link tee to %s branch", name);
-        gst_object_unref(sink_pad);
-        gst_element_release_request_pad(tee, src_pad);
-        gst_object_unref(src_pad);
-        return FALSE;
-    }
+
+    GstPadLinkReturn link_ret = gst_pad_link(src_pad, sink_pad);
     gst_object_unref(sink_pad);
-    if (stored_src_pad != NULL) {
-        *stored_src_pad = src_pad;
-    } else {
-        gst_object_unref(src_pad);
+    if (link_ret != GST_PAD_LINK_OK) {
+        LOGE("Failed to link demux pad to %s branch (ret=%d)", name, link_ret);
+        return FALSE;
+    }
+
+    if (stored_pad != NULL) {
+        *stored_pad = gst_object_ref(src_pad);
     }
     return TRUE;
 }
 
-static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstElement *tee, const AppCfg *cfg) {
+static gboolean try_link_demux_pad(PipelineState *ps, GstPad *pad) {
+    gint payload_type = get_pad_payload_type(pad);
+    if (payload_type < 0) {
+        LOGW("Ignoring demux pad with unknown payload type (pad=%s)", GST_OBJECT_NAME(pad));
+        return FALSE;
+    }
+
+    if (payload_type == ps->cfg->vid_pt) {
+        if (ps->video_branch_entry == NULL) {
+            LOGW("Video branch not ready for payload type %d", payload_type);
+            return FALSE;
+        }
+        if (ps->video_pad != NULL) {
+            return TRUE;
+        }
+        if (link_pad_to_branch(pad, ps->video_branch_entry, &ps->video_pad, "video")) {
+            LOGI("Linked demux video pad (PT=%d)", payload_type);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    if (payload_type == ps->cfg->aud_pt && ps->cfg->aud_pt >= 0) {
+        if (ps->audio_branch_entry == NULL) {
+            LOGW("Audio branch not ready for payload type %d", payload_type);
+            return FALSE;
+        }
+        if (ps->audio_pad != NULL) {
+            return TRUE;
+        }
+        if (link_pad_to_branch(pad, ps->audio_branch_entry, &ps->audio_pad, "audio")) {
+            LOGI("Linked demux audio pad (PT=%d)", payload_type);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    LOGW("Unhandled demux pad with payload type %d", payload_type);
+    return FALSE;
+}
+
+static void demux_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_data) {
+    PipelineState *ps = (PipelineState *)user_data;
+    if (!try_link_demux_pad(ps, pad)) {
+        LOGW("Failed to link newly added demux pad %s", GST_OBJECT_NAME(pad));
+    }
+}
+
+static void demux_pad_removed_cb(GstElement *element, GstPad *pad, gpointer user_data) {
+    PipelineState *ps = (PipelineState *)user_data;
+    if (ps->video_pad == pad) {
+        gst_object_unref(ps->video_pad);
+        ps->video_pad = NULL;
+        LOGI("Demux video pad removed");
+    } else if (ps->audio_pad == pad) {
+        gst_object_unref(ps->audio_pad);
+        ps->audio_pad = NULL;
+        LOGI("Demux audio pad removed");
+    }
+}
+
+static GstCaps *demux_request_pt_map_cb(GstElement *element, guint payload_type, gpointer user_data) {
+    PipelineState *ps = (PipelineState *)user_data;
+    GstCaps *caps = caps_for_payload(ps, (gint)payload_type);
+    if (caps == NULL) {
+        LOGW("No caps mapping available for payload type %u", payload_type);
+    }
+    return caps;
+}
+
+static void connect_existing_demux_pads(PipelineState *ps) {
+    GstIterator *it = gst_element_iterate_src_pads(ps->demux);
+    if (it == NULL) {
+        return;
+    }
+
+    GValue item = G_VALUE_INIT;
+    gboolean done = FALSE;
+    while (!done) {
+        switch (gst_iterator_next(it, &item)) {
+        case GST_ITERATOR_OK: {
+            GstPad *pad = g_value_get_object(&item);
+            if (pad != NULL) {
+                gst_object_ref(pad);
+                try_link_demux_pad(ps, pad);
+                gst_object_unref(pad);
+            }
+            g_value_reset(&item);
+            break;
+        }
+        case GST_ITERATOR_RESYNC:
+            gst_iterator_resync(it);
+            break;
+        case GST_ITERATOR_ERROR:
+        case GST_ITERATOR_DONE:
+            done = TRUE;
+            break;
+        }
+    }
+
+    g_value_unset(&item);
+    gst_iterator_free(it);
+}
+
+static void clear_stored_pad(GstPad **pad) {
+    if (pad != NULL && *pad != NULL) {
+        gst_object_unref(*pad);
+        *pad = NULL;
+    }
+}
+
+static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstElement *demux, const AppCfg *cfg) {
     GstElement *queue_pre = gst_element_factory_make("queue", "video_queue_pre");
     GstElement *caps_rtp = gst_element_factory_make("capsfilter", "video_caps_rtp");
     GstElement *jitter = gst_element_factory_make("rtpjitterbuffer", "video_jitter");
@@ -178,7 +301,7 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstE
     g_object_set(queue_sink, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_sink_buffers,
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
-    GstCaps *caps_rtp_cfg = make_rtp_caps(cfg->vid_pt, 90000, "H265");
+    GstCaps *caps_rtp_cfg = make_rtp_caps("video", cfg->vid_pt, 90000, "H265");
     g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", cfg->video_drop_on_latency ? TRUE : FALSE, "do-lost", TRUE,
                  "post-drop-messages", TRUE, NULL);
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
@@ -204,20 +327,20 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstE
         return FALSE;
     }
 
-    if (!link_tee_branch(tee, queue_pre, &ps->video_pad, "video")) {
-        return FALSE;
-    }
-
+    ps->video_branch_entry = queue_pre;
     ps->video_sink = sink;
     return TRUE;
 
 fail:
+    ps->video_branch_entry = NULL;
     return FALSE;
 }
 
-static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstElement *tee, const AppCfg *cfg,
+static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstElement *demux, const AppCfg *cfg,
                                    int audio_disabled) {
     if (cfg->no_audio) {
+        ps->audio_branch_entry = NULL;
+        ps->audio_pad = NULL;
         return TRUE;
     }
 
@@ -235,9 +358,7 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
             LOGE("Failed to link audio fakesink branch");
             return FALSE;
         }
-        if (!link_tee_branch(tee, queue_start, &ps->audio_pad, "audio")) {
-            return FALSE;
-        }
+        ps->audio_branch_entry = queue_start;
         ps->audio_disabled = 1;
         return TRUE;
     }
@@ -263,7 +384,7 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
     CHECK_ELEM(alsa, "alsasink");
 
     g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", TRUE, "do-lost", TRUE, NULL);
-    GstCaps *caps_rtp_cfg = make_rtp_caps(cfg->aud_pt, 48000, "OPUS");
+    GstCaps *caps_rtp_cfg = make_rtp_caps("audio", cfg->aud_pt, 48000, "OPUS");
     GstCaps *caps_raw_cfg = make_raw_audio_caps();
     g_object_set(caps_rtp, "caps", caps_rtp_cfg, NULL);
     g_object_set(caps_raw, "caps", caps_raw_cfg, NULL);
@@ -281,23 +402,13 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
         return FALSE;
     }
 
-    if (!link_tee_branch(tee, queue_start, &ps->audio_pad, "audio")) {
-        return FALSE;
-    }
-
+    ps->audio_branch_entry = queue_start;
     ps->audio_disabled = 0;
     return TRUE;
 
 fail:
+    ps->audio_branch_entry = NULL;
     return FALSE;
-}
-
-static void release_request_pad(GstElement *tee, GstPad **pad) {
-    if (tee != NULL && pad != NULL && *pad != NULL) {
-        gst_element_release_request_pad(tee, *pad);
-        gst_object_unref(*pad);
-        *pad = NULL;
-    }
 }
 
 static gpointer bus_thread_func(gpointer data) {
@@ -431,10 +542,15 @@ static void cleanup_pipeline(PipelineState *ps) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
     }
-    release_request_pad(ps->tee, &ps->video_pad);
-    release_request_pad(ps->tee, &ps->audio_pad);
+    if (ps->demux != NULL) {
+        g_signal_handlers_disconnect_by_data(ps->demux, ps);
+    }
+    clear_stored_pad(&ps->video_pad);
+    clear_stored_pad(&ps->audio_pad);
+    ps->video_branch_entry = NULL;
+    ps->audio_branch_entry = NULL;
     ps->video_sink = NULL;
-    ps->tee = NULL;
+    ps->demux = NULL;
     ps->source = NULL;
     if (ps->pipeline != NULL) {
         gst_object_unref(ps->pipeline);
@@ -465,7 +581,9 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     CHECK_ELEM(pipeline, "pipeline");
     ps->pipeline = pipeline;
     ps->source = NULL;
-    ps->tee = NULL;
+    ps->demux = NULL;
+    ps->video_branch_entry = NULL;
+    ps->audio_branch_entry = NULL;
     ps->video_pad = NULL;
     ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
@@ -482,26 +600,31 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     g_object_set(queue_ingress, "leaky", 2, "max-size-buffers", 0, "max-size-bytes", (guint64)0, "max-size-time",
                  (guint64)0, NULL);
 
-    GstElement *tee = gst_element_factory_make("tee", "stream_tee");
-    CHECK_ELEM(tee, "tee");
+    GstElement *demux = gst_element_factory_make("rtpptdemux", "rtp_demux");
+    CHECK_ELEM(demux, "rtpptdemux");
 
-    gst_bin_add_many(GST_BIN(pipeline), source, queue_ingress, tee, NULL);
-    if (!gst_element_link_many(source, queue_ingress, tee, NULL)) {
-        LOGE("Failed to link source chain to tee");
+    gst_bin_add_many(GST_BIN(pipeline), source, queue_ingress, demux, NULL);
+    if (!gst_element_link_many(source, queue_ingress, demux, NULL)) {
+        LOGE("Failed to link source chain to demux");
         goto fail;
     }
 
     ps->source = source;
-    ps->tee = tee;
+    ps->demux = demux;
     ps->udp_receiver = receiver;
 
-    if (!build_video_branch(ps, pipeline, tee, cfg)) {
+    if (!build_video_branch(ps, pipeline, demux, cfg)) {
         goto fail;
     }
 
-    if (!build_audio_branch(ps, pipeline, tee, cfg, audio_disabled)) {
+    if (!build_audio_branch(ps, pipeline, demux, cfg, audio_disabled)) {
         goto fail;
     }
+
+    g_signal_connect(demux, "pad-added", G_CALLBACK(demux_pad_added_cb), ps);
+    g_signal_connect(demux, "pad-removed", G_CALLBACK(demux_pad_removed_cb), ps);
+    g_signal_connect(demux, "request-pt-map", G_CALLBACK(demux_request_pt_map_cb), ps);
+    connect_existing_demux_pads(ps);
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
