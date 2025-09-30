@@ -131,7 +131,15 @@ static gboolean link_demux_branch(GstElement *demux, GstElement *branch, GstPad 
         return FALSE;
     }
 
-    GstPad *src_pad = gst_element_get_request_pad(demux, pad_name);
+    GstPadTemplate *pad_template =
+        gst_element_class_get_pad_template(GST_ELEMENT_GET_CLASS(demux), "src_%u");
+    if (pad_template == NULL) {
+        LOGE("Failed to get pad template for %s branch", name);
+        g_free(pad_name);
+        return FALSE;
+    }
+
+    GstPad *src_pad = gst_element_request_pad(demux, pad_template, pad_name, NULL);
     g_free(pad_name);
     if (src_pad == NULL) {
         LOGE("Failed to request demux pad for %s branch", name);
