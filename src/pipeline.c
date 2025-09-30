@@ -31,34 +31,8 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
     }
 }
 
-static GstCaps *build_appsrc_caps(const AppCfg *cfg) {
-    GstCaps *caps = gst_caps_new_empty();
-    if (caps == NULL) {
-        return NULL;
-    }
-
-    GstStructure *video = gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "video", "payload",
-                                            G_TYPE_INT, cfg->vid_pt, "clock-rate", G_TYPE_INT, 90000, "encoding-name",
-                                            G_TYPE_STRING, "H265", NULL);
-    if (video == NULL) {
-        gst_caps_unref(caps);
-        return NULL;
-    }
-    gst_caps_append_structure(caps, video);
-
-    if (cfg->aud_pt >= 0) {
-        GstStructure *audio =
-            gst_structure_new("application/x-rtp", "media", G_TYPE_STRING, "audio", "payload", G_TYPE_INT,
-                              cfg->aud_pt, "clock-rate", G_TYPE_INT, 48000, "encoding-name", G_TYPE_STRING, "OPUS",
-                              NULL);
-        if (audio == NULL) {
-            gst_caps_unref(caps);
-            return NULL;
-        }
-        gst_caps_append_structure(caps, audio);
-    }
-
-    return caps;
+static GstCaps *build_appsrc_caps(void) {
+    return gst_caps_new_empty_simple("application/x-rtp");
 }
 
 static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiver_out) {
@@ -67,7 +41,7 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
     GstCaps *caps = NULL;
     CHECK_ELEM(appsrc_elem, "appsrc");
 
-    caps = build_appsrc_caps(cfg);
+    caps = build_appsrc_caps();
     if (caps == NULL) {
         LOGE("Failed to allocate RTP caps for appsrc");
         goto fail;
@@ -109,9 +83,10 @@ fail:
     return NULL;
 }
 
-static GstCaps *make_rtp_caps(int payload_type, int clock_rate, const char *encoding_name) {
-    return gst_caps_new_simple("application/x-rtp", "payload", G_TYPE_INT, payload_type, "clock-rate",
-                               G_TYPE_INT, clock_rate, "encoding-name", G_TYPE_STRING, encoding_name, NULL);
+static GstCaps *make_rtp_caps(const char *media, int payload_type, int clock_rate, const char *encoding_name) {
+    return gst_caps_new_simple("application/x-rtp", "media", G_TYPE_STRING, media, "payload", G_TYPE_INT,
+                               payload_type, "clock-rate", G_TYPE_INT, clock_rate, "encoding-name", G_TYPE_STRING,
+                               encoding_name, NULL);
 }
 
 static GstCaps *make_raw_audio_caps(void) {
@@ -126,11 +101,11 @@ static GstCaps *caps_for_payload(const PipelineState *ps, gint payload_type) {
 
     const AppCfg *cfg = ps->cfg;
     if (payload_type == cfg->vid_pt) {
-        return make_rtp_caps(cfg->vid_pt, 90000, "H265");
+        return make_rtp_caps("video", cfg->vid_pt, 90000, "H265");
     }
 
     if (payload_type == cfg->aud_pt && cfg->aud_pt >= 0) {
-        return make_rtp_caps(cfg->aud_pt, 48000, "OPUS");
+        return make_rtp_caps("audio", cfg->aud_pt, 48000, "OPUS");
     }
 
     return NULL;
@@ -326,7 +301,7 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstE
     g_object_set(queue_sink, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_sink_buffers,
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
-    GstCaps *caps_rtp_cfg = make_rtp_caps(cfg->vid_pt, 90000, "H265");
+    GstCaps *caps_rtp_cfg = make_rtp_caps("video", cfg->vid_pt, 90000, "H265");
     g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", cfg->video_drop_on_latency ? TRUE : FALSE, "do-lost", TRUE,
                  "post-drop-messages", TRUE, NULL);
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
@@ -409,7 +384,7 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
     CHECK_ELEM(alsa, "alsasink");
 
     g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", TRUE, "do-lost", TRUE, NULL);
-    GstCaps *caps_rtp_cfg = make_rtp_caps(cfg->aud_pt, 48000, "OPUS");
+    GstCaps *caps_rtp_cfg = make_rtp_caps("audio", cfg->aud_pt, 48000, "OPUS");
     GstCaps *caps_raw_cfg = make_raw_audio_caps();
     g_object_set(caps_rtp, "caps", caps_rtp_cfg, NULL);
     g_object_set(caps_raw, "caps", caps_raw_cfg, NULL);
