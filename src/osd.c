@@ -1175,6 +1175,7 @@ static void osd_line_draw(OSD *o, int idx) {
     osd_line_compute_scale(state, &new_min, &new_max);
 
     int need_background = (!state->background_ready || state->clear_on_next_draw);
+    int rescale_due_to_shrink = 0;
     if (state->size > 0) {
         double actual_min = (state->min_v != DBL_MAX) ? state->min_v : new_min;
         double actual_max = state->max_v;
@@ -1191,12 +1192,26 @@ static void osd_line_draw(OSD *o, int idx) {
                             state->rescale_countdown--;
                         } else {
                             need_background = 1;
+                            rescale_due_to_shrink = 1;
                         }
                     } else {
                         state->rescale_countdown = OSD_PLOT_RESCALE_DELAY;
                     }
                 }
             }
+        }
+    }
+
+    if (need_background && rescale_due_to_shrink) {
+        double old_span = scale_max - scale_min;
+        double new_span = new_max - new_min;
+        double min_reduction = old_span * 0.2; // require a meaningful shrink before redrawing
+        if (min_reduction < 0.5) {
+            min_reduction = 0.5;
+        }
+        if (!(new_span < old_span && (old_span - new_span) >= min_reduction)) {
+            need_background = 0;
+            state->rescale_countdown = OSD_PLOT_RESCALE_DELAY;
         }
     }
 
