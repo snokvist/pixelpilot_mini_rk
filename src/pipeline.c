@@ -119,23 +119,30 @@ static GstCaps *make_raw_audio_caps(void) {
                                "channels", G_TYPE_INT, 2, NULL);
 }
 
-static gboolean link_tee_branch(GstElement *tee, GstElement *branch, GstPad **stored_src_pad, const char *name) {
-    GstPad *src_pad = gst_element_get_request_pad(tee, "src_%u");
-    if (src_pad == NULL) {
-        LOGE("Failed to request tee pad for %s branch", name);
+static gboolean link_demux_branch(GstElement *demux, GstElement *branch, GstPad **stored_src_pad, const char *name,
+                                 gint payload_type) {
+    if (payload_type < 0) {
+        LOGE("Invalid payload type for %s branch", name);
         return FALSE;
     }
+    GstPad *src_pad = gst_element_get_request_pad(demux, "src_%u");
+    if (src_pad == NULL) {
+        LOGE("Failed to request demux pad for %s branch", name);
+        return FALSE;
+    }
+    g_object_set(src_pad, "pt", payload_type, NULL);
+
     GstPad *sink_pad = gst_element_get_static_pad(branch, "sink");
     if (sink_pad == NULL) {
         LOGE("Failed to get sink pad for %s branch", name);
-        gst_element_release_request_pad(tee, src_pad);
+        gst_element_release_request_pad(demux, src_pad);
         gst_object_unref(src_pad);
         return FALSE;
     }
     if (gst_pad_link(src_pad, sink_pad) != GST_PAD_LINK_OK) {
-        LOGE("Failed to link tee to %s branch", name);
+        LOGE("Failed to link demux to %s branch", name);
         gst_object_unref(sink_pad);
-        gst_element_release_request_pad(tee, src_pad);
+        gst_element_release_request_pad(demux, src_pad);
         gst_object_unref(src_pad);
         return FALSE;
     }
@@ -143,12 +150,13 @@ static gboolean link_tee_branch(GstElement *tee, GstElement *branch, GstPad **st
     if (stored_src_pad != NULL) {
         *stored_src_pad = src_pad;
     } else {
+        gst_element_release_request_pad(demux, src_pad);
         gst_object_unref(src_pad);
     }
     return TRUE;
 }
 
-static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstElement *tee, const AppCfg *cfg) {
+static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstElement *demux, const AppCfg *cfg) {
     GstElement *queue_pre = gst_element_factory_make("queue", "video_queue_pre");
     GstElement *caps_rtp = gst_element_factory_make("capsfilter", "video_caps_rtp");
     GstElement *jitter = gst_element_factory_make("rtpjitterbuffer", "video_jitter");
@@ -204,7 +212,7 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstE
         return FALSE;
     }
 
-    if (!link_tee_branch(tee, queue_pre, &ps->video_pad, "video")) {
+    if (!link_demux_branch(demux, queue_pre, &ps->video_pad, "video", cfg->vid_pt)) {
         return FALSE;
     }
 
@@ -215,7 +223,7 @@ fail:
     return FALSE;
 }
 
-static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstElement *tee, const AppCfg *cfg,
+static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstElement *demux, const AppCfg *cfg,
                                    int audio_disabled) {
     if (cfg->no_audio) {
         return TRUE;
@@ -235,7 +243,7 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
             LOGE("Failed to link audio fakesink branch");
             return FALSE;
         }
-        if (!link_tee_branch(tee, queue_start, &ps->audio_pad, "audio")) {
+        if (!link_demux_branch(demux, queue_start, &ps->audio_pad, "audio", cfg->aud_pt)) {
             return FALSE;
         }
         ps->audio_disabled = 1;
@@ -281,7 +289,7 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
         return FALSE;
     }
 
-    if (!link_tee_branch(tee, queue_start, &ps->audio_pad, "audio")) {
+    if (!link_demux_branch(demux, queue_start, &ps->audio_pad, "audio", cfg->aud_pt)) {
         return FALSE;
     }
 
@@ -292,9 +300,9 @@ fail:
     return FALSE;
 }
 
-static void release_request_pad(GstElement *tee, GstPad **pad) {
-    if (tee != NULL && pad != NULL && *pad != NULL) {
-        gst_element_release_request_pad(tee, *pad);
+static void release_request_pad(GstElement *demux, GstPad **pad) {
+    if (demux != NULL && pad != NULL && *pad != NULL) {
+        gst_element_release_request_pad(demux, *pad);
         gst_object_unref(*pad);
         *pad = NULL;
     }
@@ -431,10 +439,10 @@ static void cleanup_pipeline(PipelineState *ps) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
     }
-    release_request_pad(ps->tee, &ps->video_pad);
-    release_request_pad(ps->tee, &ps->audio_pad);
+    release_request_pad(ps->demux, &ps->video_pad);
+    release_request_pad(ps->demux, &ps->audio_pad);
     ps->video_sink = NULL;
-    ps->tee = NULL;
+    ps->demux = NULL;
     ps->source = NULL;
     if (ps->pipeline != NULL) {
         gst_object_unref(ps->pipeline);
@@ -465,7 +473,7 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     CHECK_ELEM(pipeline, "pipeline");
     ps->pipeline = pipeline;
     ps->source = NULL;
-    ps->tee = NULL;
+    ps->demux = NULL;
     ps->video_pad = NULL;
     ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
@@ -482,24 +490,24 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     g_object_set(queue_ingress, "leaky", 2, "max-size-buffers", 0, "max-size-bytes", (guint64)0, "max-size-time",
                  (guint64)0, NULL);
 
-    GstElement *tee = gst_element_factory_make("tee", "stream_tee");
-    CHECK_ELEM(tee, "tee");
+    GstElement *demux = gst_element_factory_make("rtpptdemux", "rtp_demux");
+    CHECK_ELEM(demux, "rtpptdemux");
 
-    gst_bin_add_many(GST_BIN(pipeline), source, queue_ingress, tee, NULL);
-    if (!gst_element_link_many(source, queue_ingress, tee, NULL)) {
-        LOGE("Failed to link source chain to tee");
+    gst_bin_add_many(GST_BIN(pipeline), source, queue_ingress, demux, NULL);
+    if (!gst_element_link_many(source, queue_ingress, demux, NULL)) {
+        LOGE("Failed to link source chain to demux");
         goto fail;
     }
 
     ps->source = source;
-    ps->tee = tee;
+    ps->demux = demux;
     ps->udp_receiver = receiver;
 
-    if (!build_video_branch(ps, pipeline, tee, cfg)) {
+    if (!build_video_branch(ps, pipeline, demux, cfg)) {
         goto fail;
     }
 
-    if (!build_audio_branch(ps, pipeline, tee, cfg, audio_disabled)) {
+    if (!build_audio_branch(ps, pipeline, demux, cfg, audio_disabled)) {
         goto fail;
     }
 

@@ -16,7 +16,7 @@ typedef struct {
     PipelineStateEnum state;
     GstElement *pipeline;
     GstElement *source;
-    GstElement *tee;
+    GstElement *demux;
     GstElement *video_sink;
     GstPad *video_pad;
     GstPad *audio_pad;
