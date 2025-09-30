@@ -1079,14 +1079,14 @@ static void osd_line_draw_background(OSD *o, int idx) {
     }
 
     int scale = o->scale > 0 ? o->scale : 1;
-    int step_px = (int)(state->step_px + 0.5);
-    if (step_px < scale) {
-        step_px = scale;
+    int marker_count = 4;
+    int marker_height = 5 * scale;
+    if (marker_height > plot_h) {
+        marker_height = plot_h;
     }
-    if (step_px > 0) {
-        for (int gx = step_px; gx < plot_w; gx += step_px) {
-            osd_draw_vline(o, base_x + gx, base_y, plot_h, grid);
-        }
+    for (int i = 1; i <= marker_count; ++i) {
+        int gx = base_x + (plot_w * i) / (marker_count + 1);
+        osd_draw_vline(o, gx, base_y + plot_h - marker_height, marker_height, grid);
     }
 
     int axis_thickness = o->scale > 0 ? o->scale : 1;
