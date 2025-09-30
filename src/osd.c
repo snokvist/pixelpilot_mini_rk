@@ -446,72 +446,82 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
     return -1;
 }
 
+static const char *osd_metric_normalize(const char *metric_key, char *buf, size_t buf_sz);
+
 static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value) {
     if (!key || !out_value) {
         return 0;
     }
-    if (!ctx->have_stats && strncmp(key, "udp.", 4) == 0) {
+
+    char normalized[128];
+    const char *metric = osd_metric_normalize(key, normalized, sizeof(normalized));
+
+    if (!ctx->have_stats && metric && strncmp(metric, "udp.", 4) == 0) {
         return 0;
     }
 
-    if (strcmp(key, "udp.bitrate.latest_mbps") == 0) {
+    if (metric && strcmp(metric, "udp.bitrate.latest_mbps") == 0) {
         *out_value = ctx->stats.bitrate_mbps;
         return 1;
     }
-    if (strcmp(key, "udp.bitrate.avg_mbps") == 0) {
+    if (metric && strcmp(metric, "udp.bitrate.avg_mbps") == 0) {
         *out_value = ctx->stats.bitrate_avg_mbps;
         return 1;
     }
-    if (strcmp(key, "udp.jitter.latest_ms") == 0) {
+    if (metric && strcmp(metric, "udp.jitter.latest_ms") == 0) {
         *out_value = ctx->stats.jitter / 90.0;
         return 1;
     }
-    if (strcmp(key, "udp.jitter.avg_ms") == 0) {
+    if (metric && strcmp(metric, "udp.jitter.avg_ms") == 0) {
         *out_value = ctx->stats.jitter_avg / 90.0;
         return 1;
     }
-    if (strcmp(key, "udp.pipeline.drop_total") == 0) {
+    if (metric && strcmp(metric, "udp.pipeline.drop_total") == 0) {
         *out_value = (double)ctx->stats.pipeline_dropped_total;
         return 1;
     }
-    if (strcmp(key, "udp.pipeline.drop_on_latency") == 0) {
+    if (metric && strcmp(metric, "udp.pipeline.drop_on_latency") == 0) {
         *out_value = (double)ctx->stats.pipeline_dropped_on_latency;
         return 1;
     }
-    if (strcmp(key, "udp.pipeline.drop_too_late") == 0) {
+    if (metric && strcmp(metric, "udp.pipeline.drop_too_late") == 0) {
         *out_value = (double)ctx->stats.pipeline_dropped_too_late;
         return 1;
     }
-    if (strcmp(key, "udp.frames.avg_bytes") == 0) {
+    if (metric && strcmp(metric, "udp.frames.avg_bytes") == 0) {
         *out_value = ctx->stats.frame_size_avg;
         return 1;
     }
-    if (strcmp(key, "udp.frames.count") == 0) {
+    if (metric && strcmp(metric, "udp.frames.count") == 0) {
         *out_value = (double)ctx->stats.frame_count;
         return 1;
     }
-    if (strcmp(key, "udp.video_packets") == 0) {
+    if (metric && strcmp(metric, "udp.frames.last_bytes") == 0) {
+        *out_value = (double)ctx->stats.last_frame_bytes;
+        return 1;
+    }
+    if (metric && strcmp(metric, "udp.video_packets") == 0) {
         *out_value = (double)ctx->stats.video_packets;
         return 1;
     }
-    if (strcmp(key, "udp.duplicate_packets") == 0) {
+    if (metric && strcmp(metric, "udp.duplicate_packets") == 0) {
         *out_value = (double)ctx->stats.duplicate_packets;
         return 1;
     }
-    if (strcmp(key, "udp.lost_packets") == 0) {
+    if (metric && strcmp(metric, "udp.lost_packets") == 0) {
         *out_value = (double)ctx->stats.lost_packets;
         return 1;
     }
-    if (strcmp(key, "udp.reordered_packets") == 0) {
+    if (metric && strcmp(metric, "udp.reordered_packets") == 0) {
         *out_value = (double)ctx->stats.reordered_packets;
         return 1;
     }
 
-    if (strcmp(key, "pipeline.restart_count") == 0) {
+    if (metric && strcmp(metric, "pipeline.restart_count") == 0) {
         *out_value = (double)ctx->restart_count;
         return 1;
     }
-    if (strcmp(key, "pipeline.latency_ms") == 0) {
+    if (metric && strcmp(metric, "pipeline.latency_ms") == 0) {
         *out_value = (double)(ctx->cfg ? ctx->cfg->latency_ms : 0);
         return 1;
     }
@@ -557,13 +567,39 @@ static void osd_expand_template(const OsdRenderContext *ctx, const char *tmpl, c
     out[pos] = '\0';
 }
 
-static void osd_format_metric_value(const char *metric_key, double value, char *buf, size_t buf_sz) {
+static const char *osd_metric_normalize(const char *metric_key, char *buf, size_t buf_sz) {
     if (!metric_key || !buf || buf_sz == 0) {
+        return metric_key;
+    }
+
+    size_t len = strnlen(metric_key, buf_sz - 1);
+    for (size_t i = 0; i < len; ++i) {
+        char c = metric_key[i];
+        if (c == '_') {
+            c = '.';
+        }
+        buf[i] = c;
+    }
+    buf[len] = '\0';
+
+    if (metric_key[len] != '\0') {
+        return metric_key;
+    }
+
+    return buf;
+}
+
+static void osd_format_metric_value(const char *metric_key, double value, char *buf, size_t buf_sz) {
+    if (!buf || buf_sz == 0) {
         return;
     }
-    if (strstr(metric_key, "mbps") || strstr(metric_key, "ms")) {
+
+    char normalized[128];
+    const char *key = osd_metric_normalize(metric_key, normalized, sizeof(normalized));
+
+    if (key && (strstr(key, "mbps") || strstr(key, "ms"))) {
         snprintf(buf, buf_sz, "%.2f", value);
-    } else if (strstr(metric_key, "avg") || strstr(metric_key, "ratio")) {
+    } else if (key && (strstr(key, "avg") || strstr(key, "ratio"))) {
         snprintf(buf, buf_sz, "%.2f", value);
     } else {
         snprintf(buf, buf_sz, "%.0f", value);
@@ -1811,7 +1847,10 @@ static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx
             footer_ptrs[0] = footer_line;
             footer_count = 1;
         } else {
-            const char *msg = ctx->have_stats && have_value ? "Collecting samples..." : "Metric unavailable";
+            char normalized[128];
+            const char *metric = osd_metric_normalize(elem_cfg->data.line.metric, normalized, sizeof(normalized));
+            int waiting_for_stats = (!ctx->have_stats) && metric && strncmp(metric, "udp.", 4) == 0;
+            const char *msg = waiting_for_stats ? "Waiting for stats..." : (have_value ? "Collecting samples..." : "Metric unavailable");
             snprintf(footer_line, sizeof(footer_line), "%s", msg);
             footer_ptrs[0] = footer_line;
             footer_count = 1;
@@ -1859,7 +1898,10 @@ static void osd_render_bar_element(OSD *o, int idx, const OsdRenderContext *ctx)
             footer_ptrs[0] = footer_line;
             footer_count = 1;
         } else {
-            const char *msg = ctx->have_stats && have_value ? "Collecting samples..." : "Metric unavailable";
+            char normalized[128];
+            const char *metric = osd_metric_normalize(elem_cfg->data.bar.metric, normalized, sizeof(normalized));
+            int waiting_for_stats = (!ctx->have_stats) && metric && strncmp(metric, "udp.", 4) == 0;
+            const char *msg = waiting_for_stats ? "Waiting for stats..." : (have_value ? "Collecting samples..." : "Metric unavailable");
             snprintf(footer_line, sizeof(footer_line), "%s", msg);
             footer_ptrs[0] = footer_line;
             footer_count = 1;
