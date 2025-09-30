@@ -100,7 +100,6 @@ static void builder_reset_line(OsdElementConfig *elem) {
     elem->data.line.width = 360;
     elem->data.line.height = 80;
     elem->data.line.sample_stride_px = 4;
-    elem->data.line.bar_width_px = 4;
     elem->data.line.metric[0] = '\0';
     elem->data.line.label[0] = '\0';
     elem->data.line.show_info_box = 1;
@@ -171,9 +170,6 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
             }
             if (elem->data.line.sample_stride_px <= 0) {
                 elem->data.line.sample_stride_px = 4;
-            }
-            if (elem->data.line.bar_width_px <= 0) {
-                elem->data.line.bar_width_px = 4;
             }
         } else if (elem->type == OSD_WIDGET_BAR) {
             if (elem->data.bar.width <= 0) {
@@ -467,7 +463,8 @@ static int parse_osd_element_bar(OsdElementConfig *elem, const char *key, const 
         ini_copy_string(elem->data.bar.label, sizeof(elem->data.bar.label), value);
         return 0;
     }
-    if (strcasecmp(key, "show-info-box") == 0 || strcasecmp(key, "show_info_box") == 0) {
+    if (strcasecmp(key, "show-info-box") == 0 || strcasecmp(key, "show_info_box") == 0 ||
+        strcasecmp(key, "info-box") == 0 || strcasecmp(key, "info_box") == 0) {
         int v = 0;
         if (parse_bool(value, &v) != 0) {
             return -1;

@@ -20,7 +20,6 @@ static void line_defaults(OsdLineConfig *cfg) {
     cfg->width = 360;
     cfg->height = 80;
     cfg->sample_stride_px = 4;
-    cfg->bar_width_px = 4;
     cfg->metric[0] = '\0';
     cfg->label[0] = '\0';
     cfg->show_info_box = 1;

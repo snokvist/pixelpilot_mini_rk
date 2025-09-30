@@ -53,7 +53,6 @@ typedef struct {
     int width;
     int height;
     int sample_stride_px;
-    int bar_width_px;
     char metric[64];
     char label[32];
     int show_info_box;
