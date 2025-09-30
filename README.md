@@ -2,6 +2,23 @@
 
 PixelPilot Mini RK is a lightweight receiver that ingests RTP video/audio over UDP and drives a KMS plane on Rockchip-based devices. The application wraps a GStreamer pipeline with DRM/KMS, OSD, and udev helpers.
 
+## Configuration via INI
+
+All command-line options can be provided in an INI file and loaded with `--config /path/to/file.ini`. The parser merges the INI
+defaults first and then applies explicit CLI flags so ad-hoc overrides still work.
+
+The `config/osd-sample.ini` file documents every supported key, including the available OSD text tokens, line-plot metrics, and a quick
+reference for anchors, offsets, color syntax, and the built-in named palette.
+Copy it next to the binary and launch the receiver as:
+
+```sh
+./pixelpilot_mini_rk --config config/osd-sample.ini --osd
+```
+
+Any `line =` entry inside a `[osd.element.*]` section can reference `{token}` placeholders from the sample file's token table.
+Line plots accept metrics such as `udp.bitrate.latest_mbps`, `udp.jitter.avg_ms`, or counter-style values like
+`udp.pipeline.drop_total` and automatically handle scaling and rendering based on the INI-provided geometry.
+
 ## CPU affinity control
 
 Use `--cpu-list` to provide a comma-separated list of CPU IDs that the process and its busy worker threads should run on. The main process mask is restricted to the specified CPUs and the UDP receiver and GStreamer bus threads are pinned in a round-robin fashion to spread the work across cores.

@@ -17,6 +17,7 @@ static void usage(const char *prog) {
             "  --plane-id N                 (video plane; default: 76)\n"
             "  --blank-primary              (detach primary plane on commit)\n"
             "  --no-udev                    (disable hotplug listener)\n"
+            "  --config PATH                (load settings from ini file)\n"
             "  --udp-port N                 (default: 5600)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
@@ -47,6 +48,7 @@ void cfg_defaults(AppCfg *c) {
     c->plane_id = 76;
     c->blank_primary = 0;
     c->use_udev = 1;
+    c->config_path[0] = '\0';
 
     c->udp_port = 5600;
     c->vid_pt = 97;
@@ -77,9 +79,11 @@ void cfg_defaults(AppCfg *c) {
     CPU_ZERO(&c->cpu_affinity_mask);
     c->cpu_affinity_count = 0;
     memset(c->cpu_affinity_order, 0, sizeof(c->cpu_affinity_order));
+
+    osd_layout_defaults(&c->osd_layout);
 }
 
-static int parse_cpu_list(const char *list, AppCfg *cfg) {
+int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
     if (list == NULL || *list == '\0') {
         LOGE("--cpu-list requires at least one CPU id");
         return -1;
@@ -144,8 +148,28 @@ static int parse_cpu_list(const char *list, AppCfg *cfg) {
 
 int parse_cli(int argc, char **argv, AppCfg *cfg) {
     cfg_defaults(cfg);
+
+    const char *config_file = NULL;
     for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "--card") && i + 1 < argc) {
+        if (!strcmp(argv[i], "--config") && i + 1 < argc) {
+            config_file = argv[++i];
+            strncpy(cfg->config_path, config_file, sizeof(cfg->config_path) - 1);
+            cfg->config_path[sizeof(cfg->config_path) - 1] = '\0';
+            break;
+        }
+    }
+
+    if (config_file) {
+        if (cfg_load_file(config_file, cfg) != 0) {
+            return -1;
+        }
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--config") && i + 1 < argc) {
+            ++i;
+            continue;
+        } else if (!strcmp(argv[i], "--card") && i + 1 < argc) {
             strncpy(cfg->card_path, argv[++i], sizeof(cfg->card_path) - 1);
         } else if (!strcmp(argv[i], "--connector") && i + 1 < argc) {
             strncpy(cfg->connector_name, argv[++i], sizeof(cfg->connector_name) - 1);
@@ -194,7 +218,7 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {
-            if (parse_cpu_list(argv[++i], cfg) != 0) {
+            if (cfg_parse_cpu_list(argv[++i], cfg) != 0) {
                 return -1;
             }
         } else if (!strcmp(argv[i], "--verbose")) {

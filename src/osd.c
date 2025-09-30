@@ -3,6 +3,7 @@
 #include "drm_props.h"
 #include "logging.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -208,6 +209,367 @@ static void osd_store_rect(OSDRect *r, int x, int y, int w, int h) {
     r->h = h;
 }
 
+typedef struct {
+    const AppCfg *cfg;
+    const ModesetResult *ms;
+    const PipelineState *ps;
+    int audio_disabled;
+    int restart_count;
+    int have_stats;
+    UdpReceiverStats stats;
+} OsdRenderContext;
+
+static const char *osd_pipeline_state_name(const PipelineState *ps) {
+    if (!ps) {
+        return "UNKNOWN";
+    }
+    switch (ps->state) {
+    case PIPELINE_RUNNING:
+        return "RUN";
+    case PIPELINE_STOPPING:
+        return "STOPPING";
+    case PIPELINE_STOPPED:
+    default:
+        return "STOP";
+    }
+}
+
+static int osd_token_format(const OsdRenderContext *ctx, const char *token, char *buf, size_t buf_sz) {
+    if (!token || !buf || buf_sz == 0) {
+        return -1;
+    }
+
+    const AppCfg *cfg = ctx->cfg;
+    if (strcmp(token, "display.mode") == 0) {
+        if (ctx->ms) {
+            snprintf(buf, buf_sz, "%dx%d@%d", ctx->ms->mode_w, ctx->ms->mode_h, ctx->ms->mode_hz);
+        } else {
+            snprintf(buf, buf_sz, "n/a");
+        }
+        return 0;
+    }
+    if (strcmp(token, "display.width") == 0) {
+        if (ctx->ms) {
+            snprintf(buf, buf_sz, "%d", ctx->ms->mode_w);
+        } else {
+            snprintf(buf, buf_sz, "0");
+        }
+        return 0;
+    }
+    if (strcmp(token, "display.height") == 0) {
+        if (ctx->ms) {
+            snprintf(buf, buf_sz, "%d", ctx->ms->mode_h);
+        } else {
+            snprintf(buf, buf_sz, "0");
+        }
+        return 0;
+    }
+    if (strcmp(token, "display.refresh_hz") == 0) {
+        if (ctx->ms) {
+            snprintf(buf, buf_sz, "%d", ctx->ms->mode_hz);
+        } else {
+            snprintf(buf, buf_sz, "0");
+        }
+        return 0;
+    }
+    if (strcmp(token, "drm.video_plane_id") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->plane_id : 0);
+        return 0;
+    }
+    if (strcmp(token, "drm.osd_plane_id") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->osd_plane_id : 0);
+        return 0;
+    }
+    if (strcmp(token, "osd.refresh_ms") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->osd_refresh_ms : 0);
+        return 0;
+    }
+    if (strcmp(token, "udp.port") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->udp_port : 0);
+        return 0;
+    }
+    if (strcmp(token, "udp.vid_pt") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->vid_pt : 0);
+        return 0;
+    }
+    if (strcmp(token, "udp.aud_pt") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->aud_pt : 0);
+        return 0;
+    }
+    if (strcmp(token, "pipeline.latency_ms") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->latency_ms : 0);
+        return 0;
+    }
+    if (strcmp(token, "pipeline.state") == 0) {
+        snprintf(buf, buf_sz, "%s", osd_pipeline_state_name(ctx->ps));
+        return 0;
+    }
+    if (strcmp(token, "pipeline.restart_count") == 0) {
+        snprintf(buf, buf_sz, "%d", ctx->restart_count);
+        return 0;
+    }
+    if (strcmp(token, "pipeline.audio_suffix") == 0) {
+        if (ctx->audio_disabled) {
+            snprintf(buf, buf_sz, " audio=fakesink");
+        } else {
+            buf[0] = '\0';
+        }
+        return 0;
+    }
+    if (strcmp(token, "pipeline.audio_status") == 0) {
+        snprintf(buf, buf_sz, "%s", ctx->audio_disabled ? "fakesink" : "normal");
+        return 0;
+    }
+
+    if (strcmp(token, "udp.stats.available") == 0) {
+        snprintf(buf, buf_sz, "%s", ctx->have_stats ? "yes" : "no");
+        return 0;
+    }
+
+    if (!ctx->have_stats) {
+        if (strncmp(token, "udp.", 4) == 0) {
+            snprintf(buf, buf_sz, "n/a");
+            return 0;
+        }
+    }
+
+    if (strcmp(token, "udp.video_packets") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.video_packets);
+        return 0;
+    }
+    if (strcmp(token, "udp.audio_packets") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.audio_packets);
+        return 0;
+    }
+    if (strcmp(token, "udp.total_packets") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.total_packets);
+        return 0;
+    }
+    if (strcmp(token, "udp.ignored_packets") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.ignored_packets);
+        return 0;
+    }
+    if (strcmp(token, "udp.duplicate_packets") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.duplicate_packets);
+        return 0;
+    }
+    if (strcmp(token, "udp.lost_packets") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.lost_packets);
+        return 0;
+    }
+    if (strcmp(token, "udp.reordered_packets") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.reordered_packets);
+        return 0;
+    }
+    if (strcmp(token, "udp.total_bytes") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.total_bytes);
+        return 0;
+    }
+    if (strcmp(token, "udp.video_bytes") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.video_bytes);
+        return 0;
+    }
+    if (strcmp(token, "udp.audio_bytes") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.audio_bytes);
+        return 0;
+    }
+    if (strcmp(token, "udp.bitrate.latest_mbps") == 0) {
+        snprintf(buf, buf_sz, "%.2f", ctx->stats.bitrate_mbps);
+        return 0;
+    }
+    if (strcmp(token, "udp.bitrate.avg_mbps") == 0) {
+        snprintf(buf, buf_sz, "%.2f", ctx->stats.bitrate_avg_mbps);
+        return 0;
+    }
+    if (strcmp(token, "udp.jitter.latest_ms") == 0) {
+        snprintf(buf, buf_sz, "%.2f", ctx->stats.jitter / 90.0);
+        return 0;
+    }
+    if (strcmp(token, "udp.jitter.avg_ms") == 0) {
+        snprintf(buf, buf_sz, "%.2f", ctx->stats.jitter_avg / 90.0);
+        return 0;
+    }
+    if (strcmp(token, "udp.pipeline.drop_total") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.pipeline_dropped_total);
+        return 0;
+    }
+    if (strcmp(token, "udp.pipeline.drop_too_late") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.pipeline_dropped_too_late);
+        return 0;
+    }
+    if (strcmp(token, "udp.pipeline.drop_on_latency") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.pipeline_dropped_on_latency);
+        return 0;
+    }
+    if (strcmp(token, "udp.pipeline.last_drop_reason") == 0) {
+        if (ctx->stats.pipeline_last_drop_reason[0]) {
+            snprintf(buf, buf_sz, "%s", ctx->stats.pipeline_last_drop_reason);
+        } else {
+            snprintf(buf, buf_sz, "n/a");
+        }
+        return 0;
+    }
+    if (strcmp(token, "udp.pipeline.last_drop_seqnum") == 0) {
+        snprintf(buf, buf_sz, "%u", ctx->stats.pipeline_last_drop_seqnum);
+        return 0;
+    }
+    if (strcmp(token, "udp.pipeline.last_drop_timestamp_ns") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.pipeline_last_drop_timestamp);
+        return 0;
+    }
+    if (strcmp(token, "udp.frames.count") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.frame_count);
+        return 0;
+    }
+    if (strcmp(token, "udp.frames.incomplete") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.incomplete_frames);
+        return 0;
+    }
+    if (strcmp(token, "udp.frames.last_bytes") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.last_frame_bytes);
+        return 0;
+    }
+    if (strcmp(token, "udp.frames.avg_bytes") == 0) {
+        snprintf(buf, buf_sz, "%.0f", ctx->stats.frame_size_avg);
+        return 0;
+    }
+    if (strcmp(token, "udp.expected_sequence") == 0) {
+        snprintf(buf, buf_sz, "%u", ctx->stats.expected_sequence);
+        return 0;
+    }
+    if (strcmp(token, "udp.last_video_timestamp") == 0) {
+        snprintf(buf, buf_sz, "%u", ctx->stats.last_video_timestamp);
+        return 0;
+    }
+
+    snprintf(buf, buf_sz, "{%s}", token);
+    return -1;
+}
+
+static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value) {
+    if (!key || !out_value) {
+        return 0;
+    }
+    if (!ctx->have_stats && strncmp(key, "udp.", 4) == 0) {
+        return 0;
+    }
+
+    if (strcmp(key, "udp.bitrate.latest_mbps") == 0) {
+        *out_value = ctx->stats.bitrate_mbps;
+        return 1;
+    }
+    if (strcmp(key, "udp.bitrate.avg_mbps") == 0) {
+        *out_value = ctx->stats.bitrate_avg_mbps;
+        return 1;
+    }
+    if (strcmp(key, "udp.jitter.latest_ms") == 0) {
+        *out_value = ctx->stats.jitter / 90.0;
+        return 1;
+    }
+    if (strcmp(key, "udp.jitter.avg_ms") == 0) {
+        *out_value = ctx->stats.jitter_avg / 90.0;
+        return 1;
+    }
+    if (strcmp(key, "udp.pipeline.drop_total") == 0) {
+        *out_value = (double)ctx->stats.pipeline_dropped_total;
+        return 1;
+    }
+    if (strcmp(key, "udp.pipeline.drop_on_latency") == 0) {
+        *out_value = (double)ctx->stats.pipeline_dropped_on_latency;
+        return 1;
+    }
+    if (strcmp(key, "udp.pipeline.drop_too_late") == 0) {
+        *out_value = (double)ctx->stats.pipeline_dropped_too_late;
+        return 1;
+    }
+    if (strcmp(key, "udp.frames.avg_bytes") == 0) {
+        *out_value = ctx->stats.frame_size_avg;
+        return 1;
+    }
+    if (strcmp(key, "udp.frames.count") == 0) {
+        *out_value = (double)ctx->stats.frame_count;
+        return 1;
+    }
+    if (strcmp(key, "udp.video_packets") == 0) {
+        *out_value = (double)ctx->stats.video_packets;
+        return 1;
+    }
+    if (strcmp(key, "udp.duplicate_packets") == 0) {
+        *out_value = (double)ctx->stats.duplicate_packets;
+        return 1;
+    }
+    if (strcmp(key, "udp.lost_packets") == 0) {
+        *out_value = (double)ctx->stats.lost_packets;
+        return 1;
+    }
+    if (strcmp(key, "udp.reordered_packets") == 0) {
+        *out_value = (double)ctx->stats.reordered_packets;
+        return 1;
+    }
+
+    if (strcmp(key, "pipeline.restart_count") == 0) {
+        *out_value = (double)ctx->restart_count;
+        return 1;
+    }
+    if (strcmp(key, "pipeline.latency_ms") == 0) {
+        *out_value = (double)(ctx->cfg ? ctx->cfg->latency_ms : 0);
+        return 1;
+    }
+
+    return 0;
+}
+
+static void osd_expand_template(const OsdRenderContext *ctx, const char *tmpl, char *out, size_t out_sz) {
+    if (!tmpl || !out || out_sz == 0) {
+        return;
+    }
+    size_t pos = 0;
+    const char *p = tmpl;
+    while (*p && pos + 1 < out_sz) {
+        if (*p == '{') {
+            const char *end = strchr(p, '}');
+            if (!end) {
+                out[pos++] = *p++;
+                continue;
+            }
+            size_t key_len = (size_t)(end - (p + 1));
+            char key[128];
+            if (key_len >= sizeof(key)) {
+                key_len = sizeof(key) - 1;
+            }
+            memcpy(key, p + 1, key_len);
+            key[key_len] = '\0';
+            char value[256];
+            if (osd_token_format(ctx, key, value, sizeof(value)) != 0) {
+                snprintf(value, sizeof(value), "{%s}", key);
+            }
+            size_t value_len = strnlen(value, sizeof(value));
+            if (value_len > out_sz - pos - 1) {
+                value_len = out_sz - pos - 1;
+            }
+            memcpy(out + pos, value, value_len);
+            pos += value_len;
+            p = end + 1;
+        } else {
+            out[pos++] = *p++;
+        }
+    }
+    out[pos] = '\0';
+}
+
+static void osd_format_metric_value(const char *metric_key, double value, char *buf, size_t buf_sz) {
+    if (!metric_key || !buf || buf_sz == 0) {
+        return;
+    }
+    if (strstr(metric_key, "mbps") || strstr(metric_key, "ms")) {
+        snprintf(buf, buf_sz, "%.2f", value);
+    } else if (strstr(metric_key, "avg") || strstr(metric_key, "ratio")) {
+        snprintf(buf, buf_sz, "%.2f", value);
+    } else {
+        snprintf(buf, buf_sz, "%.0f", value);
+    }
+}
+
 static void osd_clear_rect(OSD *o, const OSDRect *r) {
     if (!r || r->w <= 0 || r->h <= 0) {
         return;
@@ -276,7 +638,8 @@ static void osd_draw_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
     osd_draw_vline(o, x + w - (o->scale > 0 ? o->scale : 1), y, h, argb);
 }
 
-static void osd_compute_anchor(const OSD *o, int rect_w, int rect_h, OSDWidgetPosition pos, int *out_x, int *out_y) {
+static void osd_compute_placement(const OSD *o, int rect_w, int rect_h, const OsdPlacement *placement,
+                                  int *out_x, int *out_y) {
     int margin = o->margin_px;
     int inner_w = o->w - 2 * margin;
     int inner_h = o->h - 2 * margin;
@@ -290,6 +653,7 @@ static void osd_compute_anchor(const OSD *o, int rect_w, int rect_h, OSDWidgetPo
     int x = margin;
     int y = margin;
 
+    OSDWidgetPosition pos = placement ? placement->anchor : OSD_POS_TOP_LEFT;
     switch (pos) {
     case OSD_POS_TOP_LEFT:
         x = margin;
@@ -307,7 +671,7 @@ static void osd_compute_anchor(const OSD *o, int rect_w, int rect_h, OSDWidgetPo
         x = margin;
         y = margin + (inner_h - rect_h) / 2;
         break;
-    case OSD_POS_MID_MID:
+    case OSD_POS_MID:
         x = margin + (inner_w - rect_w) / 2;
         y = margin + (inner_h - rect_h) / 2;
         break;
@@ -351,134 +715,166 @@ static void osd_compute_anchor(const OSD *o, int rect_w, int rect_h, OSDWidgetPo
         y = 0;
     }
 
+    if (placement) {
+        x += placement->offset_x;
+        y += placement->offset_y;
+    }
+
     *out_x = x;
     *out_y = y;
 }
 
-static void osd_plot_reset(OSD *o, const AppCfg *cfg) {
-    o->plot_window_seconds = 60;
-    o->plot_position = OSD_POS_BOTTOM_LEFT;
-    o->plot_sum = 0.0;
-    o->plot_size = 0;
-    o->plot_cursor = 0;
-    o->plot_latest = 0.0;
-    o->plot_min = DBL_MAX;
-    o->plot_max = 0.0;
-    o->plot_avg = 0.0;
-    o->plot_scale_min = 0.0;
-    o->plot_scale_max = 1.0;
-    o->plot_step_px = 0.0;
-    o->plot_background_ready = 0;
-    o->plot_prev_valid = 0;
-    o->plot_prev_x = 0;
-    o->plot_prev_y = 0;
-    o->plot_rescale_countdown = 0;
-    memset(o->plot_samples, 0, sizeof(o->plot_samples));
-    o->plot_clear_on_next_draw = 0;
-
-    int margin = o->margin_px;
-    int desired_columns = cfg->osd_refresh_ms > 0
-                              ? (int)((o->plot_window_seconds * 1000 + cfg->osd_refresh_ms - 1) / cfg->osd_refresh_ms)
-                              : o->plot_window_seconds;
-    if (desired_columns < 2) {
-        desired_columns = 2;
+static void osd_line_reset(OSD *o, const AppCfg *cfg, int idx) {
+    if (idx < 0 || idx >= o->layout.element_count) {
+        return;
+    }
+    OsdElementConfig *elem_cfg = &o->layout.elements[idx];
+    OsdElementType type = elem_cfg->type;
+    o->elements[idx].type = type;
+    if (type != OSD_WIDGET_LINE) {
+        return;
     }
 
-    int capacity = desired_columns;
-    if (capacity > OSD_PLOT_MAX_SAMPLES) {
-        capacity = OSD_PLOT_MAX_SAMPLES;
+    (void)cfg;
+
+    int scale = o->scale > 0 ? o->scale : 1;
+    OsdLineState *state = &o->elements[idx].data.line;
+    memset(state, 0, sizeof(*state));
+
+    int width = elem_cfg->data.line.width;
+    int height = elem_cfg->data.line.height;
+    if (width <= 0) {
+        width = 360;
+    }
+    if (height <= 0) {
+        height = 80;
+    }
+    width *= scale;
+    height *= scale;
+
+    int margin = o->margin_px;
+    if (margin < 0) {
+        margin = 0;
+    }
+
+    if (width > o->w - 2 * margin) {
+        width = o->w - 2 * margin;
+    }
+    if (width < scale * 80) {
+        width = scale * 80;
+    }
+    if (width <= 0) {
+        width = scale * 80;
+    }
+
+    if (height > o->h - 2 * margin) {
+        height = o->h - 2 * margin;
+    }
+    if (height < scale * 40) {
+        height = scale * 40;
+    }
+    if (height <= 0) {
+        height = scale * 40;
+    }
+
+    state->width = width;
+    state->height = height;
+    osd_compute_placement(o, width, height, &elem_cfg->placement, &state->x, &state->y);
+    osd_store_rect(&state->plot_rect, 0, 0, 0, 0);
+    osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+    osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+
+    int stride = elem_cfg->data.line.sample_stride_px;
+    if (stride <= 0) {
+        stride = 4;
+    }
+    stride *= scale;
+    if (stride < scale) {
+        stride = scale;
+    }
+    if (width > 1 && stride > width - 1) {
+        stride = width - 1;
+    }
+    if (stride <= 0) {
+        stride = scale;
+    }
+
+    int capacity = 0;
+    if (width > 1 && stride > 0) {
+        capacity = ((width - 1) / stride) + 1;
     }
     if (capacity < 2) {
         capacity = 2;
     }
+    if (capacity > OSD_PLOT_MAX_SAMPLES) {
+        capacity = OSD_PLOT_MAX_SAMPLES;
+    }
 
-    o->plot_capacity = capacity;
-    int scale = o->scale > 0 ? o->scale : 1;
-    int target_plot_w = 360 * scale;
-    int available_w = o->w - 2 * margin;
-    int min_plot_w = 160 * scale;
-    if (available_w <= 0) {
-        target_plot_w = min_plot_w;
-    } else {
-        if (target_plot_w > available_w) {
-            target_plot_w = available_w;
-        }
-        if (target_plot_w < min_plot_w) {
-            target_plot_w = available_w < min_plot_w ? available_w : min_plot_w;
-        }
-        if (target_plot_w <= 0) {
-            target_plot_w = available_w;
-        }
-    }
-    if (target_plot_w <= 0) {
-        target_plot_w = min_plot_w;
-    }
-    o->plot_w = target_plot_w;
-    int plot_target_h = 80 * scale;
-    if (plot_target_h > o->h - 2 * margin) {
-        plot_target_h = o->h - 2 * margin;
-    }
-    if (plot_target_h < 48 * scale) {
-        plot_target_h = 48 * scale;
-    }
-    o->plot_h = plot_target_h;
-    osd_compute_anchor(o, o->plot_w, o->plot_h, o->plot_position, &o->plot_x, &o->plot_y);
-    osd_store_rect(&o->plot_rect, 0, 0, 0, 0);
-    osd_store_rect(&o->plot_label_rect, 0, 0, 0, 0);
-    osd_store_rect(&o->plot_stats_rect, 0, 0, 0, 0);
-
-    if (o->plot_capacity > 1 && o->plot_w > 1) {
-        o->plot_step_px = (double)(o->plot_w - 1) / (double)(o->plot_capacity - 1);
-    } else {
-        o->plot_step_px = 0.0;
-    }
+    state->capacity = capacity;
+    state->step_px = (double)stride;
+    state->size = 0;
+    state->cursor = 0;
+    state->sum = 0.0;
+    state->latest = 0.0;
+    state->min_v = DBL_MAX;
+    state->max_v = 0.0;
+    state->avg = 0.0;
+    state->scale_min = 0.0;
+    state->scale_max = 1.0;
+    state->clear_on_next_draw = 0;
+    state->background_ready = 0;
+    state->prev_valid = 0;
+    state->prev_x = 0;
+    state->prev_y = 0;
+    state->rescale_countdown = 0;
 }
 
-static void osd_plot_push(OSD *o, double value) {
-    if (o->plot_capacity <= 0) {
+
+static void osd_line_push(OsdLineState *state, double value) {
+    if (!state || state->capacity <= 0) {
         return;
     }
-    if (o->plot_cursor >= o->plot_capacity) {
-        o->plot_cursor = 0;
+    if (state->cursor >= state->capacity) {
+        state->cursor = 0;
     }
-    if (o->plot_cursor == 0 && o->plot_size >= o->plot_capacity) {
-        o->plot_clear_on_next_draw = 1;
-        o->plot_background_ready = 0;
-        o->plot_prev_valid = 0;
-        o->plot_size = 0;
-        o->plot_sum = 0.0;
-        o->plot_min = DBL_MAX;
-        o->plot_max = 0.0;
-        o->plot_avg = 0.0;
-        o->plot_latest = 0.0;
+    if (state->cursor == 0 && state->size >= state->capacity) {
+        state->clear_on_next_draw = 1;
+        state->background_ready = 0;
+        state->prev_valid = 0;
+        state->size = 0;
+        state->sum = 0.0;
+        state->min_v = DBL_MAX;
+        state->max_v = 0.0;
+        state->avg = 0.0;
+        state->latest = 0.0;
     }
 
-    o->plot_samples[o->plot_cursor] = value;
-    o->plot_cursor++;
-    if (o->plot_size < o->plot_cursor) {
-        o->plot_size = o->plot_cursor;
+    state->samples[state->cursor] = value;
+    state->cursor++;
+    if (state->size < state->cursor) {
+        state->size = state->cursor;
     }
-    o->plot_sum += value;
-    if (o->plot_size == 1 || value < o->plot_min) {
-        o->plot_min = value;
+    state->sum += value;
+    if (state->size == 1 || value < state->min_v) {
+        state->min_v = value;
     }
-    if (value > o->plot_max) {
-        o->plot_max = value;
+    if (value > state->max_v) {
+        state->max_v = value;
     }
-    o->plot_avg = o->plot_size > 0 ? (o->plot_sum / (double)o->plot_size) : 0.0;
-    o->plot_latest = value;
+    state->avg = state->size > 0 ? (state->sum / (double)state->size) : 0.0;
+    state->latest = value;
 }
 
 #define OSD_PLOT_RESCALE_DELAY 12
 
-static void osd_plot_compute_scale(const OSD *o, double *out_min, double *out_max) {
+static void osd_line_compute_scale(const OsdLineState *state, double *out_min, double *out_max) {
     double min_v = 0.0;
     double max_v = 1.0;
-    if (o->plot_size > 0) {
-        if (o->plot_min != DBL_MAX) {
-            min_v = o->plot_min;
+    if (state->size > 0) {
+        if (state->min_v != DBL_MAX) {
+            min_v = state->min_v;
         }
-        max_v = o->plot_max;
+        max_v = state->max_v;
         if (max_v < 0.1) {
             max_v = 0.1;
         }
@@ -507,9 +903,9 @@ static void osd_plot_compute_scale(const OSD *o, double *out_min, double *out_ma
     *out_max = max_v;
 }
 
-static int osd_plot_value_to_y(const OSD *o, double value) {
-    double min_v = o->plot_scale_min;
-    double max_v = o->plot_scale_max;
+static int osd_line_value_to_y(const OsdLineState *state, double value) {
+    double min_v = state->scale_min;
+    double max_v = state->scale_max;
     if (max_v <= min_v) {
         max_v = min_v + 0.1;
     }
@@ -520,27 +916,161 @@ static int osd_plot_value_to_y(const OSD *o, double value) {
     if (norm > 1.0) {
         norm = 1.0;
     }
-    int plot_h = o->plot_h;
-    int base_y = o->plot_y;
+    int plot_h = state->height;
+    int base_y = state->y;
     return base_y + plot_h - 1 - (int)(norm * (plot_h - 1) + 0.5);
 }
 
-static void osd_plot_draw_background(OSD *o) {
-    uint32_t bg = 0x40202020u;
+typedef enum {
+    OSD_LINE_BOX_PREF_BELOW = 0,
+    OSD_LINE_BOX_PREF_ABOVE
+} OsdLineBoxPreference;
+
+typedef enum {
+    OSD_LINE_BOX_ALIGN_LEFT = 0,
+    OSD_LINE_BOX_ALIGN_RIGHT
+} OsdLineBoxAlign;
+
+static void osd_line_position_box(OSD *o, OsdLineState *state, int box_w, int box_h, OsdLineBoxPreference pref,
+                                  OsdLineBoxAlign align, int *out_x, int *out_y) {
+    int scale = o->scale > 0 ? o->scale : 1;
+    int gap = 4 * scale;
+    int margin = o->margin_px;
+    if (margin < 0) {
+        margin = 0;
+    }
+
+    int base_x = state->x;
+    if (align == OSD_LINE_BOX_ALIGN_RIGHT) {
+        base_x = state->x + state->width - box_w;
+    }
+    int max_x = o->w - margin - box_w;
+    if (max_x < margin) {
+        max_x = margin;
+    }
+    if (base_x < margin) {
+        base_x = margin;
+    }
+    if (base_x > max_x) {
+        base_x = max_x;
+    }
+
+    int order[4];
+    if (pref == OSD_LINE_BOX_PREF_BELOW) {
+        order[0] = 0;
+        order[1] = 1;
+    } else {
+        order[0] = 1;
+        order[1] = 0;
+    }
+    order[2] = 2;
+    order[3] = 3;
+
+    for (int i = 0; i < 4; ++i) {
+        int mode = order[i];
+        switch (mode) {
+        case 0: { // below
+            int y = state->y + state->height + gap;
+            if (y + box_h <= o->h - margin) {
+                *out_x = base_x;
+                *out_y = y;
+                return;
+            }
+            break;
+        }
+        case 1: { // above
+            int y = state->y - box_h - gap;
+            if (y >= margin) {
+                *out_x = base_x;
+                *out_y = y;
+                return;
+            }
+            break;
+        }
+        case 2: { // right
+            int x = state->x + state->width + gap;
+            if (x + box_w <= o->w - margin) {
+                int y = state->y;
+                if (y < margin) {
+                    y = margin;
+                }
+                if (y + box_h > o->h - margin) {
+                    y = o->h - margin - box_h;
+                    if (y < margin) {
+                        y = margin;
+                    }
+                }
+                *out_x = x;
+                *out_y = y;
+                return;
+            }
+            break;
+        }
+        case 3: { // left
+            int x = state->x - box_w - gap;
+            if (x >= margin) {
+                int y = state->y;
+                if (y < margin) {
+                    y = margin;
+                }
+                if (y + box_h > o->h - margin) {
+                    y = o->h - margin - box_h;
+                    if (y < margin) {
+                        y = margin;
+                    }
+                }
+                *out_x = x;
+                *out_y = y;
+                return;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    int fallback_x = base_x;
+    if (fallback_x < margin) {
+        fallback_x = margin;
+    }
+    if (fallback_x > o->w - margin - box_w) {
+        fallback_x = o->w - margin - box_w;
+    }
+    if (fallback_x < margin) {
+        fallback_x = margin;
+    }
+
+    int fallback_y = (pref == OSD_LINE_BOX_PREF_BELOW) ? (o->h - margin - box_h) : margin;
+    if (fallback_y + box_h > o->h - margin) {
+        fallback_y = o->h - margin - box_h;
+    }
+    if (fallback_y < margin) {
+        fallback_y = margin;
+    }
+
+    *out_x = fallback_x;
+    *out_y = fallback_y;
+}
+
+static void osd_line_draw_background(OSD *o, int idx) {
+    OsdLineState *state = &o->elements[idx].data.line;
+    const OsdLineConfig *cfg = &o->layout.elements[idx].data.line;
+    uint32_t bg = cfg->bg ? cfg->bg : 0x40202020u;
     uint32_t border = 0x60FFFFFFu;
-    uint32_t axis = 0x60FFFFFFu;
-    uint32_t grid = 0x30909090u;
+    uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
+    uint32_t grid = cfg->grid ? cfg->grid : 0x30909090u;
 
-    osd_clear_rect(o, &o->plot_rect);
+    osd_clear_rect(o, &state->plot_rect);
 
-    int base_x = o->plot_x;
-    int base_y = o->plot_y;
-    int plot_w = o->plot_w;
-    int plot_h = o->plot_h;
+    int base_x = state->x;
+    int base_y = state->y;
+    int plot_w = state->width;
+    int plot_h = state->height;
 
     osd_fill_rect(o, base_x, base_y, plot_w, plot_h, bg);
     osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
-    osd_store_rect(&o->plot_rect, base_x, base_y, plot_w, plot_h);
+    osd_store_rect(&state->plot_rect, base_x, base_y, plot_w, plot_h);
 
     int grid_lines = 4;
     for (int i = 1; i < grid_lines; ++i) {
@@ -548,34 +1078,31 @@ static void osd_plot_draw_background(OSD *o) {
         osd_draw_hline(o, base_x, gy, plot_w, grid);
     }
 
-    int desired_secs = 10;
-    double px_per_sec = (o->plot_window_seconds > 0 && plot_w > 1)
-                            ? (double)(plot_w - 1) / (double)o->plot_window_seconds
-                            : 0.0;
-    if (px_per_sec > 0.0) {
-        int step_px = (int)(px_per_sec * desired_secs + 0.5);
-        int scale = o->scale > 0 ? o->scale : 1;
-        if (step_px < scale) {
-            step_px = scale;
-        }
-        for (int gx = step_px; gx < plot_w; gx += step_px) {
-            osd_draw_vline(o, base_x + gx, base_y, plot_h, grid);
-        }
+    int scale = o->scale > 0 ? o->scale : 1;
+    int marker_count = 4;
+    int marker_height = 5 * scale;
+    if (marker_height > plot_h) {
+        marker_height = plot_h;
+    }
+    for (int i = 1; i <= marker_count; ++i) {
+        int gx = base_x + (plot_w * i) / (marker_count + 1);
+        osd_draw_vline(o, gx, base_y + plot_h - marker_height, marker_height, grid);
     }
 
-    osd_draw_hline(o, base_x, base_y + plot_h - (o->scale > 0 ? o->scale : 1), plot_w, axis);
+    int axis_thickness = o->scale > 0 ? o->scale : 1;
+    osd_draw_hline(o, base_x, base_y + plot_h - axis_thickness, plot_w, axis);
     osd_draw_vline(o, base_x, base_y, plot_h, axis);
 }
 
-static void osd_plot_draw_all(OSD *o) {
-    int limit = o->plot_size;
+static void osd_line_draw_all(OSD *o, int idx, uint32_t color) {
+    OsdLineState *state = &o->elements[idx].data.line;
+    int limit = state->size;
     if (limit <= 0) {
-        o->plot_prev_valid = 0;
+        state->prev_valid = 0;
         return;
     }
-    uint32_t plot_color = 0xB0FF4040u;
-    int base_x = o->plot_x;
-    double step = o->plot_step_px;
+    int base_x = state->x;
+    double step = state->step_px;
     if (step <= 0.0) {
         step = 0.0;
     }
@@ -584,71 +1111,73 @@ static void osd_plot_draw_all(OSD *o) {
     int scale = o->scale > 0 ? o->scale : 1;
 
     for (int i = 0; i < limit; ++i) {
-        double value = o->plot_samples[i];
+        double value = state->samples[i];
         int x = base_x + (int)(i * step + 0.5);
-        if (x >= base_x + o->plot_w) {
-            x = base_x + o->plot_w - 1;
+        if (x >= base_x + state->width) {
+            x = base_x + state->width - 1;
         }
-        int y = osd_plot_value_to_y(o, value);
+        int y = osd_line_value_to_y(state, value);
         if (prev_x >= 0 && x >= prev_x) {
-            osd_draw_line(o, prev_x, prev_y, x, y, plot_color);
+            osd_draw_line(o, prev_x, prev_y, x, y, color);
         }
-        osd_fill_rect(o, x, y, scale, scale, plot_color);
+        osd_fill_rect(o, x, y, scale, scale, color);
         prev_x = x;
         prev_y = y;
     }
 
     if (prev_x >= 0 && prev_y >= 0) {
-        o->plot_prev_valid = 1;
-        o->plot_prev_x = prev_x;
-        o->plot_prev_y = prev_y;
+        state->prev_valid = 1;
+        state->prev_x = prev_x;
+        state->prev_y = prev_y;
     } else {
-        o->plot_prev_valid = 0;
+        state->prev_valid = 0;
     }
 }
 
-static void osd_plot_draw_latest(OSD *o) {
-    int limit = o->plot_size;
+static void osd_line_draw_latest(OSD *o, int idx, uint32_t color) {
+    OsdLineState *state = &o->elements[idx].data.line;
+    int limit = state->size;
     if (limit <= 0) {
-        o->plot_prev_valid = 0;
+        state->prev_valid = 0;
         return;
     }
     int index = limit - 1;
-    double value = o->plot_samples[index];
-    uint32_t plot_color = 0xB0FF4040u;
-    int base_x = o->plot_x;
-    double step = o->plot_step_px;
+    double value = state->samples[index];
+    int base_x = state->x;
+    double step = state->step_px;
     int x = base_x + (int)(index * step + 0.5);
-    if (x >= base_x + o->plot_w) {
-        x = base_x + o->plot_w - 1;
+    if (x >= base_x + state->width) {
+        x = base_x + state->width - 1;
     }
-    int y = osd_plot_value_to_y(o, value);
+    int y = osd_line_value_to_y(state, value);
     int scale = o->scale > 0 ? o->scale : 1;
 
-    if (o->plot_prev_valid) {
-        osd_draw_line(o, o->plot_prev_x, o->plot_prev_y, x, y, plot_color);
+    if (state->prev_valid) {
+        osd_draw_line(o, state->prev_x, state->prev_y, x, y, color);
     }
-    osd_fill_rect(o, x, y, scale, scale, plot_color);
-    o->plot_prev_valid = 1;
-    o->plot_prev_x = x;
-    o->plot_prev_y = y;
+    osd_fill_rect(o, x, y, scale, scale, color);
+    state->prev_valid = 1;
+    state->prev_x = x;
+    state->prev_y = y;
 }
 
-static void osd_plot_draw(OSD *o) {
-    if (o->plot_capacity <= 0) {
+static void osd_line_draw(OSD *o, int idx) {
+    OsdLineState *state = &o->elements[idx].data.line;
+    const OsdLineConfig *cfg = &o->layout.elements[idx].data.line;
+    if (state->capacity <= 0) {
         return;
     }
 
-    double scale_min = o->plot_scale_min;
-    double scale_max = o->plot_scale_max;
+    double scale_min = state->scale_min;
+    double scale_max = state->scale_max;
     double new_min = scale_min;
     double new_max = scale_max;
-    osd_plot_compute_scale(o, &new_min, &new_max);
+    osd_line_compute_scale(state, &new_min, &new_max);
 
-    int need_background = (!o->plot_background_ready || o->plot_clear_on_next_draw);
-    if (o->plot_size > 0) {
-        double actual_min = (o->plot_min != DBL_MAX) ? o->plot_min : new_min;
-        double actual_max = o->plot_max;
+    int need_background = (!state->background_ready || state->clear_on_next_draw);
+    if (state->size > 0) {
+        double actual_min = (state->min_v != DBL_MAX) ? state->min_v : new_min;
+        double actual_max = state->max_v;
         if (!need_background) {
             if (actual_min < scale_min || actual_max > scale_max) {
                 need_background = 1;
@@ -658,78 +1187,81 @@ static void osd_plot_draw(OSD *o) {
                 if (span > 0.0 && used >= 0.0) {
                     double utilization = (span > 0.0) ? (used / span) : 1.0;
                     if (utilization < 0.35) {
-                        if (o->plot_rescale_countdown > 0) {
-                            o->plot_rescale_countdown--;
+                        if (state->rescale_countdown > 0) {
+                            state->rescale_countdown--;
                         } else {
                             need_background = 1;
                         }
                     } else {
-                        o->plot_rescale_countdown = OSD_PLOT_RESCALE_DELAY;
+                        state->rescale_countdown = OSD_PLOT_RESCALE_DELAY;
                     }
                 }
             }
         }
     }
 
+    uint32_t fg = cfg->fg ? cfg->fg : 0xB0FF4040u;
+
     if (need_background) {
-        osd_plot_draw_background(o);
-        o->plot_scale_min = new_min;
-        o->plot_scale_max = new_max;
-        o->plot_background_ready = 1;
-        o->plot_clear_on_next_draw = 0;
-        o->plot_prev_valid = 0;
-        o->plot_rescale_countdown = OSD_PLOT_RESCALE_DELAY;
-        osd_plot_draw_all(o);
+        osd_line_draw_background(o, idx);
+        state->scale_min = new_min;
+        state->scale_max = new_max;
+        state->background_ready = 1;
+        state->clear_on_next_draw = 0;
+        state->prev_valid = 0;
+        state->rescale_countdown = OSD_PLOT_RESCALE_DELAY;
+        osd_line_draw_all(o, idx, fg);
         return;
     }
 
-    if (o->plot_size <= 0) {
-        o->plot_prev_valid = 0;
+    if (state->size <= 0) {
+        state->prev_valid = 0;
         return;
     }
 
-    osd_plot_draw_latest(o);
+    osd_line_draw_latest(o, idx, fg);
 }
 
-static void osd_plot_draw_label(OSD *o, const char *text) {
-    osd_clear_rect(o, &o->plot_label_rect);
+static void osd_line_draw_label(OSD *o, int idx, const OsdLineConfig *cfg) {
+    OsdLineState *state = &o->elements[idx].data.line;
+    osd_clear_rect(o, &state->label_rect);
+    if (!cfg || !cfg->show_info_box) {
+        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+        return;
+    }
+    const char *text = cfg->label;
     if (text == NULL || text[0] == '\0') {
-        osd_store_rect(&o->plot_label_rect, 0, 0, 0, 0);
+        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
         return;
     }
     int scale = o->scale > 0 ? o->scale : 1;
     int pad = 4 * scale;
     int line_height = 8 * scale;
     int text_w = (int)strlen(text) * (8 + 1) * scale;
+    if (text_w < 0) {
+        text_w = 0;
+    }
     int box_w = text_w + 2 * pad;
     int box_h = line_height + 2 * pad;
-    int x = o->plot_x + pad;
-    int y = o->plot_y + pad;
-    if (x + box_w > o->plot_x + o->plot_w - pad) {
-        x = o->plot_x + o->plot_w - pad - box_w;
-    }
-    if (y + box_h > o->plot_y + o->plot_h - pad) {
-        y = o->plot_y + o->plot_h - pad - box_h;
-    }
-    if (x < o->margin_px) {
-        x = o->margin_px;
-    }
-    if (y < o->margin_px) {
-        y = o->margin_px;
-    }
+
+    int x = 0;
+    int y = 0;
+    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_ABOVE, OSD_LINE_BOX_ALIGN_LEFT, &x, &y);
+
     uint32_t bg = 0x50202020u;
     uint32_t border = 0x60FFFFFFu;
     uint32_t text_color = 0xB0FFFFFFu;
     osd_fill_rect(o, x, y, box_w, box_h, bg);
     osd_draw_rect(o, x, y, box_w, box_h, border);
     osd_draw_text(o, x + pad, y + pad, text, text_color, o->scale);
-    osd_store_rect(&o->plot_label_rect, x, y, box_w, box_h);
+    osd_store_rect(&state->label_rect, x, y, box_w, box_h);
 }
 
-static void osd_plot_draw_footer(OSD *o, const char **lines, int line_count) {
-    osd_clear_rect(o, &o->plot_stats_rect);
+static void osd_line_draw_footer(OSD *o, int idx, const char **lines, int line_count) {
+    OsdLineState *state = &o->elements[idx].data.line;
+    osd_clear_rect(o, &state->footer_rect);
     if (lines == NULL || line_count <= 0) {
-        osd_store_rect(&o->plot_stats_rect, 0, 0, 0, 0);
+        osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
         return;
     }
     int scale = o->scale > 0 ? o->scale : 1;
@@ -747,25 +1279,14 @@ static void osd_plot_draw_footer(OSD *o, const char **lines, int line_count) {
         }
     }
     if (max_line_w <= 0) {
-        osd_store_rect(&o->plot_stats_rect, 0, 0, 0, 0);
+        osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
         return;
     }
     int box_w = max_line_w + 2 * pad;
     int box_h = line_count * line_advance + 2 * pad;
-    int x = o->plot_x;
-    int y = o->plot_y + o->plot_h + scale * 4;
-    if (y + box_h > o->h - o->margin_px) {
-        y = o->plot_y + o->plot_h - box_h - scale * 4;
-        if (y < o->margin_px) {
-            y = o->margin_px;
-        }
-    }
-    if (x + box_w > o->w - o->margin_px) {
-        x = o->w - o->margin_px - box_w;
-        if (x < o->margin_px) {
-            x = o->margin_px;
-        }
-    }
+    int x = 0;
+    int y = 0;
+    osd_line_position_box(o, state, box_w, box_h, OSD_LINE_BOX_PREF_BELOW, OSD_LINE_BOX_ALIGN_RIGHT, &x, &y);
     uint32_t bg = 0x40202020u;
     uint32_t border = 0x60FFFFFFu;
     uint32_t text_color = 0xB0FFFFFFu;
@@ -779,7 +1300,121 @@ static void osd_plot_draw_footer(OSD *o, const char **lines, int line_count) {
         osd_draw_text(o, x + pad, draw_y, lines[i], text_color, o->scale);
         draw_y += line_advance;
     }
-    osd_store_rect(&o->plot_stats_rect, x, y, box_w, box_h);
+    osd_store_rect(&state->footer_rect, x, y, box_w, box_h);
+}
+
+static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx) {
+    OsdElementConfig *cfg = &o->layout.elements[idx];
+    OsdTextConfig *text_cfg = &cfg->data.text;
+    osd_clear_rect(o, &o->elements[idx].rect);
+
+    if (text_cfg->line_count <= 0) {
+        osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
+        return;
+    }
+
+    char lines[OSD_MAX_TEXT_LINES][OSD_TEXT_MAX_LINE_CHARS];
+    const char *line_ptrs[OSD_MAX_TEXT_LINES];
+    int actual_lines = 0;
+    for (int i = 0; i < text_cfg->line_count && i < OSD_MAX_TEXT_LINES; ++i) {
+        osd_expand_template(ctx, text_cfg->lines[i].raw, lines[actual_lines], sizeof(lines[actual_lines]));
+        line_ptrs[actual_lines] = lines[actual_lines];
+        actual_lines++;
+    }
+
+    if (actual_lines <= 0) {
+        osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
+        return;
+    }
+
+    int scale = o->scale > 0 ? o->scale : 1;
+    int padding = text_cfg->padding > 0 ? text_cfg->padding : 6;
+    int pad_px = padding * scale;
+    if (pad_px < 4) {
+        pad_px = 4;
+    }
+    int line_advance = (8 + 1) * scale;
+    int max_line_width = 0;
+    for (int i = 0; i < actual_lines; ++i) {
+        int len = (int)strlen(line_ptrs[i]);
+        int width = len * (8 + 1) * scale;
+        if (width > max_line_width) {
+            max_line_width = width;
+        }
+    }
+    int box_w = max_line_width + 2 * pad_px;
+    int box_h = actual_lines * line_advance + 2 * pad_px;
+
+    int draw_x = 0;
+    int draw_y = 0;
+    osd_compute_placement(o, box_w, box_h, &cfg->placement, &draw_x, &draw_y);
+
+    uint32_t fg = text_cfg->fg ? text_cfg->fg : 0xB0FFFFFFu;
+    uint32_t bg = text_cfg->bg ? text_cfg->bg : 0x40202020u;
+    uint32_t border = text_cfg->border ? text_cfg->border : 0x60FFFFFFu;
+
+    osd_fill_rect(o, draw_x, draw_y, box_w, box_h, bg);
+    osd_draw_rect(o, draw_x, draw_y, box_w, box_h, border);
+
+    int text_x = draw_x + pad_px;
+    int text_y = draw_y + pad_px;
+    for (int i = 0; i < actual_lines; ++i) {
+        osd_draw_text(o, text_x, text_y, line_ptrs[i], fg, o->scale);
+        text_y += line_advance;
+    }
+
+    osd_store_rect(&o->elements[idx].rect, draw_x, draw_y, box_w, box_h);
+    o->elements[idx].data.text.last_line_count = actual_lines;
+}
+
+static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx) {
+    OsdElementConfig *elem_cfg = &o->layout.elements[idx];
+    OsdLineState *state = &o->elements[idx].data.line;
+
+    OSDRect prev_rect = o->elements[idx].rect;
+    int repositioned = (prev_rect.x != state->x) || (prev_rect.y != state->y) || (prev_rect.w != state->width) ||
+                       (prev_rect.h != state->height);
+    if (repositioned) {
+        if (prev_rect.w > 0 && prev_rect.h > 0) {
+            osd_clear_rect(o, &prev_rect);
+        }
+        state->background_ready = 0;
+        state->clear_on_next_draw = 1;
+        state->prev_valid = 0;
+    }
+
+    double value = 0.0;
+    int have_value = osd_metric_sample(ctx, elem_cfg->data.line.metric, &value);
+    if (have_value) {
+        osd_line_push(state, value);
+    }
+
+    osd_line_draw(o, idx);
+    osd_line_draw_label(o, idx, &elem_cfg->data.line);
+
+    if (elem_cfg->data.line.show_info_box) {
+        char footer_line[128];
+        const char *footer_ptrs[1];
+        int footer_count = 0;
+
+        if (state->size > 0) {
+            char latest_buf[32];
+            osd_format_metric_value(elem_cfg->data.line.metric, state->latest, latest_buf, sizeof(latest_buf));
+            snprintf(footer_line, sizeof(footer_line), "%s", latest_buf);
+            footer_ptrs[0] = footer_line;
+            footer_count = 1;
+        } else {
+            const char *msg = ctx->have_stats && have_value ? "Collecting samples..." : "Metric unavailable";
+            snprintf(footer_line, sizeof(footer_line), "%s", msg);
+            footer_ptrs[0] = footer_line;
+            footer_count = 1;
+        }
+
+        osd_line_draw_footer(o, idx, footer_ptrs, footer_count);
+    } else {
+        osd_line_draw_footer(o, idx, NULL, 0);
+    }
+    osd_store_rect(&o->elements[idx].rect, state->x, state->y, state->width, state->height);
 }
 
 typedef struct {
@@ -1140,18 +1775,15 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
 
     o->scale = (ms->mode_w >= 1280) ? 2 : 1;
-    o->w = 960 * o->scale;
-    o->h = 360 * o->scale;
-    o->margin_px = 12 * o->scale;
-
-    if (o->w > ms->mode_w) {
-        o->w = ms->mode_w / 2;
+    o->w = (ms->mode_w > 0) ? ms->mode_w : (960 * o->scale);
+    o->h = (ms->mode_h > 0) ? ms->mode_h : (360 * o->scale);
+    if (o->w <= 0) {
+        o->w = 960 * o->scale;
     }
-    if (o->h > ms->mode_h) {
-        o->h = ms->mode_h / 2;
+    if (o->h <= 0) {
+        o->h = 360 * o->scale;
     }
-
-    o->margin_px = clampi(o->margin_px, 8, o->w / 4);
+    o->margin_px = clampi(12 * o->scale, 8, o->h / 4);
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");
@@ -1159,8 +1791,20 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
         return -1;
     }
 
-    osd_plot_reset(o, cfg);
-    osd_store_rect(&o->text_rect, 0, 0, 0, 0);
+    o->layout = cfg->osd_layout;
+    if (o->layout.element_count > OSD_MAX_ELEMENTS) {
+        o->layout.element_count = OSD_MAX_ELEMENTS;
+    }
+    o->element_count = o->layout.element_count;
+    for (int i = 0; i < o->element_count; ++i) {
+        o->elements[i].type = o->layout.elements[i].type;
+        osd_store_rect(&o->elements[i].rect, 0, 0, 0, 0);
+        if (o->elements[i].type == OSD_WIDGET_LINE) {
+            osd_line_reset(o, cfg, i);
+        } else if (o->elements[i].type == OSD_WIDGET_TEXT) {
+            o->elements[i].data.text.last_line_count = 0;
+        }
+    }
 
     osd_clear(o, 0x00000000u);
     if (osd_commit_enable(fd, ms->crtc_id, o) != 0) {
@@ -1180,154 +1824,35 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         return;
     }
 
-    int margin = o->margin_px;
-    int line_advance = (8 + 1) * o->scale;
-    uint32_t text_color = 0xB0FFFFFFu;
-    uint32_t text_bg = 0x40202020u;
-    uint32_t text_border = 0x60FFFFFFu;
-    int pad = 6 * o->scale;
-    if (pad < 4) {
-        pad = 4;
+    OsdRenderContext ctx = {
+        .cfg = cfg,
+        .ms = ms,
+        .ps = ps,
+        .audio_disabled = audio_disabled,
+        .restart_count = restart_count,
+        .have_stats = 0,
+    };
+    if (ps && pipeline_get_receiver_stats(ps, &ctx.stats) == 0) {
+        ctx.have_stats = 1;
     }
 
-    char text_lines[12][192];
-    const char *line_ptrs[12];
-    int line_count = 0;
-    char plot_lines[3][128];
-    const char *plot_line_ptrs[3];
-    int plot_line_count = 0;
-    int plot_line_cap = (int)(sizeof(plot_line_ptrs) / sizeof(plot_line_ptrs[0]));
-
-    snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "HDMI %dx%d@%d plane=%d", ms->mode_w,
-             ms->mode_h, ms->mode_hz, cfg->plane_id);
-    line_ptrs[line_count] = text_lines[line_count];
-    line_count++;
-
-    snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "UDP:%d PTv=%d PTa=%d lat=%dms", cfg->udp_port,
-             cfg->vid_pt, cfg->aud_pt, cfg->latency_ms);
-    line_ptrs[line_count] = text_lines[line_count];
-    line_count++;
-
-    snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "Pipeline: %s restarts=%d%s",
-             ps->state == PIPELINE_RUNNING ? "RUN" : "STOP", restart_count, audio_disabled ? " audio=fakesink" : "");
-    line_ptrs[line_count] = text_lines[line_count];
-    line_count++;
-
-    UdpReceiverStats stats;
-    int have_stats = (pipeline_get_receiver_stats(ps, &stats) == 0);
-    if (have_stats) {
-        double jitter_ms = stats.jitter / 90.0;
-        double jitter_avg_ms = stats.jitter_avg / 90.0;
-        snprintf(text_lines[line_count], sizeof(text_lines[line_count]),
-                 "RTP vpkts=%llu net-loss=%llu reo=%llu dup=%llu jitter=%.2f/%.2fms br=%.2f/%.2fMbps",
-                 (unsigned long long)stats.video_packets, (unsigned long long)stats.lost_packets,
-                 (unsigned long long)stats.reordered_packets, (unsigned long long)stats.duplicate_packets, jitter_ms,
-                 jitter_avg_ms, stats.bitrate_mbps, stats.bitrate_avg_mbps);
-        line_ptrs[line_count] = text_lines[line_count];
-        line_count++;
-
-        const char *drop_reason = stats.pipeline_last_drop_reason[0] != '\0'
-                                      ? stats.pipeline_last_drop_reason
-                                      : "n/a";
-        snprintf(text_lines[line_count], sizeof(text_lines[line_count]),
-                 "Pipe drop=%llu late=%llu latency=%llu last=%s seq=%u",
-                 (unsigned long long)stats.pipeline_dropped_total,
-                 (unsigned long long)stats.pipeline_dropped_too_late,
-                 (unsigned long long)stats.pipeline_dropped_on_latency, drop_reason,
-                 stats.pipeline_last_drop_seqnum);
-        line_ptrs[line_count] = text_lines[line_count];
-        line_count++;
-
-        snprintf(text_lines[line_count], sizeof(text_lines[line_count]),
-                 "Frames=%llu incomplete=%llu last=%lluB avg=%.0fB seq=%u",
-                 (unsigned long long)stats.frame_count, (unsigned long long)stats.incomplete_frames,
-                 (unsigned long long)stats.last_frame_bytes, stats.frame_size_avg, stats.expected_sequence);
-        line_ptrs[line_count] = text_lines[line_count];
-        line_count++;
-
-        osd_plot_push(o, stats.bitrate_mbps);
-    } else {
-        snprintf(text_lines[line_count], sizeof(text_lines[line_count]), "UDP statistics unavailable");
-        line_ptrs[line_count] = text_lines[line_count];
-        line_count++;
-    }
-
-    if (o->plot_size > 0) {
-        if (plot_line_count < plot_line_cap) {
-            snprintf(plot_lines[plot_line_count], sizeof(plot_lines[plot_line_count]), "Latest %.2f Mbps  Avg %.2f",
-                     o->plot_latest, o->plot_avg);
-            plot_line_ptrs[plot_line_count] = plot_lines[plot_line_count];
-            plot_line_count++;
-        }
-        if (plot_line_count < plot_line_cap) {
-            double min_v = (o->plot_min == DBL_MAX) ? 0.0 : o->plot_min;
-            snprintf(plot_lines[plot_line_count], sizeof(plot_lines[plot_line_count]), "Min %.2f  Max %.2f",
-                     min_v, o->plot_max);
-            plot_line_ptrs[plot_line_count] = plot_lines[plot_line_count];
-            plot_line_count++;
-        }
-        if (plot_line_count < plot_line_cap) {
-            snprintf(plot_lines[plot_line_count], sizeof(plot_lines[plot_line_count]), "Window %ds", o->plot_window_seconds);
-            plot_line_ptrs[plot_line_count] = plot_lines[plot_line_count];
-            plot_line_count++;
-        }
-    } else {
-        if (plot_line_count < plot_line_cap) {
-            const char *waiting = have_stats ? "Collecting bitrate samples..." : "Bitrate stats unavailable";
-            snprintf(plot_lines[plot_line_count], sizeof(plot_lines[plot_line_count]), "%s", waiting);
-            plot_line_ptrs[plot_line_count] = plot_lines[plot_line_count];
-            plot_line_count++;
+    for (int i = 0; i < o->element_count; ++i) {
+        OsdElementType type = o->layout.elements[i].type;
+        o->elements[i].type = type;
+        switch (type) {
+        case OSD_WIDGET_TEXT:
+            osd_render_text_element(o, i, &ctx);
+            break;
+        case OSD_WIDGET_LINE:
+            osd_render_line_element(o, i, &ctx);
+            break;
+        case OSD_WIDGET_BAR:
+        default:
+            osd_clear_rect(o, &o->elements[i].rect);
+            osd_store_rect(&o->elements[i].rect, 0, 0, 0, 0);
+            break;
         }
     }
-
-    osd_clear_rect(o, &o->text_rect);
-
-    int text_box_x = margin;
-    int text_box_y = margin;
-    int max_line_width = 0;
-    for (int i = 0; i < line_count; ++i) {
-        int len = (int)strlen(line_ptrs[i]);
-        int width = len * (8 + 1) * o->scale;
-        if (width > max_line_width) {
-            max_line_width = width;
-        }
-    }
-    int text_box_w = max_line_width + 2 * pad;
-    int text_box_h = line_count * line_advance + 2 * pad;
-    if (text_box_w < 0) {
-        text_box_w = 0;
-    }
-    if (text_box_h < 0) {
-        text_box_h = 0;
-    }
-    if (text_box_x + text_box_w > o->w) {
-        text_box_w = o->w - text_box_x;
-        if (text_box_w < 0) {
-            text_box_w = 0;
-        }
-    }
-    if (text_box_y + text_box_h > o->h) {
-        text_box_h = o->h - text_box_y;
-        if (text_box_h < 0) {
-            text_box_h = 0;
-        }
-    }
-
-    if (text_box_w > 0 && text_box_h > 0) {
-        osd_fill_rect(o, text_box_x, text_box_y, text_box_w, text_box_h, text_bg);
-        osd_draw_rect(o, text_box_x, text_box_y, text_box_w, text_box_h, text_border);
-        int draw_x = text_box_x + pad;
-        int draw_y = text_box_y + pad;
-        for (int i = 0; i < line_count; ++i) {
-            osd_draw_text(o, draw_x, draw_y, line_ptrs[i], text_color, o->scale);
-            draw_y += line_advance;
-        }
-    }
-    osd_store_rect(&o->text_rect, text_box_x, text_box_y, text_box_w, text_box_h);
-
-    osd_plot_draw(o);
-    osd_plot_draw_label(o, "Mbit/s");
-    osd_plot_draw_footer(o, plot_line_ptrs, plot_line_count);
 
     osd_commit_touch(fd, o->crtc_id, o);
 }
