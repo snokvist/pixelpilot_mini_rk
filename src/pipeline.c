@@ -338,17 +338,13 @@ fail:
 
 static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstElement *demux, const AppCfg *cfg,
                                    int audio_disabled) {
-    if (cfg->no_audio) {
-        ps->audio_branch_entry = NULL;
-        ps->audio_pad = NULL;
-        return TRUE;
-    }
+    gboolean disable_audio_branch = cfg->no_audio || audio_disabled;
 
     GstElement *queue_start = gst_element_factory_make("queue", "audio_queue_start");
     CHECK_ELEM(queue_start, "queue");
     g_object_set(queue_start, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
-    if (audio_disabled) {
+    if (disable_audio_branch) {
         GstElement *fakesink = gst_element_factory_make("fakesink", "audio_fakesink");
         CHECK_ELEM(fakesink, "fakesink");
         g_object_set(fakesink, "sync", FALSE, NULL);
