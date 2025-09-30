@@ -304,7 +304,8 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstE
     GstCaps *caps_rtp_cfg = make_rtp_caps("video", cfg->vid_pt, 90000, "H265");
     g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", cfg->video_drop_on_latency ? TRUE : FALSE, "do-lost", TRUE,
                  "post-drop-messages", TRUE, NULL);
-    g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
+    g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, "split-packets", TRUE, "split-packetized", TRUE,
+                 NULL);
 
     GstCaps *caps_stream_cfg =
         gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream", "alignment",
