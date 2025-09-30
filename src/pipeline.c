@@ -125,7 +125,14 @@ static gboolean link_demux_branch(GstElement *demux, GstElement *branch, GstPad 
         LOGE("Invalid payload type for %s branch", name);
         return FALSE;
     }
-    GstPad *src_pad = gst_element_get_request_pad(demux, "src_%u");
+    gchar *pad_name = g_strdup_printf("src_%u", payload_type);
+    if (pad_name == NULL) {
+        LOGE("Failed to allocate pad name for %s branch", name);
+        return FALSE;
+    }
+
+    GstPad *src_pad = gst_element_get_request_pad(demux, pad_name);
+    g_free(pad_name);
     if (src_pad == NULL) {
         LOGE("Failed to request demux pad for %s branch", name);
         return FALSE;
