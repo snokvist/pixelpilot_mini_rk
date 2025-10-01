@@ -446,7 +446,10 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         drmModeAtomicAddProperty(req, (uint32_t)primary_plane_id, prim_crtc_id, 0);
     }
 
-    int ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL);
+    /* TEST_ONLY still needs ALLOW_MODESET when enabling a CRTC/connector pair. */
+    int ret = drmModeAtomicCommit(fd, req,
+                                  DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET,
+                                  NULL);
     if (ret != 0) {
         LOGE("drmModeAtomicCommit TEST_ONLY failed: %s", strerror(errno));
         drmModeAtomicFree(req);
