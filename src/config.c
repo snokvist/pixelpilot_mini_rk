@@ -24,9 +24,9 @@ static void usage(const char *prog) {
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --latency-ms N               (default: 8)\n"
             "  --video-queue-leaky MODE     (0=none,1=upstream,2=downstream; default: 2)\n"
-            "  --video-queue-pre-buffers N  (default: 16)\n"
-            "  --video-queue-post-buffers N (default: 4)\n"
-            "  --video-queue-sink-buffers N (default: 4)\n"
+            "  --video-queue-pre-buffers N  (default: 96)\n"
+            "  --video-queue-post-buffers N (default: 8)\n"
+            "  --video-queue-sink-buffers N (default: 8)\n"
             "  --gst-udpsrc                 (use GStreamer's udpsrc instead of appsrc bridge)\n"
             "  --no-gst-udpsrc              (force legacy appsrc/UEP receiver)\n"
             "  --max-lateness NANOSECS      (default: 20000000)\n"
@@ -62,11 +62,11 @@ static void apply_guardrails(AppCfg *cfg) {
     }
 
     cfg->video_queue_pre_buffers =
-        clamp_with_warning("video-queue-pre-buffers", cfg->video_queue_pre_buffers, 4, 32);
+        clamp_with_warning("video-queue-pre-buffers", cfg->video_queue_pre_buffers, 4, 128);
     cfg->video_queue_post_buffers =
-        clamp_with_warning("video-queue-post-buffers", cfg->video_queue_post_buffers, 2, 16);
+        clamp_with_warning("video-queue-post-buffers", cfg->video_queue_post_buffers, 2, 32);
     cfg->video_queue_sink_buffers =
-        clamp_with_warning("video-queue-sink-buffers", cfg->video_queue_sink_buffers, 2, 16);
+        clamp_with_warning("video-queue-sink-buffers", cfg->video_queue_sink_buffers, 2, 32);
 }
 
 void cfg_defaults(AppCfg *c) {
@@ -85,9 +85,9 @@ void cfg_defaults(AppCfg *c) {
     c->kmssink_qos = 1;
     c->max_lateness_ns = 20000000;
     c->video_queue_leaky = 2;
-    c->video_queue_pre_buffers = 16;
-    c->video_queue_post_buffers = 4;
-    c->video_queue_sink_buffers = 4;
+    c->video_queue_pre_buffers = 96;
+    c->video_queue_post_buffers = 8;
+    c->video_queue_sink_buffers = 8;
     c->use_gst_udpsrc = 0;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 

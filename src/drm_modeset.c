@@ -437,13 +437,20 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         drmModeAtomicAddProperty(req, plane_obj, plane_zpos_id, v_z);
     }
 
-    int primary_plane_id = cfg->blank_primary ? find_primary_plane_for_crtc(fd, res, crtc->crtc_id) : -1;
-    if (primary_plane_id > 0) {
-        uint32_t prim_fb_id = 0, prim_crtc_id = 0;
-        drm_get_prop_id(fd, (uint32_t)primary_plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &prim_fb_id);
-        drm_get_prop_id(fd, (uint32_t)primary_plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &prim_crtc_id);
-        drmModeAtomicAddProperty(req, (uint32_t)primary_plane_id, prim_fb_id, 0);
-        drmModeAtomicAddProperty(req, (uint32_t)primary_plane_id, prim_crtc_id, 0);
+    int primary_plane_id = -1;
+    if (cfg->blank_primary) {
+        primary_plane_id = find_primary_plane_for_crtc(fd, res, crtc->crtc_id);
+        if (primary_plane_id > 0) {
+            if ((uint32_t)primary_plane_id == (uint32_t)video_plane_id) {
+                LOGI("Primary plane %d matches selected video plane; skipping blanking", primary_plane_id);
+            } else {
+                uint32_t prim_fb_id = 0, prim_crtc_id = 0;
+                drm_get_prop_id(fd, (uint32_t)primary_plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &prim_fb_id);
+                drm_get_prop_id(fd, (uint32_t)primary_plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &prim_crtc_id);
+                drmModeAtomicAddProperty(req, (uint32_t)primary_plane_id, prim_fb_id, 0);
+                drmModeAtomicAddProperty(req, (uint32_t)primary_plane_id, prim_crtc_id, 0);
+            }
+        }
     }
 
     /* TEST_ONLY still needs ALLOW_MODESET when enabling a CRTC/connector pair. */
