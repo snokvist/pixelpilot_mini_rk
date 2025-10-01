@@ -83,6 +83,7 @@ typedef struct OSD {
     int active;
     uint32_t requested_plane_id;
     uint32_t plane_id;
+    uint32_t video_plane_id;
     struct DumbFB fb;
     int w;
     int h;

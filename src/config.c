@@ -14,7 +14,7 @@ static void usage(const char *prog) {
             "Usage: %s [options]\n"
             "  --card /dev/dri/cardN        (default: /dev/dri/card0)\n"
             "  --connector NAME             (e.g. HDMI-A-1; default: first CONNECTED)\n"
-            "  --plane-id N                 (video plane; default: 76)\n"
+            "  --plane-id N                 (override auto-selected video plane)\n"
             "  --blank-primary              (detach primary plane on commit)\n"
             "  --no-udev                    (disable hotplug listener)\n"
             "  --config PATH                (load settings from ini file)\n"
@@ -22,10 +22,6 @@ static void usage(const char *prog) {
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --latency-ms N               (default: 8)\n"
-            "  --video-queue-leaky MODE     (0=none,1=upstream,2=downstream; default: 2)\n"
-            "  --video-queue-pre-buffers N  (default: 96)\n"
-            "  --video-queue-post-buffers N (default: 8)\n"
-            "  --video-queue-sink-buffers N (default: 8)\n"
             "  --gst-udpsrc                 (use GStreamer's udpsrc instead of appsrc bridge)\n"
             "  --no-gst-udpsrc              (force legacy appsrc/UEP receiver)\n"
             "  --max-lateness NANOSECS      (default: 20000000)\n"
@@ -45,7 +41,8 @@ static void usage(const char *prog) {
 void cfg_defaults(AppCfg *c) {
     memset(c, 0, sizeof(*c));
     strcpy(c->card_path, "/dev/dri/card0");
-    c->plane_id = 76;
+    c->plane_id = 0;
+    c->plane_id_override = 0;
     c->blank_primary = 0;
     c->use_udev = 1;
     c->config_path[0] = '\0';
@@ -54,13 +51,15 @@ void cfg_defaults(AppCfg *c) {
     c->vid_pt = 97;
     c->aud_pt = 98;
     c->latency_ms = 8;
+    c->max_lateness_ns = 20000000;
+#ifdef ENABLE_PIPELINE_TUNING
     c->kmssink_sync = 0;
     c->kmssink_qos = 1;
-    c->max_lateness_ns = 20000000;
     c->video_queue_leaky = 2;
     c->video_queue_pre_buffers = 96;
     c->video_queue_post_buffers = 8;
     c->video_queue_sink_buffers = 8;
+#endif
     c->use_gst_udpsrc = 0;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 
@@ -174,7 +173,8 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--connector") && i + 1 < argc) {
             strncpy(cfg->connector_name, argv[++i], sizeof(cfg->connector_name) - 1);
         } else if (!strcmp(argv[i], "--plane-id") && i + 1 < argc) {
-            cfg->plane_id = atoi(argv[++i]);
+            cfg->plane_id_override = atoi(argv[++i]);
+            cfg->plane_id = cfg->plane_id_override;
         } else if (!strcmp(argv[i], "--blank-primary")) {
             cfg->blank_primary = 1;
         } else if (!strcmp(argv[i], "--no-udev")) {
@@ -187,6 +187,7 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->aud_pt = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--latency-ms") && i + 1 < argc) {
             cfg->latency_ms = atoi(argv[++i]);
+#ifdef ENABLE_PIPELINE_TUNING
         } else if (!strcmp(argv[i], "--video-queue-leaky") && i + 1 < argc) {
             cfg->video_queue_leaky = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--video-queue-pre-buffers") && i + 1 < argc) {
@@ -195,6 +196,7 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->video_queue_post_buffers = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--video-queue-sink-buffers") && i + 1 < argc) {
             cfg->video_queue_sink_buffers = atoi(argv[++i]);
+#endif
         } else if (!strcmp(argv[i], "--gst-udpsrc")) {
             cfg->use_gst_udpsrc = 1;
         } else if (!strcmp(argv[i], "--no-gst-udpsrc")) {

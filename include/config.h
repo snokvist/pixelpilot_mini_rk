@@ -15,6 +15,7 @@ typedef struct {
     char connector_name[32];
     char config_path[PATH_MAX];
     int plane_id;
+    int plane_id_override;
     int blank_primary;
     int use_udev;
 
@@ -22,13 +23,15 @@ typedef struct {
     int vid_pt;
     int aud_pt;
     int latency_ms;
+    int max_lateness_ns;
+#ifdef ENABLE_PIPELINE_TUNING
     int kmssink_sync;
     int kmssink_qos;
-    int max_lateness_ns;
     int video_queue_leaky;
     int video_queue_pre_buffers;
     int video_queue_post_buffers;
     int video_queue_sink_buffers;
+#endif
     int use_gst_udpsrc;
     char aud_dev[128];
 

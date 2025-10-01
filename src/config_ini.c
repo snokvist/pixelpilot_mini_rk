@@ -590,7 +590,8 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "video-plane-id") == 0) {
-            cfg->plane_id = atoi(value);
+            cfg->plane_id_override = atoi(value);
+            cfg->plane_id = cfg->plane_id_override;
             return 0;
         }
         if (strcasecmp(key, "blank-primary") == 0) {
@@ -635,6 +636,7 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->latency_ms = atoi(value);
             return 0;
         }
+#ifdef ENABLE_PIPELINE_TUNING
         if (strcasecmp(key, "video-queue-leaky") == 0) {
             cfg->video_queue_leaky = atoi(value);
             return 0;
@@ -651,6 +653,7 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_queue_sink_buffers = atoi(value);
             return 0;
         }
+#endif
         if (strcasecmp(key, "use-gst-udpsrc") == 0) {
             int v = 0;
             if (parse_bool(value, &v) != 0) {

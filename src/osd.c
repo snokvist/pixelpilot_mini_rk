@@ -2259,7 +2259,21 @@ static int osd_query_plane_props(int fd, uint32_t plane_id, OSD *o) {
     return 0;
 }
 
+static int osd_guard_video_plane(const OSD *o, const char *action) {
+    if (!o || !action) {
+        return -1;
+    }
+    if (o->video_plane_id != 0 && o->plane_id == o->video_plane_id) {
+        LOGE("OSD: refusing to %s video plane %u reserved for the video stream", action, o->plane_id);
+        return -1;
+    }
+    return 0;
+}
+
 static int osd_commit_enable(int fd, uint32_t crtc_id, OSD *o) {
+    if (osd_guard_video_plane(o, "enable on") != 0) {
+        return -1;
+    }
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req) {
         return -1;
@@ -2305,6 +2319,9 @@ static int osd_commit_enable(int fd, uint32_t crtc_id, OSD *o) {
 }
 
 static int osd_commit_disable(int fd, OSD *o) {
+    if (osd_guard_video_plane(o, "detach") != 0) {
+        return -1;
+    }
     if (!o->active) {
         return 0;
     }
@@ -2320,6 +2337,9 @@ static int osd_commit_disable(int fd, OSD *o) {
 }
 
 static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
+    if (osd_guard_video_plane(o, "touch") != 0) {
+        return;
+    }
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req) {
         return;
@@ -2340,6 +2360,7 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     o->requested_plane_id = (uint32_t)cfg->osd_plane_id;
     o->refresh_ms = cfg->osd_refresh_ms;
     o->crtc_id = ms->crtc_id;
+    o->video_plane_id = (video_plane_id > 0) ? (uint32_t)video_plane_id : 0;
 
     if (!o->enabled) {
         return 0;

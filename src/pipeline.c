@@ -12,6 +12,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef VIDEO_QUEUE_LEAKY_DEFAULT
+#define VIDEO_QUEUE_LEAKY_DEFAULT 2
+#define VIDEO_QUEUE_PRE_BUFFERS 96
+#define VIDEO_QUEUE_POST_BUFFERS 8
+#define VIDEO_QUEUE_SINK_BUFFERS 8
+#endif
+
 #define CHECK_ELEM(elem, name)                                                                      \
     do {                                                                                            \
         if ((elem) == NULL) {                                                                       \
@@ -288,16 +295,34 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
     CHECK_ELEM(queue_sink, "queue");
     CHECK_ELEM(sink, "kmssink");
 
-    g_object_set(queue_pre, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_pre_buffers,
-                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
-    g_object_set(queue_post, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_post_buffers,
-                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
-    g_object_set(queue_sink, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_sink_buffers,
-                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
+    guint queue_leaky = VIDEO_QUEUE_LEAKY_DEFAULT;
+    guint pre_buffers = VIDEO_QUEUE_PRE_BUFFERS;
+    guint post_buffers = VIDEO_QUEUE_POST_BUFFERS;
+    guint sink_buffers = VIDEO_QUEUE_SINK_BUFFERS;
+#ifdef ENABLE_PIPELINE_TUNING
+    queue_leaky = (guint)cfg->video_queue_leaky;
+    pre_buffers = (guint)cfg->video_queue_pre_buffers;
+    post_buffers = (guint)cfg->video_queue_post_buffers;
+    sink_buffers = (guint)cfg->video_queue_sink_buffers;
+#endif
+
+    g_object_set(queue_pre, "leaky", queue_leaky, "max-size-buffers", pre_buffers, "max-size-time", (guint64)0,
+                 "max-size-bytes", (guint64)0, NULL);
+    g_object_set(queue_post, "leaky", queue_leaky, "max-size-buffers", post_buffers, "max-size-time", (guint64)0,
+                 "max-size-bytes", (guint64)0, NULL);
+    g_object_set(queue_sink, "leaky", queue_leaky, "max-size-buffers", sink_buffers, "max-size-time", (guint64)0,
+                 "max-size-bytes", (guint64)0, NULL);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    g_object_set(sink, "plane-id", cfg->plane_id, "sync", cfg->kmssink_sync ? TRUE : FALSE, "qos",
-                 cfg->kmssink_qos ? TRUE : FALSE, "max-lateness", (gint64)cfg->max_lateness_ns, NULL);
+#ifdef ENABLE_PIPELINE_TUNING
+    gboolean sink_sync = cfg->kmssink_sync ? TRUE : FALSE;
+    gboolean sink_qos = cfg->kmssink_qos ? TRUE : FALSE;
+#else
+    gboolean sink_sync = FALSE;
+    gboolean sink_qos = TRUE;
+#endif
+    g_object_set(sink, "plane-id", cfg->plane_id, "sync", sink_sync, "qos", sink_qos, "max-lateness",
+                 (gint64)cfg->max_lateness_ns, NULL);
 
     gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL);
 

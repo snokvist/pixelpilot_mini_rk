@@ -76,6 +76,7 @@ int main(int argc, char **argv) {
     int connected = is_any_connected(fd, &cfg);
     if (connected) {
         if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
+            cfg.plane_id = (int)ms.video_plane_id;
             if (cfg.osd_enable) {
                 if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
                     pipeline_set_receiver_stats_enabled(&ps, TRUE);
@@ -142,6 +143,7 @@ int main(int argc, char **argv) {
                     } else {
                         if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
                             connected = 1;
+                            cfg.plane_id = (int)ms.video_plane_id;
                             if (cfg.osd_enable) {
                                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
                                 osd_teardown(fd, &osd);

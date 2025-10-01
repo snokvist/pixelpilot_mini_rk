@@ -31,20 +31,18 @@ Example:
 
 This constrains the process to CPUs 2 and 3 while placing the UDP receiver thread on CPU 2 and the GStreamer bus thread on CPU 3.
 
-## Video buffering controls
+## Display plane selection & QoS defaults
 
-When debugging decoder underruns or validating new transmitters it can be useful to temporarily increase buffering or disable
-latency-based drops in the video path. The following options expose the queue sizing and jitter buffer policy that are normally
-hard-coded for low-latency flight use:
+At start-up the receiver enables universal planes, picks the highest refresh mode advertised by the connected connector, and
+auto-selects a DRM plane that can present NV12 video on the active CRTC. The detection logic prefers overlay planes, falls back
+to primaries if necessary, and only accepts cursor planes when an explicit `--plane-id` override is provided. The selected plane
+is logged and stored in the hotplug state so subsequent pipeline restarts reuse the hardware slot without guesswork.
 
-* `--video-queue-leaky MODE` sets the `leaky` mode on the pre-, post-, and sink-side video queues. The default `2` (downstream)
-  favors minimal latency by discarding the oldest buffers when the downstream stage stalls. Set `0` to disable dropping so the
-  pipeline accumulates backlog for analysis.
-* `--video-queue-pre-buffers N`, `--video-queue-post-buffers N`, and `--video-queue-sink-buffers N` adjust the queue depths for
-  each stage (defaults: 96/8/8). Raising these values increases tolerance for jitter at the cost of additional latency and
-  memory use.
-Keep the defaults for normal flying where latency is paramount. Switch to non-leaky queues and higher buffer counts only for
-short-term debugging sessions, as doing so can quickly introduce additional end-to-end delay.
+To keep the display smooth the video branch always drives `kmssink` with `sync=false`, `qos=true`, downstream-leaky queues, and
+the existing 20 ms lateness budget. These values are intentionally hard-coded to match the anti-judder behaviour of the upstream
+PixelPilot project. If you need to experiment with alternative buffering strategies, rebuild with
+`make CFLAGS+=-DENABLE_PIPELINE_TUNING` to re-enable the legacy INI/CLI knobs for queue sizes and `kmssink` flags. Remember to
+restore the defaults before flight use to avoid reintroducing jitter.
 
 ## Bypassing the custom UDP receiver
 
