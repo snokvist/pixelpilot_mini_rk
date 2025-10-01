@@ -29,7 +29,6 @@ typedef struct {
     int video_queue_pre_buffers;
     int video_queue_post_buffers;
     int video_queue_sink_buffers;
-    int video_drop_on_latency;
     int use_gst_udpsrc;
     char aud_dev[128];
 

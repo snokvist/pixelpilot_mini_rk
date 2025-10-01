@@ -50,12 +50,6 @@ typedef struct {
     double jitter_avg;
     double bitrate_mbps;
     double bitrate_avg_mbps;
-    guint64 pipeline_dropped_total;
-    guint64 pipeline_dropped_too_late;
-    guint64 pipeline_dropped_on_latency;
-    guint32 pipeline_last_drop_seqnum;
-    guint64 pipeline_last_drop_timestamp;
-    char pipeline_last_drop_reason[32];
     guint32 last_video_timestamp;
     guint16 expected_sequence;
     size_t history_count;
@@ -71,9 +65,6 @@ void udp_receiver_stop(UdpReceiver *ur);
 void udp_receiver_destroy(UdpReceiver *ur);
 void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats);
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled);
-void udp_receiver_record_pipeline_drop(UdpReceiver *ur, guint32 seqnum, guint64 timestamp,
-                                       const char *reason, guint num_too_late, guint num_drop_on_latency);
-
 #ifdef __cplusplus
 }
 #endif

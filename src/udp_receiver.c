@@ -542,26 +542,6 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
     g_mutex_unlock(&ur->lock);
 }
 
-void udp_receiver_record_pipeline_drop(UdpReceiver *ur, guint32 seqnum, guint64 timestamp, const char *reason,
-                                       guint num_too_late, guint num_drop_on_latency) {
-    if (ur == NULL) {
-        return;
-    }
-
-    g_mutex_lock(&ur->lock);
-    ur->stats.pipeline_dropped_too_late += (guint64)num_too_late;
-    ur->stats.pipeline_dropped_on_latency += (guint64)num_drop_on_latency;
-    ur->stats.pipeline_dropped_total += (guint64)num_too_late + (guint64)num_drop_on_latency;
-    ur->stats.pipeline_last_drop_seqnum = seqnum;
-    ur->stats.pipeline_last_drop_timestamp = timestamp;
-    if (reason != NULL) {
-        g_strlcpy(ur->stats.pipeline_last_drop_reason, reason, sizeof(ur->stats.pipeline_last_drop_reason));
-    } else {
-        ur->stats.pipeline_last_drop_reason[0] = '\0';
-    }
-    g_mutex_unlock(&ur->lock);
-}
-
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
     if (ur == NULL) {
         return;
