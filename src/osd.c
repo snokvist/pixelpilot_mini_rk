@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <float.h>
+#include <ctype.h>
 
 #include <libdrm/drm_fourcc.h>
 #include <xf86drm.h>
@@ -219,6 +220,46 @@ typedef struct {
     UdpReceiverStats stats;
 } OsdRenderContext;
 
+static const char *osd_key_copy_lower(const char *src, char *dst, size_t dst_sz) {
+    if (!src || !dst || dst_sz == 0) {
+        return src;
+    }
+
+    size_t len = strnlen(src, dst_sz - 1);
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+
+    if (src[len] != '\0') {
+        return src;
+    }
+
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)dst[i];
+        if (isupper(c)) {
+            dst[i] = (char)tolower(c);
+        }
+    }
+
+    return dst;
+}
+
+static const char *osd_token_normalize(const char *token, char *buf, size_t buf_sz) {
+    const char *normalized = osd_key_copy_lower(token, buf, buf_sz);
+    if (normalized != buf) {
+        return normalized;
+    }
+
+    if (!strchr(buf, '.')) {
+        for (size_t i = 0; buf[i] != '\0'; ++i) {
+            if (buf[i] == '_') {
+                buf[i] = '.';
+            }
+        }
+    }
+
+    return buf;
+}
+
 static const char *osd_pipeline_state_name(const PipelineState *ps) {
     if (!ps) {
         return "UNKNOWN";
@@ -239,8 +280,10 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         return -1;
     }
 
+    char normalized_token[128];
+    const char *key = osd_token_normalize(token, normalized_token, sizeof(normalized_token));
     const AppCfg *cfg = ctx->cfg;
-    if (strcmp(token, "display.mode") == 0) {
+    if (strcmp(key, "display.mode") == 0) {
         if (ctx->ms) {
             snprintf(buf, buf_sz, "%dx%d@%d", ctx->ms->mode_w, ctx->ms->mode_h, ctx->ms->mode_hz);
         } else {
@@ -248,7 +291,7 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         }
         return 0;
     }
-    if (strcmp(token, "display.width") == 0) {
+    if (strcmp(key, "display.width") == 0) {
         if (ctx->ms) {
             snprintf(buf, buf_sz, "%d", ctx->ms->mode_w);
         } else {
@@ -256,7 +299,7 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         }
         return 0;
     }
-    if (strcmp(token, "display.height") == 0) {
+    if (strcmp(key, "display.height") == 0) {
         if (ctx->ms) {
             snprintf(buf, buf_sz, "%d", ctx->ms->mode_h);
         } else {
@@ -264,7 +307,7 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         }
         return 0;
     }
-    if (strcmp(token, "display.refresh_hz") == 0) {
+    if (strcmp(key, "display.refresh_hz") == 0) {
         if (ctx->ms) {
             snprintf(buf, buf_sz, "%d", ctx->ms->mode_hz);
         } else {
@@ -272,43 +315,43 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         }
         return 0;
     }
-    if (strcmp(token, "drm.video_plane_id") == 0) {
+    if (strcmp(key, "drm.video_plane_id") == 0) {
         snprintf(buf, buf_sz, "%d", cfg ? cfg->plane_id : 0);
         return 0;
     }
-    if (strcmp(token, "drm.osd_plane_id") == 0) {
+    if (strcmp(key, "drm.osd_plane_id") == 0) {
         snprintf(buf, buf_sz, "%d", cfg ? cfg->osd_plane_id : 0);
         return 0;
     }
-    if (strcmp(token, "osd.refresh_ms") == 0) {
+    if (strcmp(key, "osd.refresh_ms") == 0) {
         snprintf(buf, buf_sz, "%d", cfg ? cfg->osd_refresh_ms : 0);
         return 0;
     }
-    if (strcmp(token, "udp.port") == 0) {
+    if (strcmp(key, "udp.port") == 0) {
         snprintf(buf, buf_sz, "%d", cfg ? cfg->udp_port : 0);
         return 0;
     }
-    if (strcmp(token, "udp.vid_pt") == 0) {
+    if (strcmp(key, "udp.vid_pt") == 0) {
         snprintf(buf, buf_sz, "%d", cfg ? cfg->vid_pt : 0);
         return 0;
     }
-    if (strcmp(token, "udp.aud_pt") == 0) {
+    if (strcmp(key, "udp.aud_pt") == 0) {
         snprintf(buf, buf_sz, "%d", cfg ? cfg->aud_pt : 0);
         return 0;
     }
-    if (strcmp(token, "pipeline.latency_ms") == 0) {
+    if (strcmp(key, "pipeline.latency_ms") == 0) {
         snprintf(buf, buf_sz, "%d", cfg ? cfg->latency_ms : 0);
         return 0;
     }
-    if (strcmp(token, "pipeline.state") == 0) {
+    if (strcmp(key, "pipeline.state") == 0) {
         snprintf(buf, buf_sz, "%s", osd_pipeline_state_name(ctx->ps));
         return 0;
     }
-    if (strcmp(token, "pipeline.restart_count") == 0) {
+    if (strcmp(key, "pipeline.restart_count") == 0) {
         snprintf(buf, buf_sz, "%d", ctx->restart_count);
         return 0;
     }
-    if (strcmp(token, "pipeline.audio_suffix") == 0) {
+    if (strcmp(key, "pipeline.audio_suffix") == 0) {
         if (ctx->audio_disabled) {
             snprintf(buf, buf_sz, " audio=fakesink");
         } else {
@@ -316,100 +359,102 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         }
         return 0;
     }
-    if (strcmp(token, "pipeline.audio_status") == 0) {
+    if (strcmp(key, "pipeline.audio_status") == 0) {
         snprintf(buf, buf_sz, "%s", ctx->audio_disabled ? "fakesink" : "normal");
         return 0;
     }
 
-    if (strcmp(token, "udp.stats.available") == 0) {
+    if (strcmp(key, "udp.stats.available") == 0) {
         snprintf(buf, buf_sz, "%s", ctx->have_stats ? "yes" : "no");
         return 0;
     }
 
     if (!ctx->have_stats) {
-        if (strncmp(token, "udp.", 4) == 0) {
+        if (strncmp(key, "udp.", 4) == 0) {
             snprintf(buf, buf_sz, "n/a");
             return 0;
         }
     }
 
-    if (strcmp(token, "udp.video_packets") == 0) {
+    if (strcmp(key, "udp.video_packets") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.video_packets);
         return 0;
     }
-    if (strcmp(token, "udp.audio_packets") == 0) {
+    if (strcmp(key, "udp.audio_packets") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.audio_packets);
         return 0;
     }
-    if (strcmp(token, "udp.total_packets") == 0) {
+    if (strcmp(key, "udp.total_packets") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.total_packets);
         return 0;
     }
-    if (strcmp(token, "udp.ignored_packets") == 0) {
+    if (strcmp(key, "udp.ignored_packets") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.ignored_packets);
         return 0;
     }
-    if (strcmp(token, "udp.duplicate_packets") == 0) {
+    if (strcmp(key, "udp.duplicate_packets") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.duplicate_packets);
         return 0;
     }
-    if (strcmp(token, "udp.lost_packets") == 0) {
+    if (strcmp(key, "udp.lost_packets") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.lost_packets);
         return 0;
     }
-    if (strcmp(token, "udp.reordered_packets") == 0) {
+    if (strcmp(key, "udp.reordered_packets") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.reordered_packets);
         return 0;
     }
-    if (strcmp(token, "udp.total_bytes") == 0) {
+    if (strcmp(key, "udp.total_bytes") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.total_bytes);
         return 0;
     }
-    if (strcmp(token, "udp.video_bytes") == 0) {
+    if (strcmp(key, "udp.video_bytes") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.video_bytes);
         return 0;
     }
-    if (strcmp(token, "udp.audio_bytes") == 0) {
+    if (strcmp(key, "udp.audio_bytes") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.audio_bytes);
         return 0;
     }
-    if (strcmp(token, "udp.bitrate.latest_mbps") == 0) {
+    if (strcmp(key, "udp.bitrate.latest_mbps") == 0) {
         snprintf(buf, buf_sz, "%.2f", ctx->stats.bitrate_mbps);
         return 0;
     }
-    if (strcmp(token, "udp.bitrate.avg_mbps") == 0) {
+    if (strcmp(key, "udp.bitrate.avg_mbps") == 0) {
         snprintf(buf, buf_sz, "%.2f", ctx->stats.bitrate_avg_mbps);
         return 0;
     }
-    if (strcmp(token, "udp.jitter.latest_ms") == 0) {
+    if (strcmp(key, "udp.jitter.latest_ms") == 0) {
         snprintf(buf, buf_sz, "%.2f", ctx->stats.jitter / 90.0);
         return 0;
     }
-    if (strcmp(token, "udp.jitter.avg_ms") == 0) {
+    if (strcmp(key, "udp.jitter.avg_ms") == 0) {
         snprintf(buf, buf_sz, "%.2f", ctx->stats.jitter_avg / 90.0);
         return 0;
     }
-    if (strcmp(token, "udp.frames.count") == 0) {
+    if (strcmp(key, "udp.frames.count") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.frame_count);
         return 0;
     }
-    if (strcmp(token, "udp.frames.incomplete") == 0) {
+    if (strcmp(key, "udp.frames.incomplete") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.incomplete_frames);
         return 0;
     }
-    if (strcmp(token, "udp.frames.last_bytes") == 0) {
-        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.last_frame_bytes);
+    if (strcmp(key, "udp.frames.last_bytes") == 0) {
+        double kb = ctx->stats.last_frame_bytes / 1024.0;
+        snprintf(buf, buf_sz, "%.2f", kb);
         return 0;
     }
-    if (strcmp(token, "udp.frames.avg_bytes") == 0) {
-        snprintf(buf, buf_sz, "%.0f", ctx->stats.frame_size_avg);
+    if (strcmp(key, "udp.frames.avg_bytes") == 0) {
+        double kb = ctx->stats.frame_size_avg / 1024.0;
+        snprintf(buf, buf_sz, "%.2f", kb);
         return 0;
     }
-    if (strcmp(token, "udp.expected_sequence") == 0) {
+    if (strcmp(key, "udp.expected_sequence") == 0) {
         snprintf(buf, buf_sz, "%u", ctx->stats.expected_sequence);
         return 0;
     }
-    if (strcmp(token, "udp.last_video_timestamp") == 0) {
+    if (strcmp(key, "udp.last_video_timestamp") == 0) {
         snprintf(buf, buf_sz, "%u", ctx->stats.last_video_timestamp);
         return 0;
     }
@@ -449,7 +494,7 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
         return 1;
     }
     if (metric && strcmp(metric, "udp.frames.avg_bytes") == 0) {
-        *out_value = ctx->stats.frame_size_avg;
+        *out_value = ctx->stats.frame_size_avg / 1024.0;
         return 1;
     }
     if (metric && strcmp(metric, "udp.frames.count") == 0) {
@@ -457,7 +502,7 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
         return 1;
     }
     if (metric && strcmp(metric, "udp.frames.last_bytes") == 0) {
-        *out_value = (double)ctx->stats.last_frame_bytes;
+        *out_value = (double)ctx->stats.last_frame_bytes / 1024.0;
         return 1;
     }
     if (metric && strcmp(metric, "udp.video_packets") == 0) {
@@ -528,28 +573,21 @@ static void osd_expand_template(const OsdRenderContext *ctx, const char *tmpl, c
 }
 
 static const char *osd_metric_normalize(const char *metric_key, char *buf, size_t buf_sz) {
-    if (!metric_key || !buf || buf_sz == 0) {
-        return metric_key;
-    }
-
-    size_t len = strnlen(metric_key, buf_sz - 1);
-    memcpy(buf, metric_key, len);
-    buf[len] = '\0';
-
-    if (metric_key[len] != '\0') {
-        return metric_key;
+    const char *normalized = osd_key_copy_lower(metric_key, buf, buf_sz);
+    if (normalized != buf) {
+        return normalized;
     }
 
     int has_dot = 0;
-    for (size_t i = 0; i < len; ++i) {
-        if (metric_key[i] == '.') {
+    for (size_t i = 0; buf[i] != '\0'; ++i) {
+        if (buf[i] == '.') {
             has_dot = 1;
             break;
         }
     }
 
     if (!has_dot) {
-        for (size_t i = 0; i < len; ++i) {
+        for (size_t i = 0; buf[i] != '\0'; ++i) {
             if (buf[i] == '_') {
                 buf[i] = '.';
             }
@@ -569,7 +607,7 @@ static void osd_format_metric_value(const char *metric_key, double value, char *
 
     if (key && (strstr(key, "mbps") || strstr(key, "ms"))) {
         snprintf(buf, buf_sz, "%.2f", value);
-    } else if (key && (strstr(key, "avg") || strstr(key, "ratio"))) {
+    } else if (key && (strstr(key, "avg") || strstr(key, "ratio") || strstr(key, "frames.last_bytes"))) {
         snprintf(buf, buf_sz, "%.2f", value);
     } else {
         snprintf(buf, buf_sz, "%.0f", value);
