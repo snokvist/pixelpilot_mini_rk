@@ -28,6 +28,8 @@ static void usage(const char *prog) {
             "  --video-queue-sink-buffers N (default: 8)\n"
             "  --video-drop-on-latency      (enable jitter drops; default)\n"
             "  --no-video-drop-on-latency   (disable jitter drops)\n"
+            "  --gst-udpsrc                 (use GStreamer's udpsrc instead of appsrc bridge)\n"
+            "  --no-gst-udpsrc              (force legacy appsrc/UEP receiver)\n"
             "  --max-lateness NANOSECS      (default: 20000000)\n"
             "  --aud-dev STR                (default: plughw:CARD=rockchiphdmi0,DEV=0)\n"
             "  --no-audio                   (drop audio branch entirely)\n"
@@ -62,6 +64,7 @@ void cfg_defaults(AppCfg *c) {
     c->video_queue_post_buffers = 8;
     c->video_queue_sink_buffers = 8;
     c->video_drop_on_latency = 1;
+    c->use_gst_udpsrc = 0;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 
     c->no_audio = 0;
@@ -199,6 +202,10 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->video_drop_on_latency = 1;
         } else if (!strcmp(argv[i], "--no-video-drop-on-latency")) {
             cfg->video_drop_on_latency = 0;
+        } else if (!strcmp(argv[i], "--gst-udpsrc")) {
+            cfg->use_gst_udpsrc = 1;
+        } else if (!strcmp(argv[i], "--no-gst-udpsrc")) {
+            cfg->use_gst_udpsrc = 0;
         } else if (!strcmp(argv[i], "--max-lateness") && i + 1 < argc) {
             cfg->max_lateness_ns = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-dev") && i + 1 < argc) {

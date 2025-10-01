@@ -35,6 +35,33 @@ static GstCaps *build_appsrc_caps(void) {
     return gst_caps_new_empty_simple("application/x-rtp");
 }
 
+static GstElement *create_udp_udpsrc(const AppCfg *cfg) {
+    GstElement *udpsrc = gst_element_factory_make("udpsrc", "udp_udpsrc");
+    GstCaps *caps = NULL;
+    CHECK_ELEM(udpsrc, "udpsrc");
+
+    caps = build_appsrc_caps();
+    if (caps == NULL) {
+        LOGE("Failed to allocate RTP caps for udpsrc");
+        goto fail;
+    }
+
+    g_object_set(udpsrc, "port", cfg->udp_port, "caps", caps, NULL);
+    gst_caps_unref(caps);
+    caps = NULL;
+
+    return udpsrc;
+
+fail:
+    if (caps != NULL) {
+        gst_caps_unref(caps);
+    }
+    if (udpsrc != NULL) {
+        gst_object_unref(udpsrc);
+    }
+    return NULL;
+}
+
 static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiver_out) {
     GstElement *appsrc_elem = gst_element_factory_make("appsrc", "udp_appsrc");
     UdpReceiver *receiver = NULL;
@@ -81,6 +108,16 @@ fail:
         gst_object_unref(appsrc_elem);
     }
     return NULL;
+}
+
+static GstElement *create_udp_source(const AppCfg *cfg, UdpReceiver **receiver_out) {
+    if (cfg->use_gst_udpsrc) {
+        if (receiver_out != NULL) {
+            *receiver_out = NULL;
+        }
+        return create_udp_udpsrc(cfg);
+    }
+    return create_udp_app_source(cfg, receiver_out);
 }
 
 static GstCaps *make_rtp_caps(const char *media, int payload_type, int clock_rate, const char *encoding_name) {
@@ -587,7 +624,7 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->bus_thread_cpu_slot = 0;
 
     UdpReceiver *receiver = NULL;
-    GstElement *source = create_udp_app_source(cfg, &receiver);
+    GstElement *source = create_udp_source(cfg, &receiver);
     if (source == NULL) {
         goto fail;
     }
@@ -608,6 +645,10 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->source = source;
     ps->demux = demux;
     ps->udp_receiver = receiver;
+
+    if (cfg->use_gst_udpsrc) {
+        LOGI("Using GStreamer udpsrc; UDP receiver stats disabled");
+    }
 
     if (!build_video_branch(ps, pipeline, demux, cfg)) {
         goto fail;
