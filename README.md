@@ -17,7 +17,7 @@ Copy it next to the binary and launch the receiver as:
 
 Any `line =` entry inside a `[osd.element.*]` section can reference `{token}` placeholders from the sample file's token table.
 Line plots accept metrics such as `udp.bitrate.latest_mbps`, `udp.jitter.avg_ms`, or counter-style values like
-`udp.pipeline.drop_total` and automatically handle scaling and rendering based on the INI-provided geometry.
+`udp.lost_packets` and automatically handle scaling and rendering based on the INI-provided geometry.
 
 ## CPU affinity control
 
@@ -43,9 +43,6 @@ hard-coded for low-latency flight use:
 * `--video-queue-pre-buffers N`, `--video-queue-post-buffers N`, and `--video-queue-sink-buffers N` adjust the queue depths for
   each stage (defaults: 96/8/8). Raising these values increases tolerance for jitter at the cost of additional latency and
   memory use.
-* `--video-drop-on-latency` / `--no-video-drop-on-latency` toggles the RTP jitter buffer's `drop-on-latency` behaviour. Disabling
-  the drops is useful when chasing decoder warnings so every frame is delivered, even if late.
-
 Keep the defaults for normal flying where latency is paramount. Switch to non-leaky queues and higher buffer counts only for
 short-term debugging sessions, as doing so can quickly introduce additional end-to-end delay.
 

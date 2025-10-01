@@ -651,14 +651,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_queue_sink_buffers = atoi(value);
             return 0;
         }
-        if (strcasecmp(key, "video-drop-on-latency") == 0) {
-            int v = 0;
-            if (parse_bool(value, &v) != 0) {
-                return -1;
-            }
-            cfg->video_drop_on_latency = v;
-            return 0;
-        }
         if (strcasecmp(key, "use-gst-udpsrc") == 0) {
             int v = 0;
             if (parse_bool(value, &v) != 0) {

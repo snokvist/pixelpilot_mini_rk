@@ -47,7 +47,6 @@ void osd_layout_defaults(OsdLayout *layout) {
         "UDP:{udp.port} PTv={udp.vid_pt} PTa={udp.aud_pt} lat={pipeline.latency_ms}ms",
         "Pipeline: {pipeline.state} restarts={pipeline.restart_count}{pipeline.audio_suffix}",
         "RTP vpkts={udp.video_packets} net-loss={udp.lost_packets} reo={udp.reordered_packets} dup={udp.duplicate_packets} jitter={udp.jitter.latest_ms}/{udp.jitter.avg_ms}ms br={udp.bitrate.latest_mbps}/{udp.bitrate.avg_mbps}Mbps",
-        "Pipe drop={udp.pipeline.drop_total} late={udp.pipeline.drop_too_late} latency={udp.pipeline.drop_on_latency} last={udp.pipeline.last_drop_reason} seq={udp.pipeline.last_drop_seqnum}",
         "Frames={udp.frames.count} incomplete={udp.frames.incomplete} last={udp.frames.last_bytes}B avg={udp.frames.avg_bytes}B seq={udp.expected_sequence}"
     };
     for (size_t i = 0; i < sizeof(default_lines) / sizeof(default_lines[0]) && i < OSD_MAX_TEXT_LINES; ++i) {

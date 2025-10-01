@@ -389,34 +389,6 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         snprintf(buf, buf_sz, "%.2f", ctx->stats.jitter_avg / 90.0);
         return 0;
     }
-    if (strcmp(token, "udp.pipeline.drop_total") == 0) {
-        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.pipeline_dropped_total);
-        return 0;
-    }
-    if (strcmp(token, "udp.pipeline.drop_too_late") == 0) {
-        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.pipeline_dropped_too_late);
-        return 0;
-    }
-    if (strcmp(token, "udp.pipeline.drop_on_latency") == 0) {
-        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.pipeline_dropped_on_latency);
-        return 0;
-    }
-    if (strcmp(token, "udp.pipeline.last_drop_reason") == 0) {
-        if (ctx->stats.pipeline_last_drop_reason[0]) {
-            snprintf(buf, buf_sz, "%s", ctx->stats.pipeline_last_drop_reason);
-        } else {
-            snprintf(buf, buf_sz, "n/a");
-        }
-        return 0;
-    }
-    if (strcmp(token, "udp.pipeline.last_drop_seqnum") == 0) {
-        snprintf(buf, buf_sz, "%u", ctx->stats.pipeline_last_drop_seqnum);
-        return 0;
-    }
-    if (strcmp(token, "udp.pipeline.last_drop_timestamp_ns") == 0) {
-        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.pipeline_last_drop_timestamp);
-        return 0;
-    }
     if (strcmp(token, "udp.frames.count") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.frame_count);
         return 0;
@@ -474,18 +446,6 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
     }
     if (metric && strcmp(metric, "udp.jitter.avg_ms") == 0) {
         *out_value = ctx->stats.jitter_avg / 90.0;
-        return 1;
-    }
-    if (metric && strcmp(metric, "udp.pipeline.drop_total") == 0) {
-        *out_value = (double)ctx->stats.pipeline_dropped_total;
-        return 1;
-    }
-    if (metric && strcmp(metric, "udp.pipeline.drop_on_latency") == 0) {
-        *out_value = (double)ctx->stats.pipeline_dropped_on_latency;
-        return 1;
-    }
-    if (metric && strcmp(metric, "udp.pipeline.drop_too_late") == 0) {
-        *out_value = (double)ctx->stats.pipeline_dropped_too_late;
         return 1;
     }
     if (metric && strcmp(metric, "udp.frames.avg_bytes") == 0) {
