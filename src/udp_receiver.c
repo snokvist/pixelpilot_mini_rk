@@ -64,7 +64,7 @@ struct UdpReceiver {
     GThread *thread;
     GMutex lock;
     gboolean running;
-    gboolean stats_enabled;
+    gint stats_enabled;
     gint stop_requested;
     gint stats_sequence;
 
@@ -346,7 +346,7 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
     gboolean is_video = (rtp.payload_type == ur->vid_pt);
     gboolean is_audio = (rtp.payload_type == ur->aud_pt);
 
-    if (!ur->stats_enabled) {
+    if (!g_atomic_int_get(&ur->stats_enabled)) {
         return;
     }
 
@@ -538,6 +538,18 @@ static gpointer receiver_thread(gpointer data) {
         }
     }
 
+    for (guint i = 0; i < UDP_RECV_BATCH; ++i) {
+        if (slots[i] != NULL) {
+            udp_buffer_slot_recycle(slots[i]);
+            slots[i] = NULL;
+        }
+    }
+
+    g_mutex_lock(&ur->lock);
+    ur->running = FALSE;
+    g_mutex_unlock(&ur->lock);
+    g_atomic_int_set(&ur->stop_requested, 0);
+
     return NULL;
 }
 
@@ -555,7 +567,7 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     ur->sockfd = -1;
     g_mutex_init(&ur->lock);
     ur->appsrc = GST_APP_SRC(gst_object_ref(appsrc));
-    ur->stats_enabled = FALSE;
+    g_atomic_int_set(&ur->stats_enabled, FALSE);
     ur->buffer_pool = NULL;
     ur->buffer_pool_size = UDP_POOL_SIZE;
     ur->buffer_capacity = UDP_MAX_PACKET;
@@ -745,21 +757,20 @@ void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
     gboolean activate = FALSE;
 
     g_mutex_lock(&ur->lock);
-    if (ur->stats_enabled == new_state) {
+    gboolean current = g_atomic_int_get(&ur->stats_enabled) ? TRUE : FALSE;
+    if (current == new_state) {
         g_mutex_unlock(&ur->lock);
         return;
     }
     if (new_state) {
         activate = TRUE;
     } else {
-        ur->stats_enabled = FALSE;
+        g_atomic_int_set(&ur->stats_enabled, FALSE);
     }
     g_mutex_unlock(&ur->lock);
 
     if (activate) {
         reset_stats(ur);
-        g_mutex_lock(&ur->lock);
-        ur->stats_enabled = TRUE;
-        g_mutex_unlock(&ur->lock);
+        g_atomic_int_set(&ur->stats_enabled, TRUE);
     }
 }
