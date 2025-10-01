@@ -48,3 +48,14 @@ hard-coded for low-latency flight use:
 
 Keep the defaults for normal flying where latency is paramount. Switch to non-leaky queues and higher buffer counts only for
 short-term debugging sessions, as doing so can quickly introduce additional end-to-end delay.
+
+## Bypassing the custom UDP receiver
+
+The default pipeline feeds RTP packets into an `appsrc` element backed by the project-specific UDP receiver. This provides
+extended telemetry (bitrate, jitter, packet counters, etc.) that powers the OSD widgets and log output. When you do not need
+those metrics, enable GStreamer's native source with `--gst-udpsrc` (or `pipeline.use-gst-udpsrc = true` in the INI file). The
+pipeline will then create a bare `udpsrc` element and UEP/receiver statistics are disabled entirely.
+
+Use this mode when integrating with external tooling or experimenting with alternative buffering strategies where the
+application-level receiver is unnecessary. Revert with `--no-gst-udpsrc` or by clearing the INI key to restore the default
+behaviour and regain access to the telemetry counters.
