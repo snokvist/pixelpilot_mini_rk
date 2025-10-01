@@ -146,6 +146,23 @@ int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
     return 0;
 }
 
+static void cli_copy_string(char *dst, size_t dst_size, const char *src) {
+    if (dst == NULL || dst_size == 0) {
+        return;
+    }
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+
+    size_t copy_len = strlen(src);
+    if (copy_len >= dst_size) {
+        copy_len = dst_size - 1;
+    }
+    memcpy(dst, src, copy_len);
+    dst[copy_len] = '\0';
+}
+
 int parse_cli(int argc, char **argv, AppCfg *cfg) {
     cfg_defaults(cfg);
 
@@ -153,8 +170,7 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--config") && i + 1 < argc) {
             config_file = argv[++i];
-            strncpy(cfg->config_path, config_file, sizeof(cfg->config_path) - 1);
-            cfg->config_path[sizeof(cfg->config_path) - 1] = '\0';
+            cli_copy_string(cfg->config_path, sizeof(cfg->config_path), config_file);
             break;
         }
     }
@@ -170,9 +186,9 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             ++i;
             continue;
         } else if (!strcmp(argv[i], "--card") && i + 1 < argc) {
-            strncpy(cfg->card_path, argv[++i], sizeof(cfg->card_path) - 1);
+            cli_copy_string(cfg->card_path, sizeof(cfg->card_path), argv[++i]);
         } else if (!strcmp(argv[i], "--connector") && i + 1 < argc) {
-            strncpy(cfg->connector_name, argv[++i], sizeof(cfg->connector_name) - 1);
+            cli_copy_string(cfg->connector_name, sizeof(cfg->connector_name), argv[++i]);
         } else if (!strcmp(argv[i], "--plane-id") && i + 1 < argc) {
             cfg->plane_id = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--blank-primary")) {
@@ -202,7 +218,7 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--max-lateness") && i + 1 < argc) {
             cfg->max_lateness_ns = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-dev") && i + 1 < argc) {
-            strncpy(cfg->aud_dev, argv[++i], sizeof(cfg->aud_dev) - 1);
+            cli_copy_string(cfg->aud_dev, sizeof(cfg->aud_dev), argv[++i]);
         } else if (!strcmp(argv[i], "--no-audio")) {
             cfg->no_audio = 1;
         } else if (!strcmp(argv[i], "--audio-optional")) {
