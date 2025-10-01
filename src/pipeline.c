@@ -31,6 +31,22 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
     }
 }
 
+static void set_boolean_property_if_present(GstElement *element, const char *property, gboolean value) {
+    if (element == NULL || property == NULL) {
+        return;
+    }
+
+    GObjectClass *klass = G_OBJECT_GET_CLASS(element);
+    if (klass == NULL) {
+        return;
+    }
+
+    GParamSpec *pspec = g_object_class_find_property(klass, property);
+    if (pspec != NULL && G_IS_PARAM_SPEC_BOOLEAN(pspec)) {
+        g_object_set(element, property, value, NULL);
+    }
+}
+
 static GstCaps *build_appsrc_caps(void) {
     return gst_caps_new_empty_simple("application/x-rtp");
 }
@@ -305,6 +321,8 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, GstE
     GstCaps *caps_rtp_cfg = make_rtp_caps("video", cfg->vid_pt, 90000, "H265");
     g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", cfg->video_drop_on_latency ? TRUE : FALSE, "do-lost", TRUE,
                  "post-drop-messages", TRUE, NULL);
+    set_boolean_property_if_present(jitter, "use-pipeline-clock", TRUE);
+    set_boolean_property_if_present(jitter, "rtcp-sync", FALSE);
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
 
     GstCaps *caps_stream_cfg =
@@ -381,6 +399,8 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, GstE
     CHECK_ELEM(alsa, "alsasink");
 
     g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-latency", TRUE, "do-lost", TRUE, NULL);
+    set_boolean_property_if_present(jitter, "use-pipeline-clock", TRUE);
+    set_boolean_property_if_present(jitter, "rtcp-sync", FALSE);
     GstCaps *caps_rtp_cfg = make_rtp_caps("audio", cfg->aud_pt, 48000, "OPUS");
     GstCaps *caps_raw_cfg = make_raw_audio_caps();
     g_object_set(caps_rtp, "caps", caps_rtp_cfg, NULL);
