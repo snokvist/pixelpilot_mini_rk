@@ -46,6 +46,7 @@ typedef struct {
     int x;
     int y;
     OSDRect plot_rect;
+    OSDRect header_rect;
     OSDRect label_rect;
     OSDRect footer_rect;
 } OsdLineState;
@@ -72,6 +73,7 @@ typedef struct {
     int x;
     int y;
     OSDRect plot_rect;
+    OSDRect header_rect;
     OSDRect label_rect;
     OSDRect footer_rect;
 } OsdBarState;
