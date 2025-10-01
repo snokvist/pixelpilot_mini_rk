@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <glib.h>
+
 int udev_monitor_open(UdevMonitor *um) {
     memset(um, 0, sizeof(*um));
     um->udev = udev_new();
@@ -63,6 +65,18 @@ int udev_monitor_did_hotplug(UdevMonitor *um) {
     const char *hotplug = udev_device_get_property_value(dev, "HOTPLUG");
     LOGV("udev: subsys=%s action=%s sys=%s hotplug=%s", subsys ? subsys : "?", act ? act : "?",
          sysname ? sysname : "?", hotplug ? hotplug : "?");
+
+    gboolean is_drm = (subsys != NULL) && (strcmp(subsys, "drm") == 0);
+    gboolean action_change = (act != NULL) &&
+                             (strcmp(act, "change") == 0 || strcmp(act, "add") == 0 ||
+                              strcmp(act, "remove") == 0);
+    gboolean flagged_hotplug = (hotplug != NULL) && (strcmp(hotplug, "1") == 0);
+
     udev_device_unref(dev);
+
+    if (!is_drm || !action_change || !flagged_hotplug) {
+        return 0;
+    }
+
     return 1;
 }

@@ -22,12 +22,14 @@
 #endif
 
 #include <gst/app/gstappsrc.h>
+#include <gst/gstbufferpool.h>
 
 #define RTP_MIN_HEADER 12
 #define FRAME_EWMA_ALPHA 0.1
 #define JITTER_EWMA_ALPHA 0.1
 #define BITRATE_WINDOW_NS 100000000ULL // 100 ms
 #define BITRATE_EWMA_ALPHA 0.1
+#define UDP_RECEIVER_MAX_PACKET 4096
 
 typedef struct {
     guint16 sequence;
@@ -54,6 +56,9 @@ struct UdpReceiver {
     int vid_pt;
     int aud_pt;
     int sockfd;
+
+    GstBufferPool *pool;
+    gsize buffer_size;
 
     gboolean seq_initialized;
     guint16 expected_seq;
@@ -312,9 +317,47 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
     history_push(ur, &sample);
 }
 
+static gboolean buffer_pool_start(struct UdpReceiver *ur) {
+    if (ur->pool != NULL) {
+        gst_buffer_pool_set_active(ur->pool, FALSE);
+        gst_object_unref(ur->pool);
+        ur->pool = NULL;
+    }
+
+    GstBufferPool *pool = gst_buffer_pool_new();
+    if (pool == NULL) {
+        return FALSE;
+    }
+
+    GstStructure *config = gst_buffer_pool_get_config(pool);
+    gst_buffer_pool_config_set_params(config, NULL, UDP_RECEIVER_MAX_PACKET, 4, 0);
+    if (!gst_buffer_pool_set_config(pool, config)) {
+        gst_object_unref(pool);
+        return FALSE;
+    }
+
+    if (!gst_buffer_pool_set_active(pool, TRUE)) {
+        gst_object_unref(pool);
+        return FALSE;
+    }
+
+    ur->pool = pool;
+    ur->buffer_size = UDP_RECEIVER_MAX_PACKET;
+    return TRUE;
+}
+
+static void buffer_pool_stop(struct UdpReceiver *ur) {
+    if (ur->pool != NULL) {
+        gst_buffer_pool_set_active(ur->pool, FALSE);
+        gst_object_unref(ur->pool);
+        ur->pool = NULL;
+        ur->buffer_size = 0;
+    }
+}
+
 static gpointer receiver_thread(gpointer data) {
     struct UdpReceiver *ur = (struct UdpReceiver *)data;
-    const size_t max_pkt = 4096;
+    const gsize max_pkt = ur->buffer_size > 0 ? ur->buffer_size : UDP_RECEIVER_MAX_PACKET;
 
     cpu_set_t thread_mask;
     if (cfg_get_thread_affinity(ur->cfg, ur->cpu_slot, &thread_mask)) {
@@ -332,9 +375,11 @@ static gpointer receiver_thread(gpointer data) {
             break;
         }
 
-        GstBuffer *gstbuf = gst_buffer_new_allocate(NULL, max_pkt, NULL);
-        if (gstbuf == NULL) {
-            LOGE("UDP receiver: allocation failed");
+        GstBuffer *gstbuf = NULL;
+        GstFlowReturn flow = gst_buffer_pool_acquire_buffer(ur->pool, &gstbuf, NULL);
+        if (flow != GST_FLOW_OK || gstbuf == NULL) {
+            LOGE("UDP receiver: failed to acquire buffer from pool (flow=%s)",
+                 gst_flow_get_name(flow));
             g_usleep(1000);
             continue;
         }
@@ -376,7 +421,7 @@ static gpointer receiver_thread(gpointer data) {
 
         gst_buffer_unmap(gstbuf, &map);
 
-        GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
+        flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
         if (flow != GST_FLOW_OK) {
             LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
             if (flow == GST_FLOW_FLUSHING) {
@@ -407,6 +452,8 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     g_mutex_init(&ur->lock);
     ur->appsrc = GST_APP_SRC(gst_object_ref(appsrc));
     ur->stats_enabled = FALSE;
+    ur->pool = NULL;
+    ur->buffer_size = 0;
     return ur;
 }
 
@@ -467,6 +514,13 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         return -1;
     }
 
+    if (!buffer_pool_start(ur)) {
+        LOGE("UDP receiver: failed to start buffer pool");
+        close(ur->sockfd);
+        ur->sockfd = -1;
+        return -1;
+    }
+
     g_mutex_lock(&ur->lock);
     ur->stop_requested = FALSE;
     ur->running = TRUE;
@@ -480,6 +534,7 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         g_mutex_unlock(&ur->lock);
         close(ur->sockfd);
         ur->sockfd = -1;
+        buffer_pool_stop(ur);
         return -1;
     }
     return 0;
@@ -513,6 +568,8 @@ void udp_receiver_stop(UdpReceiver *ur) {
 
     gst_app_src_end_of_stream(ur->appsrc);
 
+    buffer_pool_stop(ur);
+
     g_mutex_lock(&ur->lock);
     ur->running = FALSE;
     ur->stop_requested = FALSE;
@@ -528,6 +585,7 @@ void udp_receiver_destroy(UdpReceiver *ur) {
         gst_object_unref(ur->appsrc);
         ur->appsrc = NULL;
     }
+    buffer_pool_stop(ur);
     g_mutex_clear(&ur->lock);
     g_free(ur);
 }
