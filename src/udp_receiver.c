@@ -5,6 +5,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <math.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -15,6 +16,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef GST_USE_UNSTABLE_API
@@ -28,6 +31,20 @@
 #define JITTER_EWMA_ALPHA 0.1
 #define BITRATE_WINDOW_NS 100000000ULL // 100 ms
 #define BITRATE_EWMA_ALPHA 0.1
+#define UDP_MAX_PACKET 4096
+#define UDP_POOL_SIZE 64
+#define UDP_RECV_BATCH 8
+#define UDP_RECV_TIMEOUT_NS 500000000L
+
+struct UdpReceiver;
+
+typedef struct {
+    struct UdpReceiver *owner;
+    guint8 *data;
+    gsize capacity;
+    struct iovec iov;
+    struct sockaddr_in addr;
+} UdpBufferSlot;
 
 typedef struct {
     guint16 sequence;
@@ -47,13 +64,22 @@ struct UdpReceiver {
     GThread *thread;
     GMutex lock;
     gboolean running;
-    gboolean stop_requested;
     gboolean stats_enabled;
+    gint stop_requested;
+    gint stats_sequence;
 
     int udp_port;
     int vid_pt;
     int aud_pt;
     int sockfd;
+
+    GAsyncQueue *buffer_pool;
+    guint buffer_pool_size;
+    gsize buffer_capacity;
+    gint pool_outstanding;
+    gint pool_shutdown;
+    GMutex pool_mutex;
+    GCond pool_cond;
 
     gboolean seq_initialized;
     guint16 expected_seq;
@@ -156,7 +182,16 @@ static void history_push(struct UdpReceiver *ur, const UdpReceiverPacketSample *
     }
 }
 
-static void reset_stats_locked(struct UdpReceiver *ur) {
+static inline void stats_write_begin(struct UdpReceiver *ur) {
+    g_atomic_int_inc(&ur->stats_sequence);
+}
+
+static inline void stats_write_end(struct UdpReceiver *ur) {
+    g_atomic_int_inc(&ur->stats_sequence);
+}
+
+static void reset_stats(struct UdpReceiver *ur) {
+    stats_write_begin(ur);
     ur->seq_initialized = FALSE;
     ur->have_last_seq = FALSE;
     ur->expected_seq = 0;
@@ -171,6 +206,97 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->bitrate_window_bytes = 0;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
+    stats_write_end(ur);
+}
+
+static UdpBufferSlot *udp_buffer_slot_new(struct UdpReceiver *ur) {
+    UdpBufferSlot *slot = g_new0(UdpBufferSlot, 1);
+    if (slot == NULL) {
+        return NULL;
+    }
+    slot->owner = ur;
+    slot->capacity = ur->buffer_capacity;
+    slot->data = g_malloc(slot->capacity);
+    if (slot->data == NULL) {
+        g_free(slot);
+        return NULL;
+    }
+    slot->iov.iov_base = slot->data;
+    slot->iov.iov_len = slot->capacity;
+    memset(&slot->addr, 0, sizeof(slot->addr));
+    return slot;
+}
+
+static void udp_buffer_slot_free(UdpBufferSlot *slot) {
+    if (slot == NULL) {
+        return;
+    }
+    g_free(slot->data);
+    g_free(slot);
+}
+
+static void udp_buffer_slot_recycle(UdpBufferSlot *slot) {
+    if (slot == NULL || slot->owner == NULL) {
+        udp_buffer_slot_free(slot);
+        return;
+    }
+    slot->iov.iov_base = slot->data;
+    slot->iov.iov_len = slot->capacity;
+    memset(&slot->addr, 0, sizeof(slot->addr));
+    g_async_queue_push(slot->owner->buffer_pool, slot);
+}
+
+static void udp_buffer_slot_release(gpointer data) {
+    UdpBufferSlot *slot = (UdpBufferSlot *)data;
+    if (slot == NULL) {
+        return;
+    }
+    struct UdpReceiver *ur = slot->owner;
+    if (G_UNLIKELY(ur == NULL)) {
+        udp_buffer_slot_free(slot);
+        return;
+    }
+    udp_buffer_slot_recycle(slot);
+    gint previous = g_atomic_int_add(&ur->pool_outstanding, -1);
+    if (previous == 1 && g_atomic_int_get(&ur->pool_shutdown)) {
+        g_mutex_lock(&ur->pool_mutex);
+        g_cond_signal(&ur->pool_cond);
+        g_mutex_unlock(&ur->pool_mutex);
+    }
+}
+
+static gboolean udp_buffer_pool_prepare(struct UdpReceiver *ur) {
+    if (ur->buffer_pool == NULL) {
+        ur->buffer_pool = g_async_queue_new();
+    }
+    if (ur->buffer_pool == NULL) {
+        return FALSE;
+    }
+    g_atomic_int_set(&ur->pool_outstanding, 0);
+    g_atomic_int_set(&ur->pool_shutdown, 0);
+    for (guint i = 0; i < ur->buffer_pool_size; ++i) {
+        UdpBufferSlot *slot = udp_buffer_slot_new(ur);
+        if (slot == NULL) {
+            return FALSE;
+        }
+        g_async_queue_push(ur->buffer_pool, slot);
+    }
+    return TRUE;
+}
+
+static void udp_buffer_pool_flush(struct UdpReceiver *ur) {
+    if (ur->buffer_pool == NULL) {
+        return;
+    }
+    g_atomic_int_set(&ur->pool_outstanding, 0);
+    while (TRUE) {
+        UdpBufferSlot *slot = g_async_queue_try_pop(ur->buffer_pool);
+        if (slot == NULL) {
+            break;
+        }
+        slot->owner = NULL;
+        udp_buffer_slot_free(slot);
+    }
 }
 
 static void update_bitrate(struct UdpReceiver *ur, guint64 arrival_ns, guint32 bytes) {
@@ -224,6 +350,7 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
         return;
     }
 
+    stats_write_begin(ur);
     UdpReceiverPacketSample sample = {0};
     sample.sequence = rtp.sequence;
     sample.timestamp = rtp.timestamp;
@@ -310,11 +437,11 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
 
     update_bitrate(ur, arrival_ns, (guint32)len);
     history_push(ur, &sample);
+    stats_write_end(ur);
 }
 
 static gpointer receiver_thread(gpointer data) {
     struct UdpReceiver *ur = (struct UdpReceiver *)data;
-    const size_t max_pkt = 4096;
 
     cpu_set_t thread_mask;
     if (cfg_get_thread_affinity(ur->cfg, ur->cpu_slot, &thread_mask)) {
@@ -324,36 +451,46 @@ static gpointer receiver_thread(gpointer data) {
         }
     }
 
-    while (TRUE) {
-        g_mutex_lock(&ur->lock);
-        gboolean stop = ur->stop_requested;
-        g_mutex_unlock(&ur->lock);
-        if (stop) {
-            break;
+    struct mmsghdr msgs[UDP_RECV_BATCH];
+    UdpBufferSlot *slots[UDP_RECV_BATCH];
+
+    while (!g_atomic_int_get(&ur->stop_requested)) {
+        guint prepared = 0;
+        for (; prepared < UDP_RECV_BATCH; ++prepared) {
+            UdpBufferSlot *slot = g_async_queue_try_pop(ur->buffer_pool);
+            if (slot == NULL) {
+                slot = udp_buffer_slot_new(ur);
+                if (slot == NULL) {
+                    break;
+                }
+            }
+            slots[prepared] = slot;
+            memset(&msgs[prepared], 0, sizeof(struct mmsghdr));
+            msgs[prepared].msg_hdr.msg_iov = &slot->iov;
+            msgs[prepared].msg_hdr.msg_iovlen = 1;
+            msgs[prepared].msg_hdr.msg_name = &slot->addr;
+            msgs[prepared].msg_hdr.msg_namelen = sizeof(slot->addr);
         }
 
-        GstBuffer *gstbuf = gst_buffer_new_allocate(NULL, max_pkt, NULL);
-        if (gstbuf == NULL) {
-            LOGE("UDP receiver: allocation failed");
+        if (prepared == 0) {
             g_usleep(1000);
             continue;
         }
 
-        GstMapInfo map;
-        if (!gst_buffer_map(gstbuf, &map, GST_MAP_WRITE)) {
-            LOGE("UDP receiver: buffer map failed");
-            gst_buffer_unref(gstbuf);
-            g_usleep(1000);
-            continue;
-        }
+        struct timespec timeout = {
+            .tv_sec = 0,
+            .tv_nsec = UDP_RECV_TIMEOUT_NS,
+        };
 
-        struct sockaddr_in src;
-        socklen_t slen = sizeof(src);
-        ssize_t n = recvfrom(ur->sockfd, map.data, max_pkt, 0, (struct sockaddr *)&src, &slen);
-        if (n < 0) {
-            int err = errno;
-            gst_buffer_unmap(gstbuf, &map);
-            gst_buffer_unref(gstbuf);
+        int received = recvmmsg(ur->sockfd, msgs, prepared, MSG_WAITFORONE, &timeout);
+        if (received <= 0) {
+            int err = (received < 0) ? errno : 0;
+            for (guint i = 0; i < prepared; ++i) {
+                udp_buffer_slot_recycle(slots[i]);
+            }
+            if (received == 0) {
+                continue;
+            }
             if (err == EINTR) {
                 continue;
             }
@@ -361,34 +498,46 @@ static gpointer receiver_thread(gpointer data) {
                 g_usleep(1000);
                 continue;
             }
-            if (!ur->stop_requested) {
-                LOGE("UDP receiver: recvfrom failed: %s", g_strerror(err));
+            if (!g_atomic_int_get(&ur->stop_requested)) {
+                LOGE("UDP receiver: recvmmsg failed: %s", g_strerror(err));
             }
             break;
         }
 
-        gst_buffer_set_size(gstbuf, (gsize)n);
-
-        guint64 arrival_ns = get_time_ns();
-        g_mutex_lock(&ur->lock);
-        process_rtp(ur, map.data, (gsize)n, arrival_ns);
-        g_mutex_unlock(&ur->lock);
-
-        gst_buffer_unmap(gstbuf, &map);
-
-        GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
-        if (flow != GST_FLOW_OK) {
-            LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
-            if (flow == GST_FLOW_FLUSHING) {
-                g_usleep(1000);
+        guint64 arrival_base = get_time_ns();
+        for (int i = 0; i < received; ++i) {
+            UdpBufferSlot *slot = slots[i];
+            slots[i] = NULL;
+            ssize_t len = msgs[i].msg_len;
+            if (len <= 0 || (msgs[i].msg_hdr.msg_flags & MSG_TRUNC)) {
+                udp_buffer_slot_recycle(slot);
+                continue;
             }
+
+            GstBuffer *gstbuf = gst_buffer_new_wrapped_full(0, slot->data, slot->capacity, 0, (gsize)len, slot, udp_buffer_slot_release);
+            if (gstbuf == NULL) {
+                udp_buffer_slot_recycle(slot);
+                continue;
+            }
+
+            g_atomic_int_inc(&ur->pool_outstanding);
+            guint64 arrival_ns = (received > 1) ? get_time_ns() : arrival_base;
+            process_rtp(ur, slot->data, (gsize)len, arrival_ns);
+
+            GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
+            if (flow != GST_FLOW_OK) {
+                LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
+                if (flow == GST_FLOW_FLUSHING) {
+                    g_usleep(1000);
+                }
+            }
+        }
+
+        for (guint i = (guint)received; i < prepared; ++i) {
+            udp_buffer_slot_recycle(slots[i]);
         }
     }
 
-    g_mutex_lock(&ur->lock);
-    ur->running = FALSE;
-    ur->stop_requested = FALSE;
-    g_mutex_unlock(&ur->lock);
     return NULL;
 }
 
@@ -407,6 +556,15 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     g_mutex_init(&ur->lock);
     ur->appsrc = GST_APP_SRC(gst_object_ref(appsrc));
     ur->stats_enabled = FALSE;
+    ur->buffer_pool = NULL;
+    ur->buffer_pool_size = UDP_POOL_SIZE;
+    ur->buffer_capacity = UDP_MAX_PACKET;
+    g_atomic_int_set(&ur->pool_outstanding, 0);
+    g_atomic_int_set(&ur->pool_shutdown, 0);
+    g_atomic_int_set(&ur->stop_requested, 0);
+    g_atomic_int_set(&ur->stats_sequence, 0);
+    g_mutex_init(&ur->pool_mutex);
+    g_cond_init(&ur->pool_cond);
     return ur;
 }
 
@@ -433,16 +591,14 @@ static int setup_socket(struct UdpReceiver *ur) {
         return -1;
     }
 
-    struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec = 500000; // 500 ms timeout to allow graceful shutdown
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        LOGW("UDP receiver: setsockopt(SO_RCVTIMEO) failed: %s", g_strerror(errno));
-    }
-
     int buf_bytes = 4 * 1024 * 1024;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_bytes, sizeof(buf_bytes)) < 0) {
         LOGW("UDP receiver: setsockopt(SO_RCVBUF) failed: %s", g_strerror(errno));
+    }
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        LOGW("UDP receiver: fcntl(O_NONBLOCK) failed: %s", g_strerror(errno));
     }
 
     ur->sockfd = fd;
@@ -458,17 +614,24 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         g_mutex_unlock(&ur->lock);
         return 0;
     }
-    reset_stats_locked(ur);
+    reset_stats(ur);
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
     g_mutex_unlock(&ur->lock);
 
+    if (!udp_buffer_pool_prepare(ur)) {
+        LOGE("UDP receiver: failed to prepare buffer pool");
+        udp_buffer_pool_flush(ur);
+        return -1;
+    }
+
     if (setup_socket(ur) != 0) {
+        udp_buffer_pool_flush(ur);
         return -1;
     }
 
     g_mutex_lock(&ur->lock);
-    ur->stop_requested = FALSE;
+    g_atomic_int_set(&ur->stop_requested, 0);
     ur->running = TRUE;
     g_mutex_unlock(&ur->lock);
 
@@ -480,6 +643,7 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         g_mutex_unlock(&ur->lock);
         close(ur->sockfd);
         ur->sockfd = -1;
+        udp_buffer_pool_flush(ur);
         return -1;
     }
     return 0;
@@ -494,7 +658,7 @@ void udp_receiver_stop(UdpReceiver *ur) {
         g_mutex_unlock(&ur->lock);
         return;
     }
-    ur->stop_requested = TRUE;
+    g_atomic_int_set(&ur->stop_requested, 1);
     g_mutex_unlock(&ur->lock);
 
     if (ur->sockfd >= 0) {
@@ -511,12 +675,21 @@ void udp_receiver_stop(UdpReceiver *ur) {
         ur->sockfd = -1;
     }
 
+    g_atomic_int_set(&ur->pool_shutdown, 1);
+    g_mutex_lock(&ur->pool_mutex);
+    while (g_atomic_int_get(&ur->pool_outstanding) != 0) {
+        g_cond_wait(&ur->pool_cond, &ur->pool_mutex);
+    }
+    g_mutex_unlock(&ur->pool_mutex);
+    udp_buffer_pool_flush(ur);
+    g_atomic_int_set(&ur->pool_shutdown, 0);
+
     gst_app_src_end_of_stream(ur->appsrc);
 
     g_mutex_lock(&ur->lock);
     ur->running = FALSE;
-    ur->stop_requested = FALSE;
     g_mutex_unlock(&ur->lock);
+    g_atomic_int_set(&ur->stop_requested, 0);
 }
 
 void udp_receiver_destroy(UdpReceiver *ur) {
@@ -524,11 +697,18 @@ void udp_receiver_destroy(UdpReceiver *ur) {
         return;
     }
     udp_receiver_stop(ur);
+    udp_buffer_pool_flush(ur);
+    if (ur->buffer_pool != NULL) {
+        g_async_queue_unref(ur->buffer_pool);
+        ur->buffer_pool = NULL;
+    }
     if (ur->appsrc != NULL) {
         gst_object_unref(ur->appsrc);
         ur->appsrc = NULL;
     }
     g_mutex_clear(&ur->lock);
+    g_mutex_clear(&ur->pool_mutex);
+    g_cond_clear(&ur->pool_cond);
     g_free(ur);
 }
 
@@ -536,10 +716,24 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
     if (ur == NULL || stats == NULL) {
         return;
     }
-    g_mutex_lock(&ur->lock);
-    *stats = ur->stats;
-    memcpy(stats->history, ur->history, sizeof(ur->history));
-    g_mutex_unlock(&ur->lock);
+    UdpReceiverStats snapshot;
+    UdpReceiverPacketSample history[UDP_RECEIVER_HISTORY];
+
+    while (TRUE) {
+        gint start = g_atomic_int_get(&ur->stats_sequence);
+        if (start & 1) {
+            continue;
+        }
+        snapshot = ur->stats;
+        memcpy(history, ur->history, sizeof(history));
+        gint end = g_atomic_int_get(&ur->stats_sequence);
+        if (start == end) {
+            break;
+        }
+    }
+
+    *stats = snapshot;
+    memcpy(stats->history, history, sizeof(history));
 }
 
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
@@ -547,12 +741,25 @@ void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
         return;
     }
 
-    g_mutex_lock(&ur->lock);
     gboolean new_state = enabled ? TRUE : FALSE;
-    gboolean changed = (ur->stats_enabled != new_state);
-    ur->stats_enabled = new_state;
-    if (changed && new_state) {
-        reset_stats_locked(ur);
+    gboolean activate = FALSE;
+
+    g_mutex_lock(&ur->lock);
+    if (ur->stats_enabled == new_state) {
+        g_mutex_unlock(&ur->lock);
+        return;
+    }
+    if (new_state) {
+        activate = TRUE;
+    } else {
+        ur->stats_enabled = FALSE;
     }
     g_mutex_unlock(&ur->lock);
+
+    if (activate) {
+        reset_stats(ur);
+        g_mutex_lock(&ur->lock);
+        ur->stats_enabled = TRUE;
+        g_mutex_unlock(&ur->lock);
+    }
 }
