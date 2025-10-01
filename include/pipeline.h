@@ -4,6 +4,7 @@
 #include <glib.h>
 #include <gst/gst.h>
 
+#include "config.h"
 #include "udp_receiver.h"
 
 typedef enum {
@@ -15,14 +16,10 @@ typedef enum {
 typedef struct {
     PipelineStateEnum state;
     GstElement *pipeline;
-    GstElement *source;
-    GstElement *demux;
-    GstElement *video_sink;
-    GstElement *video_branch_entry;
-    GstElement *audio_branch_entry;
-    GstPad *video_pad;
-    GstPad *audio_pad;
-    UdpReceiver *udp_receiver;
+    GstElement *rtpbin;
+    GstElement *video_queue;
+    GstElement *audio_queue;
+    GstElement *audio_sink;
     GThread *bus_thread;
     GMutex lock;
     GCond cond;
@@ -30,12 +27,9 @@ typedef struct {
     gboolean bus_thread_running;
     gboolean stop_requested;
     gboolean encountered_error;
-    int audio_disabled;
+    gboolean audio_disabled;
     const AppCfg *cfg;
-    int bus_thread_cpu_slot;
 } PipelineState;
-
-#include "config.h"
 
 int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps);
 void pipeline_stop(PipelineState *ps, int wait_ms_total);
