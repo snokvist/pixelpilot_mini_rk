@@ -33,11 +33,13 @@ typedef struct {
     int audio_disabled;
     const AppCfg *cfg;
     int bus_thread_cpu_slot;
+    int video_plane_id;
 } PipelineState;
 
 #include "config.h"
+#include "drm_modeset.h"
 
-int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps);
+int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int audio_disabled, PipelineState *ps);
 void pipeline_stop(PipelineState *ps, int wait_ms_total);
 void pipeline_poll_child(PipelineState *ps);
 int pipeline_get_receiver_stats(const PipelineState *ps, UdpReceiverStats *stats);

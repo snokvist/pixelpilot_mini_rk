@@ -77,7 +77,8 @@ int main(int argc, char **argv) {
     if (connected) {
         if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
             if (cfg.osd_enable) {
-                if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
+                int video_plane_id = ms.video_plane_id != 0 ? (int)ms.video_plane_id : cfg.plane_id;
+                if (osd_setup(fd, &cfg, &ms, video_plane_id, &osd) == 0 && osd_is_active(&osd)) {
                     pipeline_set_receiver_stats_enabled(&ps, TRUE);
                 } else {
                     pipeline_set_receiver_stats_enabled(&ps, FALSE);
@@ -85,7 +86,7 @@ int main(int argc, char **argv) {
             } else {
                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
             }
-            if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
+            if (pipeline_start(&cfg, &ms, audio_disabled, &ps) != 0) {
                 LOGE("Failed to start pipeline");
                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
             } else {
@@ -145,7 +146,9 @@ int main(int argc, char **argv) {
                             if (cfg.osd_enable) {
                                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
                                 osd_teardown(fd, &osd);
-                                if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
+                                int video_plane_id =
+                                    ms.video_plane_id != 0 ? (int)ms.video_plane_id : cfg.plane_id;
+                                if (osd_setup(fd, &cfg, &ms, video_plane_id, &osd) == 0 && osd_is_active(&osd)) {
                                     pipeline_set_receiver_stats_enabled(&ps, TRUE);
                                 } else {
                                     pipeline_set_receiver_stats_enabled(&ps, FALSE);
@@ -154,7 +157,7 @@ int main(int argc, char **argv) {
                             if (ps.state != PIPELINE_STOPPED) {
                                 pipeline_stop(&ps, 700);
                             }
-                            if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
+                            if (pipeline_start(&cfg, &ms, audio_disabled, &ps) != 0) {
                                 LOGE("Failed to start pipeline after hotplug");
                                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
                             } else {
@@ -200,7 +203,7 @@ int main(int argc, char **argv) {
                 LOGW("Audio device likely busy; switching audio branch to fakesink to avoid restart loop.");
             }
             LOGW("Pipeline not running; restarting%s...", audio_disabled ? " (audio=fakesink)" : "");
-            if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
+            if (pipeline_start(&cfg, &ms, audio_disabled, &ps) != 0) {
                 LOGE("Restart failed");
                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
             } else {

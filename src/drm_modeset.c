@@ -69,14 +69,20 @@ static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
     return a->clock > b->clock;
 }
 
-static int find_primary_plane_for_crtc(int fd, drmModeRes *res, uint32_t crtc_id) {
-    int crtc_index = -1;
+static int index_for_crtc(const drmModeRes *res, uint32_t crtc_id) {
+    if (!res) {
+        return -1;
+    }
     for (int i = 0; i < res->count_crtcs; ++i) {
         if ((uint32_t)res->crtcs[i] == crtc_id) {
-            crtc_index = i;
-            break;
+            return i;
         }
     }
+    return -1;
+}
+
+static int find_primary_plane_for_crtc(int fd, drmModeRes *res, uint32_t crtc_id) {
+    int crtc_index = index_for_crtc(res, crtc_id);
     if (crtc_index < 0) {
         return -1;
     }
@@ -121,6 +127,134 @@ static int find_primary_plane_for_crtc(int fd, drmModeRes *res, uint32_t crtc_id
     }
     drmModeFreePlaneResources(prs);
     return primary_id;
+}
+
+static int query_plane_type(int fd, uint32_t plane_id, uint32_t *type_out) {
+    if (!type_out) {
+        return -1;
+    }
+
+    uint32_t type_prop = 0;
+    if (drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "type", &type_prop) != 0) {
+        return -1;
+    }
+
+    drmModeObjectProperties *props =
+        drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (!props) {
+        return -1;
+    }
+
+    int found = 0;
+    for (uint32_t i = 0; i < props->count_props; ++i) {
+        if (props->props[i] == type_prop) {
+            *type_out = (uint32_t)props->prop_values[i];
+            found = 1;
+            break;
+        }
+    }
+    drmModeFreeObjectProperties(props);
+    return found ? 0 : -1;
+}
+
+static int resolve_video_plane(int fd, drmModeRes *res, uint32_t crtc_id, const AppCfg *cfg,
+                               int osd_enabled) {
+    int crtc_index = index_for_crtc(res, crtc_id);
+    if (crtc_index < 0) {
+        LOGE("Failed to map CRTC %u to index", crtc_id);
+        return -1;
+    }
+
+    if (cfg->plane_id > 0) {
+        drmModePlane *user_plane = drmModeGetPlane(fd, (uint32_t)cfg->plane_id);
+        if (!user_plane) {
+            LOGW("Configured plane %d not found; auto-selecting plane", cfg->plane_id);
+        } else {
+            if ((user_plane->possible_crtcs & (1U << crtc_index)) == 0) {
+                LOGW("Configured plane %d not compatible with CRTC %u; auto-selecting",
+                     cfg->plane_id, crtc_id);
+            } else {
+                if (osd_enabled && cfg->osd_plane_id > 0 &&
+                    (uint32_t)cfg->plane_id == (uint32_t)cfg->osd_plane_id) {
+                    LOGW("Video plane %d matches OSD plane; proceeding but OSD may overlap",
+                         cfg->plane_id);
+                }
+                drmModeFreePlane(user_plane);
+                return cfg->plane_id;
+            }
+            drmModeFreePlane(user_plane);
+        }
+    }
+
+    drmModePlaneRes *prs = drmModeGetPlaneResources(fd);
+    if (!prs) {
+        LOGE("drmModeGetPlaneResources failed during plane auto-select");
+        return -1;
+    }
+
+    int best_overlay = -1;
+    uint64_t best_overlay_z = 0;
+    int best_non_primary = -1;
+    int fallback_any = -1;
+
+    for (uint32_t i = 0; i < prs->count_planes; ++i) {
+        uint32_t plane_id = prs->planes[i];
+        if (osd_enabled && cfg->osd_plane_id > 0 && plane_id == (uint32_t)cfg->osd_plane_id) {
+            continue;
+        }
+
+        drmModePlane *p = drmModeGetPlane(fd, plane_id);
+        if (!p) {
+            continue;
+        }
+
+        if ((p->possible_crtcs & (1U << crtc_index)) == 0) {
+            drmModeFreePlane(p);
+            continue;
+        }
+
+        uint32_t type_val = DRM_PLANE_TYPE_OVERLAY;
+        if (query_plane_type(fd, plane_id, &type_val) != 0) {
+            type_val = DRM_PLANE_TYPE_OVERLAY;
+        }
+
+        if (fallback_any < 0) {
+            fallback_any = (int)plane_id;
+        }
+        if (type_val != DRM_PLANE_TYPE_PRIMARY && best_non_primary < 0) {
+            best_non_primary = (int)plane_id;
+        }
+
+        if (type_val == DRM_PLANE_TYPE_PRIMARY) {
+            drmModeFreePlane(p);
+            continue;
+        }
+
+        uint32_t zpos_prop = 0;
+        uint64_t zmin = 0, zmax = 0;
+        if (drm_get_prop_id_and_range_ci(fd, plane_id, DRM_MODE_OBJECT_PLANE, "ZPOS", &zpos_prop,
+                                         &zmin, &zmax, "zpos") == 0) {
+            if (best_overlay < 0 || zmax > best_overlay_z) {
+                best_overlay = (int)plane_id;
+                best_overlay_z = zmax;
+            }
+        } else if (best_overlay < 0) {
+            best_overlay = (int)plane_id;
+            best_overlay_z = 0;
+        }
+
+        drmModeFreePlane(p);
+    }
+
+    drmModeFreePlaneResources(prs);
+
+    if (best_overlay > 0) {
+        return best_overlay;
+    }
+    if (best_non_primary > 0) {
+        return best_non_primary;
+    }
+    return fallback_any;
 }
 
 int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResult *out) {
@@ -211,7 +345,18 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     int w = best.hdisplay;
     int h = best.vdisplay;
     int hz = vrefresh(&best);
-    LOGI("Chosen: %s id=%u  %dx%d@%d  CRTC=%d  plane=%d", cname, conn->connector_id, w, h, hz, crtc->crtc_id, cfg->plane_id);
+    int video_plane_id = resolve_video_plane(fd, res, crtc->crtc_id, cfg, osd_enabled);
+    if (video_plane_id <= 0) {
+        LOGE("Failed to resolve a compatible video plane");
+        drmModeFreeConnector(conn);
+        drmModeFreeCrtc(crtc);
+        drmModeFreeResources(res);
+        return -6;
+    }
+
+    const char *plane_origin = cfg->plane_id > 0 ? "(configured)" : "(auto)";
+    LOGI("Chosen: %s id=%u  %dx%d@%d  CRTC=%d  plane=%d %s", cname, conn->connector_id, w, h, hz,
+         crtc->crtc_id, video_plane_id, plane_origin);
 
     struct DumbFB fb = {0};
     if (create_argb_fb(fd, w, h, 0xFF000000u, &fb) != 0) {
@@ -258,37 +403,38 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     uint32_t plane_src_w = 0, plane_src_h = 0;
     uint32_t plane_zpos_id = 0;
     uint64_t zmin = 0, zmax = 0;
-    int have_zpos = (drm_get_prop_id_and_range_ci(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "ZPOS",
+    uint32_t plane_obj = (uint32_t)video_plane_id;
+    int have_zpos = (drm_get_prop_id_and_range_ci(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "ZPOS",
                                                   &plane_zpos_id, &zmin, &zmax, "zpos") == 0);
 
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &plane_fb_id);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &plane_crtc_id);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_X", &plane_crtc_x);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y", &plane_crtc_y);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_W", &plane_crtc_w);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_H", &plane_crtc_h);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_X", &plane_src_x);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_Y", &plane_src_y);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_W", &plane_src_w);
-    drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_H", &plane_src_h);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "FB_ID", &plane_fb_id);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &plane_crtc_id);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "CRTC_X", &plane_crtc_x);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "CRTC_Y", &plane_crtc_y);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "CRTC_W", &plane_crtc_w);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "CRTC_H", &plane_crtc_h);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "SRC_X", &plane_src_x);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "SRC_Y", &plane_src_y);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "SRC_W", &plane_src_w);
+    drm_get_prop_id(fd, plane_obj, DRM_MODE_OBJECT_PLANE, "SRC_H", &plane_src_h);
 
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_fb_id, fb.fb_id);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_id, crtc->crtc_id);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_x, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_y, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_w, w);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_h, h);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_x, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_y, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_w, (uint64_t)w << 16);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_h, (uint64_t)h << 16);
+    drmModeAtomicAddProperty(req, plane_obj, plane_fb_id, fb.fb_id);
+    drmModeAtomicAddProperty(req, plane_obj, plane_crtc_id, crtc->crtc_id);
+    drmModeAtomicAddProperty(req, plane_obj, plane_crtc_x, 0);
+    drmModeAtomicAddProperty(req, plane_obj, plane_crtc_y, 0);
+    drmModeAtomicAddProperty(req, plane_obj, plane_crtc_w, w);
+    drmModeAtomicAddProperty(req, plane_obj, plane_crtc_h, h);
+    drmModeAtomicAddProperty(req, plane_obj, plane_src_x, 0);
+    drmModeAtomicAddProperty(req, plane_obj, plane_src_y, 0);
+    drmModeAtomicAddProperty(req, plane_obj, plane_src_w, (uint64_t)w << 16);
+    drmModeAtomicAddProperty(req, plane_obj, plane_src_h, (uint64_t)h << 16);
 
     if (have_zpos) {
         uint64_t v_z = zmax;
         if (osd_enabled && zmax > zmin) {
             v_z = zmax - 1;
         }
-        drmModeAtomicAddProperty(req, cfg->plane_id, plane_zpos_id, v_z);
+        drmModeAtomicAddProperty(req, plane_obj, plane_zpos_id, v_z);
     }
 
     int primary_plane_id = cfg->blank_primary ? find_primary_plane_for_crtc(fd, res, crtc->crtc_id) : -1;
@@ -300,8 +446,20 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         drmModeAtomicAddProperty(req, (uint32_t)primary_plane_id, prim_crtc_id, 0);
     }
 
+    int ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL);
+    if (ret != 0) {
+        LOGE("drmModeAtomicCommit TEST_ONLY failed: %s", strerror(errno));
+        drmModeAtomicFree(req);
+        drmModeDestroyPropertyBlob(fd, mode_blob);
+        destroy_dumb_fb(fd, &fb);
+        drmModeFreeConnector(conn);
+        drmModeFreeCrtc(crtc);
+        drmModeFreeResources(res);
+        return -8;
+    }
+
     int flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
-    int ret = drmModeAtomicCommit(fd, req, flags, NULL);
+    ret = drmModeAtomicCommit(fd, req, flags, NULL);
     if (ret != 0) {
         LOGE("drmModeAtomicCommit failed: %s", strerror(errno));
         drmModeAtomicFree(req);
@@ -313,7 +471,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         return -9;
     }
 
-    LOGI("Atomic COMMIT: %dx%d@%d on %s via plane %d", w, h, hz, cname, cfg->plane_id);
+    LOGI("Atomic COMMIT: %dx%d@%d on %s via plane %d", w, h, hz, cname, video_plane_id);
 
     drmModeAtomicFree(req);
     drmModeDestroyPropertyBlob(fd, mode_blob);
@@ -322,6 +480,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     if (out) {
         out->connector_id = conn->connector_id;
         out->crtc_id = crtc->crtc_id;
+        out->video_plane_id = (uint32_t)video_plane_id;
         out->mode_w = w;
         out->mode_h = h;
         out->mode_hz = hz;

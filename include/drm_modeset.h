@@ -8,6 +8,7 @@
 typedef struct {
     uint32_t connector_id;
     uint32_t crtc_id;
+    uint32_t video_plane_id;
     int mode_w;
     int mode_h;
     int mode_hz;

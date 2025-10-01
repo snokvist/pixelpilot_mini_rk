@@ -296,8 +296,24 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    g_object_set(sink, "plane-id", cfg->plane_id, "sync", cfg->kmssink_sync ? TRUE : FALSE, "qos",
-                 cfg->kmssink_qos ? TRUE : FALSE, "max-lateness", (gint64)cfg->max_lateness_ns, NULL);
+
+    gboolean sync = FALSE;
+    gboolean qos = TRUE;
+    if (cfg->kmssink_sync) {
+        LOGW("kmssink sync=true requested; forcing sync=false to avoid blocking atomic flips");
+    }
+    if (!cfg->kmssink_qos) {
+        LOGW("kmssink qos=false requested; forcing qos=true so tardy frames are dropped");
+    }
+
+    int plane_id = ps->video_plane_id > 0 ? ps->video_plane_id : cfg->plane_id;
+    if (plane_id <= 0) {
+        LOGE("No valid video plane id resolved; refusing to start video branch");
+        goto fail;
+    }
+
+    g_object_set(sink, "plane-id", plane_id, "sync", sync, "qos", qos, "max-lateness",
+                 (gint64)cfg->max_lateness_ns, NULL);
 
     gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL);
 
@@ -485,9 +501,10 @@ static void cleanup_pipeline(PipelineState *ps) {
     ps->encountered_error = FALSE;
     ps->stop_requested = FALSE;
     g_mutex_unlock(&ps->lock);
+    ps->video_plane_id = 0;
 }
 
-int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
+int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int audio_disabled, PipelineState *ps) {
     if (ps->state != PIPELINE_STOPPED) {
         LOGW("pipeline_start: refused (state=%d)", ps->state);
         return -1;
@@ -512,6 +529,7 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
     ps->cfg = cfg;
+    ps->video_plane_id = (ms != NULL && ms->video_plane_id != 0) ? (int)ms->video_plane_id : cfg->plane_id;
     ps->bus_thread_cpu_slot = 0;
 
     UdpReceiver *receiver = NULL;
