@@ -735,6 +735,50 @@ static void osd_clear_rect(OSD *o, const OSDRect *r) {
     osd_fill_rect(o, r->x, r->y, r->w, r->h, 0x00000000u);
 }
 
+static void osd_clear_rect_difference(OSD *o, const OSDRect *prev, const OSDRect *curr) {
+    if (!prev || prev->w <= 0 || prev->h <= 0) {
+        return;
+    }
+    if (!curr || curr->w <= 0 || curr->h <= 0) {
+        osd_clear_rect(o, prev);
+        return;
+    }
+
+    int prev_x0 = prev->x;
+    int prev_y0 = prev->y;
+    int prev_x1 = prev->x + prev->w;
+    int prev_y1 = prev->y + prev->h;
+
+    int curr_x0 = curr->x;
+    int curr_y0 = curr->y;
+    int curr_x1 = curr->x + curr->w;
+    int curr_y1 = curr->y + curr->h;
+
+    if (curr_x1 <= prev_x0 || curr_x0 >= prev_x1 || curr_y1 <= prev_y0 || curr_y0 >= prev_y1) {
+        osd_clear_rect(o, prev);
+        return;
+    }
+
+    if (curr_y0 > prev_y0) {
+        osd_fill_rect(o, prev_x0, prev_y0, prev->w, curr_y0 - prev_y0, 0x00000000u);
+    }
+    if (curr_y1 < prev_y1) {
+        osd_fill_rect(o, prev_x0, curr_y1, prev->w, prev_y1 - curr_y1, 0x00000000u);
+    }
+
+    int overlap_y0 = curr_y0 > prev_y0 ? curr_y0 : prev_y0;
+    int overlap_y1 = curr_y1 < prev_y1 ? curr_y1 : prev_y1;
+
+    if (overlap_y1 > overlap_y0) {
+        if (curr_x0 > prev_x0) {
+            osd_fill_rect(o, prev_x0, overlap_y0, curr_x0 - prev_x0, overlap_y1 - overlap_y0, 0x00000000u);
+        }
+        if (curr_x1 < prev_x1) {
+            osd_fill_rect(o, curr_x1, overlap_y0, prev_x1 - curr_x1, overlap_y1 - overlap_y0, 0x00000000u);
+        }
+    }
+}
+
 static void osd_draw_hline(OSD *o, int x, int y, int w, uint32_t argb) {
     osd_fill_rect(o, x, y, w, o->scale > 0 ? o->scale : 1, argb);
 }
@@ -1945,9 +1989,10 @@ static void osd_bar_draw_footer(OSD *o, int idx, const char **lines, int line_co
 static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx) {
     OsdElementConfig *cfg = &o->layout.elements[idx];
     OsdTextConfig *text_cfg = &cfg->data.text;
-    osd_clear_rect(o, &o->elements[idx].rect);
+    OSDRect prev_rect = o->elements[idx].rect;
 
     if (text_cfg->line_count <= 0) {
+        osd_clear_rect(o, &prev_rect);
         osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
         return;
     }
@@ -1962,6 +2007,7 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
     }
 
     if (actual_lines <= 0) {
+        osd_clear_rect(o, &prev_rect);
         osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
         return;
     }
@@ -2002,6 +2048,8 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
         text_y += line_advance;
     }
 
+    OSDRect new_rect = {draw_x, draw_y, box_w, box_h};
+    osd_clear_rect_difference(o, &prev_rect, &new_rect);
     osd_store_rect(&o->elements[idx].rect, draw_x, draw_y, box_w, box_h);
     o->elements[idx].data.text.last_line_count = actual_lines;
 }
