@@ -59,9 +59,11 @@ behaviour and regain access to the telemetry counters.
 
 ## OSD rendering acceleration
 
-The on-screen display paths rely on libpixman for all of the heavy lifting. During `osd_setup` the firmware builds a glyph
-cache and a framebuffer wrapper so that runtime text drawing reduces to `pixman_image_composite32` calls, while rectangles and
-lines are emitted through `pixman_fill`. These APIs automatically pick the best available implementation at runtime, which
-includes the hand-written ARM NEON fast paths shipped with upstream pixman when the library is built with NEON support. No
-additional compiler flags are required in this repository; simply linking against pixman allows the OSD to take advantage of
-NEON, SSE2, or other SIMD back ends that pixman exposes on the target CPU.
+The on-screen display paths rely on libpixman for essentially all runtime blits so that the hot loops stay out of C. During
+`osd_setup` the firmware builds a glyph cache and a framebuffer wrapper so that text drawing reduces to
+`pixman_image_composite32` calls, while clears, filled rectangles, and the thickened segments used by the line renderer are
+emitted through `pixman_fill`. The CPU still decides the geometry (e.g. Bresenham stepping for diagonals), but the actual
+pixel writes are handled by pixman. These APIs automatically pick the best available implementation at runtime, which includes
+the hand-written ARM NEON fast paths shipped with upstream pixman when the library is built with NEON support. No additional
+compiler flags are required in this repository; simply linking against pixman allows the OSD to take advantage of NEON, SSE2,
+or other SIMD back ends that pixman exposes on the target CPU.
