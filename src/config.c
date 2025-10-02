@@ -37,6 +37,8 @@ static void usage(const char *prog) {
             "  --osd-plane-id N             (force OSD plane id; default auto)\n"
             "  --osd-refresh-ms N           (default: 500)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
+            "  --splash PATH                (enable splash screen playback from PATH)\n"
+            "  --no-splash                  (disable splash screen playback)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
             prog);
@@ -74,6 +76,9 @@ void cfg_defaults(AppCfg *c) {
     c->osd_refresh_ms = 500;
 
     c->gst_log = 0;
+
+    c->splash_enable = 0;
+    c->splash_path[0] = '\0';
 
     c->cpu_affinity_present = 0;
     CPU_ZERO(&c->cpu_affinity_mask);
@@ -233,6 +238,14 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->osd_refresh_ms = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
+        } else if (!strcmp(argv[i], "--splash") && i + 1 < argc) {
+            cfg->splash_enable = 1;
+            cli_copy_string(cfg->splash_path, sizeof(cfg->splash_path), argv[++i]);
+        } else if (!strcmp(argv[i], "--splash-path") && i + 1 < argc) {
+            cli_copy_string(cfg->splash_path, sizeof(cfg->splash_path), argv[++i]);
+        } else if (!strcmp(argv[i], "--no-splash")) {
+            cfg->splash_enable = 0;
+            cfg->splash_path[0] = '\0';
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {
             if (cfg_parse_cpu_list(argv[++i], cfg) != 0) {
                 return -1;

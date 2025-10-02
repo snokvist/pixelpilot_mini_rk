@@ -729,6 +729,33 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "splash") == 0) {
+        if (strcasecmp(key, "enable") == 0 || strcasecmp(key, "splashscreen") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->splash_enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "path") == 0 || strcasecmp(key, "file") == 0 || strcasecmp(key, "video") == 0) {
+            ini_copy_string(cfg->splash_path, sizeof(cfg->splash_path), value);
+            return 0;
+        }
+        return -1;
+    }
+    if ((section == NULL || *section == '\0') && strcasecmp(key, "splashscreen") == 0) {
+        int v = 0;
+        if (parse_bool(value, &v) != 0) {
+            return -1;
+        }
+        cfg->splash_enable = v;
+        return 0;
+    }
+    if ((section == NULL || *section == '\0') && (strcasecmp(key, "splash-path") == 0 || strcasecmp(key, "splash") == 0)) {
+        ini_copy_string(cfg->splash_path, sizeof(cfg->splash_path), value);
+        return 0;
+    }
     if (strcasecmp(section, "cpu") == 0) {
         if (strcasecmp(key, "affinity") == 0) {
             return cfg_parse_cpu_list(value, cfg);

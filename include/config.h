@@ -43,6 +43,9 @@ typedef struct {
 
     int gst_log;
 
+    int splash_enable;
+    char splash_path[PATH_MAX];
+
     int cpu_affinity_present;
     cpu_set_t cpu_affinity_mask;
     int cpu_affinity_order[CPU_SETSIZE];

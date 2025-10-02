@@ -221,6 +221,48 @@ static gint pad_payload_type(GstPad *pad) {
     return payload_type;
 }
 
+static void pipeline_select_active_pad(PipelineState *ps, GstPad *pad) {
+    if (ps == NULL || ps->video_selector == NULL || pad == NULL) {
+        return;
+    }
+    g_object_set(ps->video_selector, "active-pad", pad, NULL);
+}
+
+static void pipeline_use_splash(PipelineState *ps) {
+    if (ps == NULL || !ps->splash_enabled) {
+        return;
+    }
+    if (ps->selector_splash_pad != NULL) {
+        pipeline_select_active_pad(ps, ps->selector_splash_pad);
+    }
+}
+
+static void pipeline_use_network(PipelineState *ps) {
+    if (ps == NULL) {
+        return;
+    }
+    if (ps->selector_network_pad != NULL) {
+        pipeline_select_active_pad(ps, ps->selector_network_pad);
+    }
+}
+
+static gboolean pipeline_handle_splash_eos(PipelineState *ps, GstObject *src) {
+    if (ps == NULL || src == NULL || !ps->splash_enabled || ps->splash_bin == NULL) {
+        return FALSE;
+    }
+    if (!gst_object_has_ancestor(src, GST_OBJECT(ps->splash_bin))) {
+        return FALSE;
+    }
+    gboolean ok = gst_element_seek_simple(ps->splash_bin, GST_FORMAT_TIME,
+                                          GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT, 0);
+    if (!ok) {
+        LOGW("Failed to restart splash video");
+    }
+    gst_element_set_state(ps->splash_bin, GST_STATE_PLAYING);
+    pipeline_use_splash(ps);
+    return TRUE;
+}
+
 static void rtpbin_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_data) {
     (void)element;
     PipelineState *ps = (PipelineState *)user_data;
@@ -238,6 +280,8 @@ static void rtpbin_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_
     if (is_video) {
         if (!link_pad_to_queue(pad, ps->video_branch_entry, &ps->video_pad, "video")) {
             LOGW("Failed to link newly added video pad from rtpbin");
+        } else {
+            pipeline_use_network(ps);
         }
         return;
     }
@@ -257,6 +301,7 @@ static void rtpbin_pad_removed_cb(GstElement *element, GstPad *pad, gpointer use
         gst_object_unref(ps->video_pad);
         ps->video_pad = NULL;
         LOGI("rtpbin video pad removed");
+        pipeline_use_splash(ps);
     } else if (ps->audio_pad == pad) {
         gst_object_unref(ps->audio_pad);
         ps->audio_pad = NULL;
@@ -271,6 +316,164 @@ static void clear_stored_pad(GstPad **pad) {
     }
 }
 
+static void splash_decode_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_data);
+
+static gboolean build_splash_branch(PipelineState *ps, GstElement *pipeline, const AppCfg *cfg) {
+    if (ps == NULL || pipeline == NULL || cfg == NULL) {
+        return FALSE;
+    }
+
+    GstElement *bin = gst_bin_new("splash_bin");
+    GstElement *filesrc = gst_element_factory_make("filesrc", "splash_filesrc");
+    GstElement *decode = gst_element_factory_make("decodebin", "splash_decode");
+    GstElement *convert = gst_element_factory_make("videoconvert", "splash_convert");
+    GstElement *queue = gst_element_factory_make("queue", "splash_queue");
+
+    CHECK_ELEM(bin, "bin");
+    CHECK_ELEM(filesrc, "filesrc");
+    CHECK_ELEM(decode, "decodebin");
+    CHECK_ELEM(convert, "videoconvert");
+    CHECK_ELEM(queue, "queue");
+
+    g_object_set(filesrc, "location", cfg->splash_path, NULL);
+    g_object_set(queue, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
+
+    gst_bin_add_many(GST_BIN(bin), filesrc, decode, convert, queue, NULL);
+
+    if (!gst_element_link(filesrc, decode)) {
+        LOGE("Failed to link splash filesrc to decodebin");
+        goto fail;
+    }
+    if (!gst_element_link(convert, queue)) {
+        LOGE("Failed to link splash convert branch");
+        goto fail;
+    }
+
+    GstPad *queue_src = gst_element_get_static_pad(queue, "src");
+    if (queue_src == NULL) {
+        LOGE("Failed to get splash queue src pad");
+        goto fail;
+    }
+    GstPad *ghost = gst_ghost_pad_new("src", queue_src);
+    gst_object_unref(queue_src);
+    if (ghost == NULL) {
+        LOGE("Failed to create splash ghost pad");
+        goto fail;
+    }
+    gst_element_add_pad(bin, ghost);
+
+    ps->splash_bin = bin;
+    ps->splash_decode = decode;
+    ps->splash_convert = convert;
+    ps->splash_queue = queue;
+
+    g_signal_connect(decode, "pad-added", G_CALLBACK(splash_decode_pad_added_cb), ps);
+
+    GstPad *bin_src = gst_element_get_static_pad(bin, "src");
+    if (bin_src == NULL) {
+        LOGE("Failed to get splash bin src pad");
+        goto fail_disconnect;
+    }
+    GstPad *selector_pad = gst_element_get_request_pad(ps->video_selector, "sink_%u");
+    if (selector_pad == NULL) {
+        LOGE("Failed to request selector pad for splash branch");
+        gst_object_unref(bin_src);
+        goto fail_disconnect;
+    }
+    GstPadLinkReturn link_ret = gst_pad_link(bin_src, selector_pad);
+    gst_object_unref(bin_src);
+    if (link_ret != GST_PAD_LINK_OK) {
+        LOGE("Failed to link splash branch to selector (ret=%d)", link_ret);
+        gst_element_release_request_pad(ps->video_selector, selector_pad);
+        gst_object_unref(selector_pad);
+        goto fail_disconnect;
+    }
+    ps->selector_splash_pad = selector_pad;
+
+    gst_bin_add(GST_BIN(pipeline), bin);
+    ps->splash_enabled = TRUE;
+    return TRUE;
+
+fail_disconnect:
+    g_signal_handlers_disconnect_by_data(decode, ps);
+fail:
+    if (ps->selector_splash_pad != NULL) {
+        gst_element_release_request_pad(ps->video_selector, ps->selector_splash_pad);
+        gst_object_unref(ps->selector_splash_pad);
+        ps->selector_splash_pad = NULL;
+    }
+    ps->splash_bin = NULL;
+    ps->splash_decode = NULL;
+    ps->splash_convert = NULL;
+    ps->splash_queue = NULL;
+    ps->splash_enabled = FALSE;
+    if (bin != NULL) {
+        gst_object_unref(bin);
+    }
+    return FALSE;
+}
+
+static void splash_decode_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_data) {
+    (void)element;
+    PipelineState *ps = (PipelineState *)user_data;
+    if (ps == NULL || pad == NULL) {
+        return;
+    }
+
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    gboolean is_video = FALSE;
+    if (caps != NULL) {
+        const GstStructure *s = gst_caps_get_structure(caps, 0);
+        if (s != NULL) {
+            const gchar *name = gst_structure_get_name(s);
+            if (name != NULL && g_str_has_prefix(name, "video/")) {
+                is_video = TRUE;
+            }
+        }
+        gst_caps_unref(caps);
+    } else {
+        GstCaps *query_caps = gst_pad_query_caps(pad, NULL);
+        if (query_caps != NULL) {
+            const GstStructure *s = gst_caps_get_structure(query_caps, 0);
+            if (s != NULL) {
+                const gchar *name = gst_structure_get_name(s);
+                if (name != NULL && g_str_has_prefix(name, "video/")) {
+                    is_video = TRUE;
+                }
+            }
+            gst_caps_unref(query_caps);
+        }
+    }
+
+    if (!is_video) {
+        return;
+    }
+
+    if (ps->splash_convert == NULL) {
+        return;
+    }
+
+    GstPad *convert_sink = gst_element_get_static_pad(ps->splash_convert, "sink");
+    if (convert_sink == NULL) {
+        LOGW("Splash convert sink pad missing");
+        return;
+    }
+    if (gst_pad_is_linked(convert_sink)) {
+        gst_object_unref(convert_sink);
+        return;
+    }
+    GstPadLinkReturn link_ret = gst_pad_link(pad, convert_sink);
+    gst_object_unref(convert_sink);
+    if (link_ret != GST_PAD_LINK_OK) {
+        LOGW("Failed to link splash decode output (ret=%d)", link_ret);
+        return;
+    }
+
+    if (ps->video_pad == NULL) {
+        pipeline_use_splash(ps);
+    }
+}
+
 static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, const AppCfg *cfg) {
     GstElement *queue_pre = gst_element_factory_make("queue", "video_queue_pre");
     GstElement *depay = gst_element_factory_make("rtph265depay", "video_depay");
@@ -279,6 +482,11 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
     GstElement *queue_post = gst_element_factory_make("queue", "video_queue_post");
     GstElement *queue_sink = gst_element_factory_make("queue", "video_queue_sink");
     GstElement *sink = gst_element_factory_make("kmssink", "video_sink");
+    GstElement *selector = NULL;
+
+    gboolean use_splash = ps->splash_enabled;
+    GstPad *queue_post_src = NULL;
+    GstPad *selector_pad = NULL;
 
     CHECK_ELEM(queue_pre, "queue");
     CHECK_ELEM(depay, "rtph265depay");
@@ -287,6 +495,12 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
     CHECK_ELEM(queue_post, "queue");
     CHECK_ELEM(queue_sink, "queue");
     CHECK_ELEM(sink, "kmssink");
+
+    if (use_splash) {
+        selector = gst_element_factory_make("input-selector", "video_selector");
+        CHECK_ELEM(selector, "input-selector");
+        g_object_set(selector, "cache-buffers", FALSE, "sync-streams", FALSE, NULL);
+    }
 
     g_object_set(queue_pre, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_pre_buffers,
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
@@ -299,18 +513,80 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
     g_object_set(sink, "plane-id", cfg->plane_id, "sync", cfg->kmssink_sync ? TRUE : FALSE, "qos",
                  cfg->kmssink_qos ? TRUE : FALSE, "max-lateness", (gint64)cfg->max_lateness_ns, NULL);
 
-    gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL);
+    if (selector != NULL) {
+        gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, decoder, queue_post, selector, queue_sink, sink, NULL);
+    } else {
+        gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL);
+    }
 
-    if (!gst_element_link_many(queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL)) {
-        LOGE("Failed to link video branch");
-        return FALSE;
+    if (!gst_element_link_many(queue_pre, depay, parser, decoder, queue_post, NULL)) {
+        LOGE("Failed to link video decode branch");
+        goto fail;
+    }
+
+    if (selector != NULL) {
+        queue_post_src = gst_element_get_static_pad(queue_post, "src");
+        if (queue_post_src == NULL) {
+            LOGE("Failed to get queue_post src pad");
+            goto fail;
+        }
+        selector_pad = gst_element_get_request_pad(selector, "sink_%u");
+        if (selector_pad == NULL) {
+            LOGE("Failed to request selector pad for video branch");
+            goto fail;
+        }
+        GstPadLinkReturn link_ret = gst_pad_link(queue_post_src, selector_pad);
+        gst_object_unref(queue_post_src);
+        queue_post_src = NULL;
+        if (link_ret != GST_PAD_LINK_OK) {
+            LOGE("Failed to link video branch to selector (ret=%d)", link_ret);
+            goto fail;
+        }
+        ps->video_selector = selector;
+        ps->selector_network_pad = selector_pad;
+        if (!gst_element_link_many(selector, queue_sink, sink, NULL)) {
+            LOGE("Failed to link selector to sink");
+            goto fail;
+        }
+        if (!build_splash_branch(ps, pipeline, cfg)) {
+            LOGW("Splash screen pipeline disabled (setup failed)");
+        }
+    } else {
+        if (!gst_element_link_many(queue_post, queue_sink, sink, NULL)) {
+            LOGE("Failed to link video branch");
+            goto fail;
+        }
+        ps->video_selector = NULL;
+        ps->selector_network_pad = NULL;
+        ps->selector_splash_pad = NULL;
+        ps->splash_bin = NULL;
+        ps->splash_convert = NULL;
+        ps->splash_queue = NULL;
+        ps->splash_decode = NULL;
+        ps->splash_enabled = FALSE;
     }
 
     ps->video_branch_entry = queue_pre;
     ps->video_sink = sink;
+    if (ps->splash_enabled && ps->selector_splash_pad != NULL) {
+        pipeline_use_splash(ps);
+    }
     return TRUE;
 
 fail:
+    if (queue_post_src != NULL) {
+        gst_object_unref(queue_post_src);
+    }
+    if (selector != NULL && selector_pad != NULL) {
+        gst_element_release_request_pad(selector, selector_pad);
+        gst_object_unref(selector_pad);
+    }
+    if (selector != NULL) {
+        ps->video_selector = NULL;
+    }
+    ps->selector_network_pad = NULL;
+    ps->selector_splash_pad = NULL;
+    ps->splash_enabled = FALSE;
     ps->video_branch_entry = NULL;
     return FALSE;
 }
@@ -419,13 +695,19 @@ static gpointer bus_thread_func(gpointer data) {
             running = FALSE;
             break;
         }
-        case GST_MESSAGE_EOS:
+        case GST_MESSAGE_EOS: {
+            GstObject *src = GST_MESSAGE_SRC(msg);
+            if (pipeline_handle_splash_eos(ps, src)) {
+                gst_message_unref(msg);
+                continue;
+            }
             LOGI("Pipeline reached EOS");
             g_mutex_lock(&ps->lock);
             ps->stop_requested = TRUE;
             g_mutex_unlock(&ps->lock);
             running = FALSE;
             break;
+        }
         case GST_MESSAGE_STATE_CHANGED: {
             if (GST_MESSAGE_SRC(msg) == GST_OBJECT(ps->pipeline)) {
                 GstState old_state, new_state, pending;
@@ -470,6 +752,27 @@ static void cleanup_pipeline(PipelineState *ps) {
         g_signal_handlers_disconnect_by_data(ps->rtpbin, ps);
         ps->rtpbin = NULL;
     }
+    if (ps->splash_decode != NULL) {
+        g_signal_handlers_disconnect_by_data(ps->splash_decode, ps);
+    }
+    if (ps->video_selector != NULL) {
+        if (ps->selector_network_pad != NULL) {
+            gst_element_release_request_pad(ps->video_selector, ps->selector_network_pad);
+            gst_object_unref(ps->selector_network_pad);
+            ps->selector_network_pad = NULL;
+        }
+        if (ps->selector_splash_pad != NULL) {
+            gst_element_release_request_pad(ps->video_selector, ps->selector_splash_pad);
+            gst_object_unref(ps->selector_splash_pad);
+            ps->selector_splash_pad = NULL;
+        }
+    }
+    ps->video_selector = NULL;
+    ps->splash_bin = NULL;
+    ps->splash_decode = NULL;
+    ps->splash_convert = NULL;
+    ps->splash_queue = NULL;
+    ps->splash_enabled = FALSE;
     clear_stored_pad(&ps->video_pad);
     clear_stored_pad(&ps->audio_pad);
     ps->video_branch_entry = NULL;
@@ -511,6 +814,18 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->video_pad = NULL;
     ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
+    ps->video_selector = NULL;
+    ps->selector_network_pad = NULL;
+    ps->selector_splash_pad = NULL;
+    ps->splash_bin = NULL;
+    ps->splash_decode = NULL;
+    ps->splash_convert = NULL;
+    ps->splash_queue = NULL;
+    ps->splash_enabled = (cfg->splash_enable && cfg->splash_path[0] != '\0');
+    if (cfg->splash_enable && cfg->splash_path[0] == '\0') {
+        LOGW("Splash screen enabled but no splash-path configured; disabling splash playback");
+        ps->splash_enabled = FALSE;
+    }
     ps->cfg = cfg;
     ps->bus_thread_cpu_slot = 0;
 

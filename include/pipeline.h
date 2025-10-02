@@ -20,6 +20,13 @@ typedef struct {
     GstElement *video_sink;
     GstElement *video_branch_entry;
     GstElement *audio_branch_entry;
+    GstElement *video_selector;
+    GstPad *selector_network_pad;
+    GstPad *selector_splash_pad;
+    GstElement *splash_bin;
+    GstElement *splash_decode;
+    GstElement *splash_convert;
+    GstElement *splash_queue;
     GstPad *video_pad;
     GstPad *audio_pad;
     UdpReceiver *udp_receiver;
@@ -31,6 +38,7 @@ typedef struct {
     gboolean stop_requested;
     gboolean encountered_error;
     int audio_disabled;
+    gboolean splash_enabled;
     const AppCfg *cfg;
     int bus_thread_cpu_slot;
 } PipelineState;
