@@ -369,6 +369,11 @@ static gboolean build_splash_branch(PipelineState *ps, GstElement *pipeline, con
 
     g_signal_connect(decode, "pad-added", G_CALLBACK(splash_decode_pad_added_cb), ps);
 
+    if (!gst_bin_add(GST_BIN(pipeline), bin)) {
+        LOGE("Failed to add splash bin to pipeline");
+        goto fail_disconnect;
+    }
+
     GstPad *bin_src = gst_element_get_static_pad(bin, "src");
     if (bin_src == NULL) {
         LOGE("Failed to get splash bin src pad");
@@ -390,12 +395,15 @@ static gboolean build_splash_branch(PipelineState *ps, GstElement *pipeline, con
     }
     ps->selector_splash_pad = selector_pad;
 
-    gst_bin_add(GST_BIN(pipeline), bin);
     ps->splash_enabled = TRUE;
     return TRUE;
 
 fail_disconnect:
     g_signal_handlers_disconnect_by_data(decode, ps);
+    if (gst_bin_remove(GST_BIN(pipeline), bin)) {
+        /* ownership transferred back */
+        bin = NULL;
+    }
 fail:
     if (ps->selector_splash_pad != NULL) {
         gst_element_release_request_pad(ps->video_selector, ps->selector_splash_pad);
