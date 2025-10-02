@@ -221,6 +221,36 @@ static gint pad_payload_type(GstPad *pad) {
     return payload_type;
 }
 
+static gboolean pad_ssrc(GstPad *pad, guint32 *ssrc_out) {
+    if (pad == NULL || ssrc_out == NULL) {
+        return FALSE;
+    }
+
+    guint32 ssrc = 0;
+    GObjectClass *klass = G_OBJECT_GET_CLASS(pad);
+    if (klass != NULL && g_object_class_find_property(klass, "ssrc") != NULL) {
+        g_object_get(pad, "ssrc", &ssrc, NULL);
+        *ssrc_out = ssrc;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void pipeline_set_video_sink_sync(PipelineState *ps, gboolean sync) {
+    if (ps == NULL || ps->video_sink == NULL) {
+        return;
+    }
+
+    gboolean desired = sync ? TRUE : FALSE;
+    if (ps->sink_sync_active == desired) {
+        return;
+    }
+
+    g_object_set(ps->video_sink, "sync", desired, NULL);
+    ps->sink_sync_active = desired;
+}
+
 static void pipeline_select_active_pad(PipelineState *ps, GstPad *pad) {
     if (ps == NULL || ps->video_selector == NULL || pad == NULL) {
         return;
@@ -232,6 +262,10 @@ static void pipeline_use_splash(PipelineState *ps) {
     if (ps == NULL || !ps->splash_enabled) {
         return;
     }
+    pipeline_set_video_sink_sync(ps, TRUE);
+    if (ps->splash_bin != NULL) {
+        gst_element_set_state(ps->splash_bin, GST_STATE_PLAYING);
+    }
     if (ps->selector_splash_pad != NULL) {
         pipeline_select_active_pad(ps, ps->selector_splash_pad);
     }
@@ -241,6 +275,8 @@ static void pipeline_use_network(PipelineState *ps) {
     if (ps == NULL) {
         return;
     }
+    gboolean sync = (ps->cfg != NULL && ps->cfg->kmssink_sync) ? TRUE : FALSE;
+    pipeline_set_video_sink_sync(ps, sync);
     if (ps->selector_network_pad != NULL) {
         pipeline_select_active_pad(ps, ps->selector_network_pad);
     }
@@ -281,6 +317,11 @@ static void rtpbin_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_
         if (!link_pad_to_queue(pad, ps->video_branch_entry, &ps->video_pad, "video")) {
             LOGW("Failed to link newly added video pad from rtpbin");
         } else {
+            guint32 ssrc = 0;
+            if (pad_ssrc(pad, &ssrc)) {
+                ps->video_ssrc = ssrc;
+                ps->have_video_ssrc = TRUE;
+            }
             pipeline_use_network(ps);
         }
         return;
@@ -300,6 +341,8 @@ static void rtpbin_pad_removed_cb(GstElement *element, GstPad *pad, gpointer use
     if (ps->video_pad == pad) {
         gst_object_unref(ps->video_pad);
         ps->video_pad = NULL;
+        ps->have_video_ssrc = FALSE;
+        ps->video_ssrc = 0;
         LOGI("rtpbin video pad removed");
         pipeline_use_splash(ps);
     } else if (ps->audio_pad == pad) {
@@ -307,6 +350,40 @@ static void rtpbin_pad_removed_cb(GstElement *element, GstPad *pad, gpointer use
         ps->audio_pad = NULL;
         LOGI("rtpbin audio pad removed");
     }
+}
+
+static gboolean is_video_stream(PipelineState *ps, guint session, guint32 ssrc) {
+    if (ps == NULL) {
+        return FALSE;
+    }
+
+    if (ps->have_video_ssrc) {
+        return ps->video_ssrc == ssrc;
+    }
+
+    if (session == 0 && ps->video_pad != NULL) {
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+static void rtpbin_on_ssrc_active_cb(GstElement *element, guint session, guint ssrc, gpointer user_data) {
+    (void)element;
+    PipelineState *ps = (PipelineState *)user_data;
+    if (!is_video_stream(ps, session, (guint32)ssrc)) {
+        return;
+    }
+    pipeline_use_network(ps);
+}
+
+static void rtpbin_on_ssrc_timeout_cb(GstElement *element, guint session, guint ssrc, gpointer user_data) {
+    (void)element;
+    PipelineState *ps = (PipelineState *)user_data;
+    if (!is_video_stream(ps, session, (guint32)ssrc)) {
+        return;
+    }
+    pipeline_use_splash(ps);
 }
 
 static void clear_stored_pad(GstPad **pad) {
@@ -520,6 +597,7 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
     g_object_set(sink, "plane-id", cfg->plane_id, "sync", cfg->kmssink_sync ? TRUE : FALSE, "qos",
                  cfg->kmssink_qos ? TRUE : FALSE, "max-lateness", (gint64)cfg->max_lateness_ns, NULL);
+    ps->sink_sync_active = cfg->kmssink_sync ? TRUE : FALSE;
 
     if (selector != NULL) {
         gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, decoder, queue_post, selector, queue_sink, sink, NULL);
@@ -786,6 +864,9 @@ static void cleanup_pipeline(PipelineState *ps) {
     ps->video_branch_entry = NULL;
     ps->audio_branch_entry = NULL;
     ps->video_sink = NULL;
+    ps->sink_sync_active = FALSE;
+    ps->have_video_ssrc = FALSE;
+    ps->video_ssrc = 0;
     ps->source = NULL;
     if (ps->pipeline != NULL) {
         gst_object_unref(ps->pipeline);
@@ -829,6 +910,9 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->splash_decode = NULL;
     ps->splash_convert = NULL;
     ps->splash_queue = NULL;
+    ps->sink_sync_active = cfg->kmssink_sync ? TRUE : FALSE;
+    ps->have_video_ssrc = FALSE;
+    ps->video_ssrc = 0;
     ps->splash_enabled = (cfg->splash_enable && cfg->splash_path[0] != '\0');
     if (cfg->splash_enable && cfg->splash_path[0] == '\0') {
         LOGW("Splash screen enabled but no splash-path configured; disabling splash playback");
@@ -889,6 +973,8 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     g_signal_connect(rtpbin, "pad-added", G_CALLBACK(rtpbin_pad_added_cb), ps);
     g_signal_connect(rtpbin, "pad-removed", G_CALLBACK(rtpbin_pad_removed_cb), ps);
     g_signal_connect(rtpbin, "request-pt-map", G_CALLBACK(rtpbin_request_pt_map_cb), ps);
+    g_signal_connect(rtpbin, "on-ssrc-active", G_CALLBACK(rtpbin_on_ssrc_active_cb), ps);
+    g_signal_connect(rtpbin, "on-ssrc-timeout", G_CALLBACK(rtpbin_on_ssrc_timeout_cb), ps);
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {

@@ -27,6 +27,9 @@ typedef struct {
     GstElement *splash_decode;
     GstElement *splash_convert;
     GstElement *splash_queue;
+    gboolean sink_sync_active;
+    gboolean have_video_ssrc;
+    guint32 video_ssrc;
     GstPad *video_pad;
     GstPad *audio_pad;
     UdpReceiver *udp_receiver;
