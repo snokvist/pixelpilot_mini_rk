@@ -19,6 +19,7 @@ static void usage(const char *prog) {
             "  --no-udev                    (disable hotplug listener)\n"
             "  --config PATH                (load settings from ini file)\n"
             "  --udp-port N                 (default: 5600)\n"
+            "  --udp-fallback-port N        (default: 5601)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --latency-ms N               (default: 8)\n"
@@ -51,6 +52,7 @@ void cfg_defaults(AppCfg *c) {
     c->config_path[0] = '\0';
 
     c->udp_port = 5600;
+    c->udp_fallback_port = 5601;
     c->vid_pt = 97;
     c->aud_pt = 98;
     c->latency_ms = 8;
@@ -197,6 +199,8 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->use_udev = 0;
         } else if (!strcmp(argv[i], "--udp-port") && i + 1 < argc) {
             cfg->udp_port = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--udp-fallback-port") && i + 1 < argc) {
+            cfg->udp_fallback_port = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--vid-pt") && i + 1 < argc) {
             cfg->vid_pt = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-pt") && i + 1 < argc) {

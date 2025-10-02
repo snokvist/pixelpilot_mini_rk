@@ -84,7 +84,7 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
     gst_app_src_set_latency(appsrc, 0, 0);
     gst_app_src_set_max_bytes(appsrc, 4 * 1024 * 1024);
 
-    receiver = udp_receiver_create(cfg->udp_port, cfg->vid_pt, cfg->aud_pt, appsrc);
+    receiver = udp_receiver_create(cfg->udp_port, cfg->udp_fallback_port, cfg->vid_pt, cfg->aud_pt, appsrc);
     if (receiver == NULL) {
         LOGE("Failed to create UDP receiver");
         goto fail;
