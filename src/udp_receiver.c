@@ -23,6 +23,7 @@
 #endif
 
 #include <gst/app/gstappsrc.h>
+#include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
 
 #define RTP_MIN_HEADER 12
@@ -62,6 +63,7 @@ struct UdpReceiver {
     gboolean fallback_enabled;
     gboolean using_fallback;
     guint64 last_primary_data_ns;
+    gboolean discont_pending;
 
     GstBufferPool *pool;
     gsize buffer_size;
@@ -388,6 +390,10 @@ static gpointer receiver_thread(gpointer data) {
             if (now_ns - ur->last_primary_data_ns >= fallback_delay_ns) {
                 ur->using_fallback = TRUE;
                 LOGI("UDP receiver: switching to fallback port %d", ur->udp_fallback_port);
+                g_mutex_lock(&ur->lock);
+                reset_stats_locked(ur);
+                ur->discont_pending = TRUE;
+                g_mutex_unlock(&ur->lock);
             }
         }
 
@@ -443,18 +449,16 @@ static gpointer receiver_thread(gpointer data) {
         if (primary_ready) {
             if (ur->using_fallback) {
                 LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
+                g_mutex_lock(&ur->lock);
+                reset_stats_locked(ur);
+                ur->discont_pending = TRUE;
+                g_mutex_unlock(&ur->lock);
             }
             ur->using_fallback = FALSE;
             active_fd = ur->sockfd_primary;
             active_is_primary = TRUE;
-        } else if (fallback_ready && ur->fallback_enabled) {
-            if (!ur->using_fallback) {
-                ur->using_fallback = TRUE;
-                LOGI("UDP receiver: switching to fallback port %d", ur->udp_fallback_port);
-            }
-            if (ur->using_fallback) {
-                active_fd = ur->sockfd_secondary;
-            }
+        } else if (fallback_ready && ur->fallback_enabled && ur->using_fallback) {
+            active_fd = ur->sockfd_secondary;
         }
 
         if (active_fd < 0) {
@@ -501,7 +505,12 @@ static gpointer receiver_thread(gpointer data) {
         gst_buffer_set_size(gstbuf, (gsize)n);
 
         guint64 arrival_ns = get_time_ns();
+        gboolean mark_discont = FALSE;
         g_mutex_lock(&ur->lock);
+        if (ur->discont_pending) {
+            mark_discont = TRUE;
+            ur->discont_pending = FALSE;
+        }
         if (active_is_primary) {
             ur->last_primary_data_ns = arrival_ns;
         }
@@ -509,6 +518,10 @@ static gpointer receiver_thread(gpointer data) {
         g_mutex_unlock(&ur->lock);
 
         gst_buffer_unmap(gstbuf, &map);
+
+        if (mark_discont) {
+            GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_DISCONT);
+        }
 
         flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
         if (flow != GST_FLOW_OK) {
@@ -543,6 +556,7 @@ UdpReceiver *udp_receiver_create(int udp_port, int fallback_port, int vid_pt, in
     ur->fallback_enabled = (fallback_port > 0 && fallback_port != udp_port);
     ur->using_fallback = FALSE;
     ur->last_primary_data_ns = get_time_ns();
+    ur->discont_pending = TRUE;
     g_mutex_init(&ur->lock);
     ur->appsrc = GST_APP_SRC(gst_object_ref(appsrc));
     ur->stats_enabled = FALSE;
@@ -607,6 +621,7 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         return 0;
     }
     reset_stats_locked(ur);
+    ur->discont_pending = TRUE;
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
     g_mutex_unlock(&ur->lock);
