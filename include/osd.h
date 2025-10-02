@@ -9,6 +9,8 @@
 #include "osd_layout.h"
 #include "pipeline.h"
 
+#include <pixman.h>
+
 #define OSD_PLOT_MAX_SAMPLES 1024
 
 typedef struct {
@@ -115,6 +117,14 @@ typedef struct OSD {
             OsdBarState bar;
         } data;
     } elements[OSD_MAX_ELEMENTS];
+
+    pixman_image_t *glyph_cache[128];
+    pixman_image_t *fb_image;
+    pixman_image_t *solid_image;
+    uint32_t solid_color;
+    int glyph_w;
+    int glyph_h;
+    int glyph_scale;
 } OSD;
 
 void osd_init(OSD *osd);
