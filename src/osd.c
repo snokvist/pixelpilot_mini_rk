@@ -25,6 +25,8 @@
 #define DRM_PLANE_TYPE_CURSOR 2
 #endif
 
+static const uint8_t font8x8_basic[128][8];
+
 void osd_init(OSD *o) {
     memset(o, 0, sizeof(*o));
 }
