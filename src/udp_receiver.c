@@ -217,6 +217,10 @@ static void finalize_frame(struct UdpReceiver *ur) {
 }
 
 static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, guint64 arrival_ns) {
+    if (!ur->stats_enabled) {
+        return;
+    }
+
     RtpParseResult rtp;
     if (!parse_rtp(data, len, &rtp)) {
         return;
@@ -224,10 +228,6 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
 
     gboolean is_video = (rtp.payload_type == ur->vid_pt);
     gboolean is_audio = (rtp.payload_type == ur->aud_pt);
-
-    if (!ur->stats_enabled) {
-        return;
-    }
 
     UdpReceiverPacketSample sample = {0};
     sample.sequence = rtp.sequence;
@@ -414,9 +414,11 @@ static gpointer receiver_thread(gpointer data) {
 
         gst_buffer_set_size(gstbuf, (gsize)n);
 
-        guint64 arrival_ns = get_time_ns();
         g_mutex_lock(&ur->lock);
-        process_rtp(ur, map.data, (gsize)n, arrival_ns);
+        if (ur->stats_enabled) {
+            guint64 arrival_ns = get_time_ns();
+            process_rtp(ur, map.data, (gsize)n, arrival_ns);
+        }
         g_mutex_unlock(&ur->lock);
 
         gst_buffer_unmap(gstbuf, &map);
