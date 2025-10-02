@@ -278,6 +278,9 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
     GstElement *decoder = gst_element_factory_make("mppvideodec", "video_decoder");
     GstElement *queue_post = gst_element_factory_make("queue", "video_queue_post");
     GstElement *queue_sink = gst_element_factory_make("queue", "video_queue_sink");
+    GstElement *videorate = NULL;
+    GstElement *rate_capsfilter = NULL;
+    GstCaps *rate_caps = NULL;
     GstElement *sink = gst_element_factory_make("kmssink", "video_sink");
 
     CHECK_ELEM(queue_pre, "queue");
@@ -301,9 +304,33 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
 
     gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL);
 
-    if (!gst_element_link_many(queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL)) {
-        LOGE("Failed to link video branch");
-        return FALSE;
+    if (cfg->videorate_fps > 0) {
+        videorate = gst_element_factory_make("videorate", "video_videorate");
+        CHECK_ELEM(videorate, "videorate");
+        rate_capsfilter = gst_element_factory_make("capsfilter", "video_videorate_caps");
+        CHECK_ELEM(rate_capsfilter, "capsfilter");
+
+        rate_caps = gst_caps_new_simple("video/x-raw", "framerate", GST_TYPE_FRACTION, cfg->videorate_fps, 1, NULL);
+        if (rate_caps == NULL) {
+            LOGE("Failed to allocate videorate caps");
+            goto fail;
+        }
+        g_object_set(rate_capsfilter, "caps", rate_caps, NULL);
+        gst_caps_unref(rate_caps);
+        rate_caps = NULL;
+
+        gst_bin_add_many(GST_BIN(pipeline), videorate, rate_capsfilter, NULL);
+
+        if (!gst_element_link_many(queue_pre, depay, parser, decoder, queue_post, queue_sink, videorate, rate_capsfilter,
+                                   sink, NULL)) {
+            LOGE("Failed to link video branch with videorate");
+            return FALSE;
+        }
+    } else {
+        if (!gst_element_link_many(queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL)) {
+            LOGE("Failed to link video branch");
+            return FALSE;
+        }
     }
 
     ps->video_branch_entry = queue_pre;
@@ -311,6 +338,15 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
     return TRUE;
 
 fail:
+    if (rate_caps != NULL) {
+        gst_caps_unref(rate_caps);
+    }
+    if (videorate != NULL) {
+        gst_object_unref(videorate);
+    }
+    if (rate_capsfilter != NULL) {
+        gst_object_unref(rate_capsfilter);
+    }
     ps->video_branch_entry = NULL;
     return FALSE;
 }

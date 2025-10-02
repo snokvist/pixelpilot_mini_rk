@@ -651,6 +651,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_queue_sink_buffers = atoi(value);
             return 0;
         }
+        if (strcasecmp(key, "videorate-fps") == 0) {
+            cfg->videorate_fps = atoi(value);
+            return 0;
+        }
         if (strcasecmp(key, "use-gst-udpsrc") == 0) {
             int v = 0;
             if (parse_bool(value, &v) != 0) {

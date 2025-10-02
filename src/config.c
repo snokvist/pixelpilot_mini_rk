@@ -26,6 +26,7 @@ static void usage(const char *prog) {
             "  --video-queue-pre-buffers N  (default: 96)\n"
             "  --video-queue-post-buffers N (default: 8)\n"
             "  --video-queue-sink-buffers N (default: 8)\n"
+            "  --videorate-fps N            (insert videorate+caps at N fps; 0=disabled)\n"
             "  --gst-udpsrc                 (use GStreamer's udpsrc instead of appsrc bridge)\n"
             "  --no-gst-udpsrc              (force legacy appsrc/UEP receiver)\n"
             "  --max-lateness NANOSECS      (default: 20000000)\n"
@@ -61,6 +62,7 @@ void cfg_defaults(AppCfg *c) {
     c->video_queue_pre_buffers = 96;
     c->video_queue_post_buffers = 8;
     c->video_queue_sink_buffers = 8;
+    c->videorate_fps = 0;
     c->use_gst_udpsrc = 0;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 
@@ -211,6 +213,8 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->video_queue_post_buffers = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--video-queue-sink-buffers") && i + 1 < argc) {
             cfg->video_queue_sink_buffers = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--videorate-fps") && i + 1 < argc) {
+            cfg->videorate_fps = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--gst-udpsrc")) {
             cfg->use_gst_udpsrc = 1;
         } else if (!strcmp(argv[i], "--no-gst-udpsrc")) {
