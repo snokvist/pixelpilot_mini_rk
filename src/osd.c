@@ -25,8 +25,6 @@
 #define DRM_PLANE_TYPE_CURSOR 2
 #endif
 
-static const uint8_t font8x8_basic[128][8];
-
 void osd_init(OSD *o) {
     memset(o, 0, sizeof(*o));
 }
@@ -42,111 +40,14 @@ static int clampi(int v, int min_v, int max_v) {
 }
 
 static void osd_clear(OSD *o, uint32_t argb) {
-    if (!o->fb.map || o->w <= 0 || o->h <= 0) {
+    if (!o->fb.map) {
         return;
     }
-    pixman_fill((uint32_t *)o->fb.map, (int)(o->fb.pitch / 4), 32, 0, 0, o->w, o->h, argb);
-}
-
-static void osd_free_glyph_cache(OSD *o) {
-    for (size_t i = 0; i < 128; ++i) {
-        if (o->glyph_cache[i]) {
-            pixman_image_unref(o->glyph_cache[i]);
-            o->glyph_cache[i] = NULL;
-        }
+    uint32_t *px = (uint32_t *)o->fb.map;
+    size_t count = o->fb.size / 4;
+    for (size_t i = 0; i < count; ++i) {
+        px[i] = argb;
     }
-    if (o->solid_image) {
-        pixman_image_unref(o->solid_image);
-        o->solid_image = NULL;
-    }
-    if (o->fb_image) {
-        pixman_image_unref(o->fb_image);
-        o->fb_image = NULL;
-    }
-    o->glyph_w = 0;
-    o->glyph_h = 0;
-    o->glyph_scale = 0;
-    o->solid_color = 0;
-}
-
-static int osd_build_glyph_cache(OSD *o) {
-    if (!o->fb.map) {
-        return -1;
-    }
-
-    osd_free_glyph_cache(o);
-
-    o->glyph_scale = o->scale > 0 ? o->scale : 1;
-    o->glyph_w = 8 * o->glyph_scale;
-    o->glyph_h = 8 * o->glyph_scale;
-
-    o->fb_image =
-        pixman_image_create_bits(PIXMAN_a8r8g8b8, o->w, o->h, (uint32_t *)o->fb.map, (int)o->fb.pitch);
-    if (!o->fb_image) {
-        return -1;
-    }
-
-    for (size_t idx = 0; idx < 128; ++idx) {
-        pixman_image_t *glyph = pixman_image_create_bits(PIXMAN_a8, o->glyph_w, o->glyph_h, NULL, 0);
-        if (!glyph) {
-            osd_free_glyph_cache(o);
-            return -1;
-        }
-
-        uint8_t *dst = (uint8_t *)pixman_image_get_data(glyph);
-        int stride = pixman_image_get_stride(glyph);
-        memset(dst, 0, (size_t)stride * o->glyph_h);
-
-        for (int row = 0; row < 8; ++row) {
-            uint8_t bits = font8x8_basic[idx][row];
-            if (!bits) {
-                continue;
-            }
-            for (int col = 0; col < 8; ++col) {
-                if (!(bits & (1u << col))) {
-                    continue;
-                }
-                for (int sy = 0; sy < o->glyph_scale; ++sy) {
-                    uint8_t *row_px = dst + (row * o->glyph_scale + sy) * stride;
-                    for (int sx = 0; sx < o->glyph_scale; ++sx) {
-                        int px = col * o->glyph_scale + sx;
-                        row_px[px] = 0xFF;
-                    }
-                }
-            }
-        }
-
-        o->glyph_cache[idx] = glyph;
-    }
-
-    return 0;
-}
-
-static pixman_image_t *osd_get_solid_fill(OSD *o, uint32_t argb) {
-    if (o->solid_image && o->solid_color == argb) {
-        return o->solid_image;
-    }
-
-    if (o->solid_image) {
-        pixman_image_unref(o->solid_image);
-        o->solid_image = NULL;
-    }
-
-    pixman_color_t color = {
-        .alpha = (uint16_t)(((argb >> 24) & 0xFF) * 257),
-        .red = (uint16_t)(((argb >> 16) & 0xFF) * 257),
-        .green = (uint16_t)(((argb >> 8) & 0xFF) * 257),
-        .blue = (uint16_t)(((argb >> 0) & 0xFF) * 257),
-    };
-
-    o->solid_image = pixman_image_create_solid_fill(&color);
-    if (!o->solid_image) {
-        o->solid_color = 0;
-        return NULL;
-    }
-
-    o->solid_color = argb;
-    return o->solid_image;
 }
 
 // Font data derived from the public domain VGA 8x8 font by Marcel Sondaar,
@@ -221,61 +122,39 @@ static const uint8_t font8x8_basic[128][8] = {
 };
 
 static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale) {
-    if (!o->fb_image || !o->glyph_w || !o->glyph_h) {
-        return;
-    }
     if ((unsigned char)c >= 128) {
         return;
     }
     if (c >= 'a' && c <= 'z') {
         c = (char)(c - 'a' + 'A');
     }
-    if (scale != o->glyph_scale) {
-        return;
+    const uint8_t *glyph = font8x8_basic[(unsigned char)c];
+    uint32_t *fb = (uint32_t *)o->fb.map;
+    int pitch = o->fb.pitch / 4;
+    for (int row = 0; row < 8; ++row) {
+        uint8_t bits = glyph[row];
+        if (!bits) {
+            continue;
+        }
+        for (int col = 0; col < 8; ++col) {
+            if (!(bits & (1u << col))) {
+                continue;
+            }
+            for (int sy = 0; sy < scale; ++sy) {
+                int py = y + row * scale + sy;
+                if (py < 0 || py >= o->h) {
+                    continue;
+                }
+                uint32_t *row_px = fb + py * pitch;
+                for (int sx = 0; sx < scale; ++sx) {
+                    int px = x + col * scale + sx;
+                    if (px >= 0 && px < o->w) {
+                        row_px[px] = argb;
+                    }
+                }
+            }
+        }
     }
-
-    pixman_image_t *glyph = o->glyph_cache[(unsigned char)c];
-    if (!glyph) {
-        return;
-    }
-
-    pixman_image_t *solid = osd_get_solid_fill(o, argb);
-    if (!solid) {
-        return;
-    }
-
-    int glyph_w = o->glyph_w;
-    int glyph_h = o->glyph_h;
-    int dest_x = x;
-    int dest_y = y;
-    int src_x = 0;
-    int src_y = 0;
-    int width = glyph_w;
-    int height = glyph_h;
-
-    if (dest_x < 0) {
-        src_x = -dest_x;
-        width -= src_x;
-        dest_x = 0;
-    }
-    if (dest_y < 0) {
-        src_y = -dest_y;
-        height -= src_y;
-        dest_y = 0;
-    }
-    if (dest_x + width > o->w) {
-        width = o->w - dest_x;
-    }
-    if (dest_y + height > o->h) {
-        height = o->h - dest_y;
-    }
-
-    if (width <= 0 || height <= 0) {
-        return;
-    }
-
-    pixman_image_composite32(PIXMAN_OP_OVER, solid, glyph, o->fb_image, 0, 0, src_x, src_y, dest_x,
-                             dest_y, width, height);
 }
 
 static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, int scale) {
@@ -305,7 +184,14 @@ static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
     if (x0 >= x1 || y0 >= y1) {
         return;
     }
-    pixman_fill((uint32_t *)o->fb.map, (int)(o->fb.pitch / 4), 32, x0, y0, x1 - x0, y1 - y0, argb);
+    uint32_t *fb = (uint32_t *)o->fb.map;
+    int pitch = o->fb.pitch / 4;
+    for (int py = y0; py < y1; ++py) {
+        uint32_t *row = fb + py * pitch;
+        for (int px = x0; px < x1; ++px) {
+            row[px] = argb;
+        }
+    }
 }
 
 static void osd_store_rect(OSDRect *r, int x, int y, int w, int h) {
@@ -747,23 +633,6 @@ static void osd_draw_line(OSD *o, int x0, int y0, int x1, int y1, uint32_t argb)
     if (!o->fb.map) {
         return;
     }
-
-    int thickness = o->scale > 0 ? o->scale : 1;
-
-    if (x0 == x1) {
-        int y_start = y0 < y1 ? y0 : y1;
-        int height = (y1 > y0 ? (y1 - y0) : (y0 - y1)) + thickness;
-        osd_fill_rect(o, x0, y_start, thickness, height, argb);
-        return;
-    }
-
-    if (y0 == y1) {
-        int x_start = x0 < x1 ? x0 : x1;
-        int width = (x1 > x0 ? (x1 - x0) : (x0 - x1)) + thickness;
-        osd_fill_rect(o, x_start, y0, width, thickness, argb);
-        return;
-    }
-
     int dx = x1 > x0 ? (x1 - x0) : (x0 - x1);
     int sx = x0 < x1 ? 1 : -1;
     int dy = y1 > y0 ? (y0 - y1) : (y1 - y0);
@@ -773,7 +642,7 @@ static void osd_draw_line(OSD *o, int x0, int y0, int x1, int y1, uint32_t argb)
     int cx = x0;
     int cy = y0;
     while (1) {
-        osd_fill_rect(o, cx, cy, thickness, thickness, argb);
+        osd_fill_rect(o, cx, cy, o->scale > 0 ? o->scale : 1, o->scale > 0 ? o->scale : 1, argb);
         if (cx == x1 && cy == y1) {
             break;
         }
@@ -2462,7 +2331,6 @@ static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
 }
 
 static void osd_destroy_fb(int fd, OSD *o) {
-    osd_free_glyph_cache(o);
     destroy_dumb_fb(fd, &o->fb);
     o->fb.map = NULL;
 }
@@ -2508,13 +2376,6 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");
-        o->enabled = 0;
-        return -1;
-    }
-
-    if (osd_build_glyph_cache(o) != 0) {
-        LOGW("OSD: glyph cache init failed. Disabling OSD.");
-        osd_destroy_fb(fd, o);
         o->enabled = 0;
         return -1;
     }

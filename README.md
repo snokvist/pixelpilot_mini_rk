@@ -56,14 +56,3 @@ pipeline will then create a bare `udpsrc` element and UEP/receiver statistics ar
 Use this mode when integrating with external tooling or experimenting with alternative buffering strategies where the
 application-level receiver is unnecessary. Revert with `--no-gst-udpsrc` or by clearing the INI key to restore the default
 behaviour and regain access to the telemetry counters.
-
-## OSD rendering acceleration
-
-The on-screen display paths rely on libpixman for essentially all runtime blits so that the hot loops stay out of C. During
-`osd_setup` the firmware builds a glyph cache and a framebuffer wrapper so that text drawing reduces to
-`pixman_image_composite32` calls, while clears, filled rectangles, and the thickened segments used by the line renderer are
-emitted through `pixman_fill`. The CPU still decides the geometry (e.g. Bresenham stepping for diagonals), but the actual
-pixel writes are handled by pixman. These APIs automatically pick the best available implementation at runtime, which includes
-the hand-written ARM NEON fast paths shipped with upstream pixman when the library is built with NEON support. No additional
-compiler flags are required in this repository; simply linking against pixman allows the OSD to take advantage of NEON, SSE2,
-or other SIMD back ends that pixman exposes on the target CPU.

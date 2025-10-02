@@ -15,7 +15,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <sys/uio.h>
 #include <unistd.h>
 
 #ifndef GST_USE_UNSTABLE_API
@@ -218,10 +217,6 @@ static void finalize_frame(struct UdpReceiver *ur) {
 }
 
 static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, guint64 arrival_ns) {
-    if (!ur->stats_enabled) {
-        return;
-    }
-
     RtpParseResult rtp;
     if (!parse_rtp(data, len, &rtp)) {
         return;
@@ -229,6 +224,10 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
 
     gboolean is_video = (rtp.payload_type == ur->vid_pt);
     gboolean is_audio = (rtp.payload_type == ur->aud_pt);
+
+    if (!ur->stats_enabled) {
+        return;
+    }
 
     UdpReceiverPacketSample sample = {0};
     sample.sequence = rtp.sequence;
@@ -331,7 +330,7 @@ static gboolean buffer_pool_start(struct UdpReceiver *ur) {
     }
 
     GstStructure *config = gst_buffer_pool_get_config(pool);
-    gst_buffer_pool_config_set_params(config, NULL, UDP_RECEIVER_MAX_PACKET, 16, 0);
+    gst_buffer_pool_config_set_params(config, NULL, UDP_RECEIVER_MAX_PACKET, 4, 0);
     if (!gst_buffer_pool_set_config(pool, config)) {
         gst_object_unref(pool);
         return FALSE;
@@ -394,18 +393,8 @@ static gpointer receiver_thread(gpointer data) {
         }
 
         struct sockaddr_in src;
-        struct iovec iov = {
-            .iov_base = map.data,
-            .iov_len = max_pkt,
-        };
-        struct msghdr msg = {
-            .msg_name = &src,
-            .msg_namelen = sizeof(src),
-            .msg_iov = &iov,
-            .msg_iovlen = 1,
-        };
-
-        ssize_t n = recvmsg(ur->sockfd, &msg, 0);
+        socklen_t slen = sizeof(src);
+        ssize_t n = recvfrom(ur->sockfd, map.data, max_pkt, 0, (struct sockaddr *)&src, &slen);
         if (n < 0) {
             int err = errno;
             gst_buffer_unmap(gstbuf, &map);
@@ -423,25 +412,11 @@ static gpointer receiver_thread(gpointer data) {
             break;
         }
 
-        if ((msg.msg_flags & MSG_TRUNC) != 0) {
-            LOGW("UDP receiver: dropping truncated packet (size=%zd, max=%zu)", n, max_pkt);
-            g_mutex_lock(&ur->lock);
-            if (ur->stats_enabled) {
-                ur->stats.ignored_packets++;
-            }
-            g_mutex_unlock(&ur->lock);
-            gst_buffer_unmap(gstbuf, &map);
-            gst_buffer_unref(gstbuf);
-            continue;
-        }
-
         gst_buffer_set_size(gstbuf, (gsize)n);
 
+        guint64 arrival_ns = get_time_ns();
         g_mutex_lock(&ur->lock);
-        if (ur->stats_enabled) {
-            guint64 arrival_ns = get_time_ns();
-            process_rtp(ur, map.data, (gsize)n, arrival_ns);
-        }
+        process_rtp(ur, map.data, (gsize)n, arrival_ns);
         g_mutex_unlock(&ur->lock);
 
         gst_buffer_unmap(gstbuf, &map);
@@ -452,7 +427,6 @@ static gpointer receiver_thread(gpointer data) {
             if (flow == GST_FLOW_FLUSHING) {
                 g_usleep(1000);
             }
-            gst_buffer_unref(gstbuf);
         }
     }
 
