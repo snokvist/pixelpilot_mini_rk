@@ -24,6 +24,7 @@
 
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
+#include <gst/rtsp/gstrtspdefs.h>
 #include <gst/rtsp/gstrtsptransport.h>
 #include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
@@ -343,7 +344,8 @@ static gboolean rtsp_pipeline_start(struct UdpReceiver *ur, guint64 now_ns) {
     }
 
     g_object_set(src, "location", ur->rtsp_location, "latency", ur->rtsp_latency_ms, "protocols",
-                 ur->rtsp_protocols, NULL);
+                 ur->rtsp_protocols, "do-rtsp-keep-alive", TRUE, "keep-alive",
+                 GST_RTSP_KEEP_ALIVE_OPTIONS, NULL);
     g_object_set(queue, "leaky", 2, "max-size-buffers", 16, "max-size-bytes", (guint64)0,
                  "max-size-time", (guint64)0, NULL);
     g_object_set(sink, "emit-signals", FALSE, "sync", FALSE, "max-buffers", 8, "drop", TRUE, NULL);
