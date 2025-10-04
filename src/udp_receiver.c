@@ -25,6 +25,7 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
 #include <gst/rtsp/gstrtspdefs.h>
+#include <gst/rtsp/gstrtpsrc.h>
 #include <gst/rtsp/gstrtsptransport.h>
 #include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
@@ -230,6 +231,17 @@ static GstRTSPLowerTrans parse_rtsp_protocols_string(const char *value) {
     return protocols;
 }
 
+static GstCaps *pad_query_caps_or_current(GstPad *pad) {
+    if (pad == NULL) {
+        return NULL;
+    }
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    if (caps != NULL) {
+        return caps;
+    }
+    return gst_pad_query_caps(pad, NULL);
+}
+
 static gboolean caps_is_rtp_video(const GstCaps *caps) {
     if (caps == NULL) {
         return FALSE;
@@ -249,6 +261,13 @@ static gboolean caps_is_rtp_video(const GstCaps *caps) {
     return g_strcmp0(media, "video") == 0;
 }
 
+static gboolean rtsp_select_stream_cb(GstRTSPSrc *src, guint num, GstCaps *caps, gpointer user_data) {
+    (void)src;
+    (void)num;
+    (void)user_data;
+    return caps_is_rtp_video(caps);
+}
+
 static void rtsp_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_data) {
     (void)element;
     struct UdpReceiver *ur = (struct UdpReceiver *)user_data;
@@ -256,7 +275,7 @@ static void rtsp_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_da
         return;
     }
 
-    GstCaps *caps = gst_pad_get_current_caps(pad);
+    GstCaps *caps = pad_query_caps_or_current(pad);
     gboolean accept = caps_is_rtp_video(caps);
     if (caps != NULL) {
         gst_caps_unref(caps);
@@ -359,6 +378,7 @@ static gboolean rtsp_pipeline_start(struct UdpReceiver *ur, guint64 now_ns) {
 
     g_signal_connect(src, "pad-added", G_CALLBACK(rtsp_pad_added_cb), ur);
     g_signal_connect(src, "pad-removed", G_CALLBACK(rtsp_pad_removed_cb), ur);
+    g_signal_connect(src, "select-stream", G_CALLBACK(rtsp_select_stream_cb), ur);
 
     GstBus *bus = gst_element_get_bus(pipeline);
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
