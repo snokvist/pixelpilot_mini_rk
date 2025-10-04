@@ -20,6 +20,11 @@ static void usage(const char *prog) {
             "  --config PATH                (load settings from ini file)\n"
             "  --udp-port N                 (default: 5600)\n"
             "  --udp-fallback-port N        (default: 5601)\n"
+            "  --splash-rtsp                (enable RTSP splash fallback)\n"
+            "  --no-splash-rtsp             (disable RTSP splash fallback)\n"
+            "  --splash-rtsp-url URL        (RTSP URL for splash fallback)\n"
+            "  --splash-rtsp-latency N      (latency ms for RTSP splash; default: 100)\n"
+            "  --splash-rtsp-protocols STR  (RTSP protocols: udp|tcp|any; default: udp)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --latency-ms N               (default: 8)\n"
@@ -53,6 +58,10 @@ void cfg_defaults(AppCfg *c) {
 
     c->udp_port = 5600;
     c->udp_fallback_port = 5601;
+    c->splash_rtsp_enable = 0;
+    c->splash_rtsp_url[0] = '\0';
+    c->splash_rtsp_latency_ms = 100;
+    strcpy(c->splash_rtsp_protocols, "udp");
     c->vid_pt = 97;
     c->aud_pt = 98;
     c->latency_ms = 8;
@@ -201,6 +210,16 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->udp_port = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--udp-fallback-port") && i + 1 < argc) {
             cfg->udp_fallback_port = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--splash-rtsp")) {
+            cfg->splash_rtsp_enable = 1;
+        } else if (!strcmp(argv[i], "--no-splash-rtsp")) {
+            cfg->splash_rtsp_enable = 0;
+        } else if (!strcmp(argv[i], "--splash-rtsp-url") && i + 1 < argc) {
+            cli_copy_string(cfg->splash_rtsp_url, sizeof(cfg->splash_rtsp_url), argv[++i]);
+        } else if (!strcmp(argv[i], "--splash-rtsp-latency") && i + 1 < argc) {
+            cfg->splash_rtsp_latency_ms = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--splash-rtsp-protocols") && i + 1 < argc) {
+            cli_copy_string(cfg->splash_rtsp_protocols, sizeof(cfg->splash_rtsp_protocols), argv[++i]);
         } else if (!strcmp(argv[i], "--vid-pt") && i + 1 < argc) {
             cfg->vid_pt = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-pt") && i + 1 < argc) {

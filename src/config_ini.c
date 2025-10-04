@@ -624,12 +624,48 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->udp_fallback_port = atoi(value);
             return 0;
         }
+        if (strcasecmp(key, "splash-rtsp") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->splash_rtsp_enable = v;
+            return 0;
+        }
         if (strcasecmp(key, "video-pt") == 0) {
             cfg->vid_pt = atoi(value);
             return 0;
         }
         if (strcasecmp(key, "audio-pt") == 0) {
             cfg->aud_pt = atoi(value);
+            return 0;
+        }
+        return -1;
+    }
+    if (strcasecmp(section, "splash") == 0) {
+        if (strcasecmp(key, "rtsp-enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->splash_rtsp_enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "rtsp-url") == 0) {
+            ini_copy_string(cfg->splash_rtsp_url, sizeof(cfg->splash_rtsp_url), value);
+            return 0;
+        }
+        if (strcasecmp(key, "rtsp-latency-ms") == 0) {
+            cfg->splash_rtsp_latency_ms = atoi(value);
+            return 0;
+        }
+        if (strcasecmp(key, "rtsp-protocols") == 0) {
+            ini_copy_string(cfg->splash_rtsp_protocols, sizeof(cfg->splash_rtsp_protocols), value);
+            return 0;
+        }
+        if (strcasecmp(key, "url") == 0) {
+            ini_copy_string(cfg->splash_rtsp_url, sizeof(cfg->splash_rtsp_url), value);
+            cfg->splash_rtsp_enable = 1;
             return 0;
         }
         return -1;

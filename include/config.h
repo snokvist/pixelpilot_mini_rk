@@ -20,6 +20,10 @@ typedef struct {
 
     int udp_port;
     int udp_fallback_port;
+    int splash_rtsp_enable;
+    char splash_rtsp_url[256];
+    int splash_rtsp_latency_ms;
+    char splash_rtsp_protocols[32];
     int vid_pt;
     int aud_pt;
     int latency_ms;
