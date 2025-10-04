@@ -26,6 +26,7 @@
 #include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
 #include <gst/gstevent.h>
+#include <gst/gstpad.h>
 #include <gst/gstsegment.h>
 
 #define RTP_MIN_HEADER 12
@@ -193,30 +194,28 @@ static void push_stream_reset_events(struct UdpReceiver *ur) {
         return;
     }
 
-    if (!gst_app_src_push_event(ur->appsrc, gst_event_new_flush_start())) {
+    GstPad *srcpad = gst_element_get_static_pad(GST_ELEMENT(ur->appsrc), "src");
+    if (srcpad == NULL) {
+        LOGW("UDP receiver: failed to get appsrc pad for reset events");
+        return;
+    }
+
+    if (!gst_pad_push_event(srcpad, gst_event_new_flush_start())) {
         LOGW("UDP receiver: failed to push flush-start event");
     }
 
-    if (!gst_app_src_push_event(ur->appsrc, gst_event_new_flush_stop(TRUE))) {
+    if (!gst_pad_push_event(srcpad, gst_event_new_flush_stop(TRUE))) {
         LOGW("UDP receiver: failed to push flush-stop event");
     }
 
     GstSegment segment;
     gst_segment_init(&segment, GST_FORMAT_TIME);
-    segment.start = 0;
-    segment.time = 0;
-    segment.position = 0;
 
-    GstEvent *seg_event = gst_event_new_segment(&segment);
-    if (seg_event == NULL) {
-        LOGW("UDP receiver: failed to allocate new-segment event");
-        return;
-    }
-
-    if (!gst_app_src_push_event(ur->appsrc, seg_event)) {
+    if (!gst_pad_push_event(srcpad, gst_event_new_segment(&segment))) {
         LOGW("UDP receiver: failed to push new-segment event");
-        gst_event_unref(seg_event);
     }
+
+    gst_object_unref(srcpad);
 }
 
 static void update_bitrate(struct UdpReceiver *ur, guint64 arrival_ns, guint32 bytes) {
