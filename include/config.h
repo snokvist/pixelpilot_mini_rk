@@ -19,6 +19,7 @@ typedef struct {
     int use_udev;
 
     int udp_port;
+    int udp_fallback_port;
     int vid_pt;
     int aud_pt;
     int latency_ms;

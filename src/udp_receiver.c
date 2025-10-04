@@ -8,6 +8,7 @@
 #include <math.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <poll.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -22,6 +23,7 @@
 #endif
 
 #include <gst/app/gstappsrc.h>
+#include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
 
 #define RTP_MIN_HEADER 12
@@ -53,9 +55,15 @@ struct UdpReceiver {
     gboolean stats_enabled;
 
     int udp_port;
+    int udp_fallback_port;
     int vid_pt;
     int aud_pt;
-    int sockfd;
+    int sockfd_primary;
+    int sockfd_secondary;
+    gboolean fallback_enabled;
+    gboolean using_fallback;
+    guint64 last_primary_data_ns;
+    gboolean discont_pending;
 
     GstBufferPool *pool;
     gsize buffer_size;
@@ -358,6 +366,8 @@ static void buffer_pool_stop(struct UdpReceiver *ur) {
 static gpointer receiver_thread(gpointer data) {
     struct UdpReceiver *ur = (struct UdpReceiver *)data;
     const gsize max_pkt = ur->buffer_size > 0 ? ur->buffer_size : UDP_RECEIVER_MAX_PACKET;
+    const guint64 fallback_delay_ns = 2000000000ull; // 2 seconds
+    const gint poll_timeout_ms = 100;
 
     cpu_set_t thread_mask;
     if (cfg_get_thread_affinity(ur->cfg, ur->cpu_slot, &thread_mask)) {
@@ -373,6 +383,81 @@ static gpointer receiver_thread(gpointer data) {
         g_mutex_unlock(&ur->lock);
         if (stop) {
             break;
+        }
+
+        guint64 now_ns = get_time_ns();
+        if (ur->fallback_enabled && !ur->using_fallback) {
+            if (now_ns - ur->last_primary_data_ns >= fallback_delay_ns) {
+                ur->using_fallback = TRUE;
+                LOGI("UDP receiver: switching to fallback port %d", ur->udp_fallback_port);
+                g_mutex_lock(&ur->lock);
+                reset_stats_locked(ur);
+                ur->discont_pending = TRUE;
+                g_mutex_unlock(&ur->lock);
+            }
+        }
+
+        struct pollfd fds[2];
+        int nfds = 0;
+        int idx_primary = -1;
+        int idx_fallback = -1;
+        if (ur->sockfd_primary >= 0) {
+            idx_primary = nfds;
+            fds[nfds].fd = ur->sockfd_primary;
+            fds[nfds].events = POLLIN;
+            fds[nfds].revents = 0;
+            nfds++;
+        }
+        if (ur->fallback_enabled && ur->sockfd_secondary >= 0) {
+            idx_fallback = nfds;
+            fds[nfds].fd = ur->sockfd_secondary;
+            fds[nfds].events = POLLIN;
+            fds[nfds].revents = 0;
+            nfds++;
+        }
+
+        if (nfds == 0) {
+            g_usleep(1000);
+            continue;
+        }
+
+        int pret = poll(fds, nfds, poll_timeout_ms);
+        if (pret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            LOGE("UDP receiver: poll failed: %s", g_strerror(errno));
+            break;
+        }
+        if (pret == 0) {
+            continue;
+        }
+
+        gboolean primary_ready = (idx_primary >= 0) && (fds[idx_primary].revents & POLLIN);
+        gboolean fallback_ready = (idx_fallback >= 0) && (fds[idx_fallback].revents & POLLIN);
+
+        if (idx_primary >= 0 && (fds[idx_primary].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            LOGW("UDP receiver: primary socket error (events=0x%x)", fds[idx_primary].revents);
+        }
+        if (idx_fallback >= 0 && (fds[idx_fallback].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            LOGW("UDP receiver: fallback socket error (events=0x%x)", fds[idx_fallback].revents);
+        }
+
+        int active_fd = -1;
+        gboolean active_is_primary = FALSE;
+
+        gboolean switching_from_fallback = FALSE;
+
+        if (primary_ready) {
+            active_fd = ur->sockfd_primary;
+            active_is_primary = TRUE;
+            switching_from_fallback = ur->using_fallback;
+        } else if (fallback_ready && ur->fallback_enabled && ur->using_fallback) {
+            active_fd = ur->sockfd_secondary;
+        }
+
+        if (active_fd < 0) {
+            continue;
         }
 
         GstBuffer *gstbuf = NULL;
@@ -394,7 +479,7 @@ static gpointer receiver_thread(gpointer data) {
 
         struct sockaddr_in src;
         socklen_t slen = sizeof(src);
-        ssize_t n = recvfrom(ur->sockfd, map.data, max_pkt, 0, (struct sockaddr *)&src, &slen);
+        ssize_t n = recvfrom(active_fd, map.data, max_pkt, 0, (struct sockaddr *)&src, &slen);
         if (n < 0) {
             int err = errno;
             gst_buffer_unmap(gstbuf, &map);
@@ -415,11 +500,34 @@ static gpointer receiver_thread(gpointer data) {
         gst_buffer_set_size(gstbuf, (gsize)n);
 
         guint64 arrival_ns = get_time_ns();
+        gboolean mark_discont = FALSE;
         g_mutex_lock(&ur->lock);
+        if (ur->discont_pending) {
+            mark_discont = TRUE;
+            ur->discont_pending = FALSE;
+        }
+        if (active_is_primary) {
+            ur->last_primary_data_ns = arrival_ns;
+        }
         process_rtp(ur, map.data, (gsize)n, arrival_ns);
         g_mutex_unlock(&ur->lock);
 
         gst_buffer_unmap(gstbuf, &map);
+
+        if (switching_from_fallback && ur->using_fallback) {
+            LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
+            g_mutex_lock(&ur->lock);
+            reset_stats_locked(ur);
+            ur->discont_pending = TRUE;
+            g_mutex_unlock(&ur->lock);
+            mark_discont = TRUE;
+            ur->using_fallback = FALSE;
+        }
+
+        if (mark_discont) {
+            GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_DISCONT);
+            GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
+        }
 
         flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
         if (flow != GST_FLOW_OK) {
@@ -437,7 +545,7 @@ static gpointer receiver_thread(gpointer data) {
     return NULL;
 }
 
-UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *appsrc) {
+UdpReceiver *udp_receiver_create(int udp_port, int fallback_port, int vid_pt, int aud_pt, GstAppSrc *appsrc) {
     if (appsrc == NULL) {
         return NULL;
     }
@@ -446,9 +554,15 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
         return NULL;
     }
     ur->udp_port = udp_port;
+    ur->udp_fallback_port = fallback_port;
     ur->vid_pt = vid_pt;
     ur->aud_pt = aud_pt;
-    ur->sockfd = -1;
+    ur->sockfd_primary = -1;
+    ur->sockfd_secondary = -1;
+    ur->fallback_enabled = (fallback_port > 0 && fallback_port != udp_port);
+    ur->using_fallback = FALSE;
+    ur->last_primary_data_ns = get_time_ns();
+    ur->discont_pending = TRUE;
     g_mutex_init(&ur->lock);
     ur->appsrc = GST_APP_SRC(gst_object_ref(appsrc));
     ur->stats_enabled = FALSE;
@@ -457,25 +571,30 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     return ur;
 }
 
-static int setup_socket(struct UdpReceiver *ur) {
+static int setup_socket_for_port(int port, int *out_fd, const char *label) {
+    if (out_fd == NULL) {
+        return -1;
+    }
+
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        LOGE("UDP receiver: socket(): %s", g_strerror(errno));
+        LOGE("UDP receiver: socket(%s): %s", label != NULL ? label : "udp", g_strerror(errno));
         return -1;
     }
 
     int reuse = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
-        LOGW("UDP receiver: setsockopt(SO_REUSEADDR) failed: %s", g_strerror(errno));
+        LOGW("UDP receiver: setsockopt(%s, SO_REUSEADDR) failed: %s", label != NULL ? label : "udp",
+             g_strerror(errno));
     }
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)ur->udp_port);
+    addr.sin_port = htons((uint16_t)port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        LOGE("UDP receiver: bind(%d): %s", ur->udp_port, g_strerror(errno));
+        LOGE("UDP receiver: bind(%s:%d): %s", label != NULL ? label : "udp", port, g_strerror(errno));
         close(fd);
         return -1;
     }
@@ -484,15 +603,17 @@ static int setup_socket(struct UdpReceiver *ur) {
     tv.tv_sec = 0;
     tv.tv_usec = 500000; // 500 ms timeout to allow graceful shutdown
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
-        LOGW("UDP receiver: setsockopt(SO_RCVTIMEO) failed: %s", g_strerror(errno));
+        LOGW("UDP receiver: setsockopt(%s, SO_RCVTIMEO) failed: %s",
+             label != NULL ? label : "udp", g_strerror(errno));
     }
 
     int buf_bytes = 4 * 1024 * 1024;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_bytes, sizeof(buf_bytes)) < 0) {
-        LOGW("UDP receiver: setsockopt(SO_RCVBUF) failed: %s", g_strerror(errno));
+        LOGW("UDP receiver: setsockopt(%s, SO_RCVBUF) failed: %s", label != NULL ? label : "udp",
+             g_strerror(errno));
     }
 
-    ur->sockfd = fd;
+    *out_fd = fd;
     return 0;
 }
 
@@ -506,18 +627,37 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         return 0;
     }
     reset_stats_locked(ur);
+    ur->discont_pending = TRUE;
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
     g_mutex_unlock(&ur->lock);
 
-    if (setup_socket(ur) != 0) {
+    if (setup_socket_for_port(ur->udp_port, &ur->sockfd_primary, "primary") != 0) {
         return -1;
     }
 
+    if (ur->fallback_enabled) {
+        if (setup_socket_for_port(ur->udp_fallback_port, &ur->sockfd_secondary, "fallback") != 0) {
+            LOGW("UDP receiver: failed to bind fallback port %d, disabling fallback", ur->udp_fallback_port);
+            ur->sockfd_secondary = -1;
+            ur->fallback_enabled = FALSE;
+            ur->using_fallback = FALSE;
+        }
+    }
+
+    ur->using_fallback = FALSE;
+    ur->last_primary_data_ns = get_time_ns();
+
     if (!buffer_pool_start(ur)) {
         LOGE("UDP receiver: failed to start buffer pool");
-        close(ur->sockfd);
-        ur->sockfd = -1;
+        if (ur->sockfd_primary >= 0) {
+            close(ur->sockfd_primary);
+            ur->sockfd_primary = -1;
+        }
+        if (ur->sockfd_secondary >= 0) {
+            close(ur->sockfd_secondary);
+            ur->sockfd_secondary = -1;
+        }
         return -1;
     }
 
@@ -532,8 +672,14 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         g_mutex_lock(&ur->lock);
         ur->running = FALSE;
         g_mutex_unlock(&ur->lock);
-        close(ur->sockfd);
-        ur->sockfd = -1;
+        if (ur->sockfd_primary >= 0) {
+            close(ur->sockfd_primary);
+            ur->sockfd_primary = -1;
+        }
+        if (ur->sockfd_secondary >= 0) {
+            close(ur->sockfd_secondary);
+            ur->sockfd_secondary = -1;
+        }
         buffer_pool_stop(ur);
         return -1;
     }
@@ -552,8 +698,11 @@ void udp_receiver_stop(UdpReceiver *ur) {
     ur->stop_requested = TRUE;
     g_mutex_unlock(&ur->lock);
 
-    if (ur->sockfd >= 0) {
-        shutdown(ur->sockfd, SHUT_RDWR);
+    if (ur->sockfd_primary >= 0) {
+        shutdown(ur->sockfd_primary, SHUT_RDWR);
+    }
+    if (ur->sockfd_secondary >= 0) {
+        shutdown(ur->sockfd_secondary, SHUT_RDWR);
     }
 
     if (ur->thread != NULL) {
@@ -561,9 +710,13 @@ void udp_receiver_stop(UdpReceiver *ur) {
         ur->thread = NULL;
     }
 
-    if (ur->sockfd >= 0) {
-        close(ur->sockfd);
-        ur->sockfd = -1;
+    if (ur->sockfd_primary >= 0) {
+        close(ur->sockfd_primary);
+        ur->sockfd_primary = -1;
+    }
+    if (ur->sockfd_secondary >= 0) {
+        close(ur->sockfd_secondary);
+        ur->sockfd_secondary = -1;
     }
 
     gst_app_src_end_of_stream(ur->appsrc);
