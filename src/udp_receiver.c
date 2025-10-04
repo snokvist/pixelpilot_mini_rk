@@ -25,6 +25,8 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
+#include <gst/gstevent.h>
+#include <gst/gstsegment.h>
 
 #define RTP_MIN_HEADER 12
 #define FRAME_EWMA_ALPHA 0.1
@@ -184,6 +186,29 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->bitrate_window_bytes = 0;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
+}
+
+static void push_stream_reset_events(struct UdpReceiver *ur) {
+    if (ur == NULL || ur->appsrc == NULL) {
+        return;
+    }
+
+    GstEvent *event = gst_event_new_flush_start();
+    if (!gst_element_send_event(GST_ELEMENT(ur->appsrc), event)) {
+        LOGW("UDP receiver: failed to push flush-start event");
+    }
+
+    event = gst_event_new_flush_stop(TRUE);
+    if (!gst_element_send_event(GST_ELEMENT(ur->appsrc), event)) {
+        LOGW("UDP receiver: failed to push flush-stop event");
+    }
+
+    GstSegment segment;
+    gst_segment_init(&segment, GST_FORMAT_TIME);
+    event = gst_event_new_segment(&segment);
+    if (!gst_element_send_event(GST_ELEMENT(ur->appsrc), event)) {
+        LOGW("UDP receiver: failed to push new-segment event");
+    }
 }
 
 static void update_bitrate(struct UdpReceiver *ur, guint64 arrival_ns, guint32 bytes) {
@@ -390,6 +415,7 @@ static gpointer receiver_thread(gpointer data) {
             if (now_ns - ur->last_primary_data_ns >= fallback_delay_ns) {
                 ur->using_fallback = TRUE;
                 LOGI("UDP receiver: switching to fallback port %d", ur->udp_fallback_port);
+                push_stream_reset_events(ur);
                 g_mutex_lock(&ur->lock);
                 reset_stats_locked(ur);
                 ur->discont_pending = TRUE;
@@ -516,6 +542,7 @@ static gpointer receiver_thread(gpointer data) {
 
         if (switching_from_fallback && ur->using_fallback) {
             LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
+            push_stream_reset_events(ur);
             g_mutex_lock(&ur->lock);
             reset_stats_locked(ur);
             ur->discont_pending = TRUE;
