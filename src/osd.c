@@ -239,6 +239,27 @@ static const char *osd_key_copy_lower(const char *src, char *dst, size_t dst_sz)
     return dst;
 }
 
+static void osd_apply_legacy_aliases(char *buf, size_t buf_sz) {
+    if (!buf || buf_sz == 0) {
+        return;
+    }
+
+    struct {
+        const char *legacy;
+        const char *canonical;
+    } aliases[] = {
+        {"udp.bitrate.latest_mb", "udp.bitrate.latest_mbps"},
+        {"udp.bitrate.avg_mb", "udp.bitrate.avg_mbps"},
+    };
+
+    for (size_t i = 0; i < sizeof(aliases) / sizeof(aliases[0]); ++i) {
+        if (strcmp(buf, aliases[i].legacy) == 0) {
+            snprintf(buf, buf_sz, "%s", aliases[i].canonical);
+            return;
+        }
+    }
+}
+
 static const char *osd_token_normalize(const char *token, char *buf, size_t buf_sz) {
     const char *normalized = osd_key_copy_lower(token, buf, buf_sz);
     if (normalized != buf) {
@@ -265,6 +286,8 @@ static const char *osd_token_normalize(const char *token, char *buf, size_t buf_
             }
         }
     }
+
+    osd_apply_legacy_aliases(buf, buf_sz);
 
     return buf;
 }
@@ -602,6 +625,8 @@ static const char *osd_metric_normalize(const char *metric_key, char *buf, size_
             }
         }
     }
+
+    osd_apply_legacy_aliases(buf, buf_sz);
 
     return buf;
 }
