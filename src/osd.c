@@ -229,10 +229,6 @@ static const char *osd_key_copy_lower(const char *src, char *dst, size_t dst_sz)
     memcpy(dst, src, len);
     dst[len] = '\0';
 
-    if (src[len] != '\0') {
-        return src;
-    }
-
     for (size_t i = 0; i < len; ++i) {
         unsigned char c = (unsigned char)dst[i];
         if (isupper(c)) {
@@ -247,6 +243,19 @@ static const char *osd_token_normalize(const char *token, char *buf, size_t buf_
     const char *normalized = osd_key_copy_lower(token, buf, buf_sz);
     if (normalized != buf) {
         return normalized;
+    }
+
+    size_t len = strlen(buf);
+    size_t start = 0;
+    while (buf[start] != '\0' && isspace((unsigned char)buf[start])) {
+        start++;
+    }
+    if (start > 0) {
+        memmove(buf, buf + start, len - start + 1);
+        len -= start;
+    }
+    while (len > 0 && isspace((unsigned char)buf[len - 1])) {
+        buf[--len] = '\0';
     }
 
     if (!strchr(buf, '.')) {
