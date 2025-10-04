@@ -29,6 +29,7 @@
 #include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
 #include <glib-object.h>
+#include <glib.h>
 
 typedef struct _GstRTSPSrc GstRTSPSrc;
 
@@ -90,6 +91,7 @@ struct UdpReceiver {
     GstBus *rtsp_bus;
     GstPad *rtsp_pad;
     gboolean rtsp_pad_linked;
+    GMainContext *rtsp_context;
 
     GstBufferPool *pool;
     gsize buffer_size;
@@ -379,6 +381,17 @@ static gboolean rtsp_pipeline_start(struct UdpReceiver *ur, guint64 now_ns) {
 
     ur->rtsp_last_attempt_ns = now_ns;
 
+    gboolean context_pushed = FALSE;
+    if (ur->rtsp_context == NULL) {
+        ur->rtsp_context = g_main_context_new();
+        if (ur->rtsp_context == NULL) {
+            LOGE("UDP receiver: failed to allocate RTSP main context");
+            return FALSE;
+        }
+    }
+    g_main_context_push_thread_default(ur->rtsp_context);
+    context_pushed = TRUE;
+
     GstElement *pipeline = gst_pipeline_new("udp-rtsp-fallback");
     GstElement *src = gst_element_factory_make("rtspsrc", "udp_receiver_rtspsrc");
     GstElement *queue = gst_element_factory_make("queue", "udp_receiver_rtspqueue");
@@ -397,6 +410,9 @@ static gboolean rtsp_pipeline_start(struct UdpReceiver *ur, guint64 now_ns) {
         if (sink != NULL) {
             gst_object_unref(sink);
         }
+        if (context_pushed) {
+            g_main_context_pop_thread_default(ur->rtsp_context);
+        }
         return FALSE;
     }
 
@@ -413,6 +429,9 @@ static gboolean rtsp_pipeline_start(struct UdpReceiver *ur, guint64 now_ns) {
     if (!gst_element_link(queue, sink)) {
         LOGE("UDP receiver: failed to link RTSP fallback queue to appsink");
         gst_object_unref(pipeline);
+        if (context_pushed) {
+            g_main_context_pop_thread_default(ur->rtsp_context);
+        }
         return FALSE;
     }
 
@@ -434,6 +453,9 @@ static gboolean rtsp_pipeline_start(struct UdpReceiver *ur, guint64 now_ns) {
         }
         gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(pipeline);
+        if (context_pushed) {
+            g_main_context_pop_thread_default(ur->rtsp_context);
+        }
         return FALSE;
     }
 
@@ -443,6 +465,10 @@ static gboolean rtsp_pipeline_start(struct UdpReceiver *ur, guint64 now_ns) {
     ur->rtsp_bus = bus;
     ur->rtsp_pad = NULL;
     ur->rtsp_pad_linked = FALSE;
+
+    if (context_pushed) {
+        g_main_context_pop_thread_default(ur->rtsp_context);
+    }
 
     LOGI("UDP receiver: RTSP fallback connecting to %s", ur->rtsp_location);
     return TRUE;
@@ -894,9 +920,19 @@ static gpointer receiver_thread(gpointer data) {
         }
 
         if (ur->fallback_mode == FALLBACK_RTSP && ur->fallback_enabled && ur->using_fallback) {
+            if (ur->rtsp_context != NULL) {
+                while (g_main_context_pending(ur->rtsp_context)) {
+                    g_main_context_iteration(ur->rtsp_context, FALSE);
+                }
+            }
             if (!rtsp_pipeline_start(ur, now_ns)) {
                 g_usleep(5000);
                 continue;
+            }
+            if (ur->rtsp_context != NULL) {
+                while (g_main_context_pending(ur->rtsp_context)) {
+                    g_main_context_iteration(ur->rtsp_context, FALSE);
+                }
             }
             if (!rtsp_pipeline_poll_bus(ur)) {
                 rtsp_pipeline_stop(ur);
@@ -1036,6 +1072,7 @@ UdpReceiver *udp_receiver_create(const AppCfg *cfg, GstAppSrc *appsrc) {
     ur->rtsp_bus = NULL;
     ur->rtsp_pad = NULL;
     ur->rtsp_pad_linked = FALSE;
+    ur->rtsp_context = NULL;
 
     if (cfg->splash_rtsp_enable) {
         const char *rtsp_url = cfg->splash_rtsp_url[0] != '\0'
@@ -1233,6 +1270,10 @@ void udp_receiver_destroy(UdpReceiver *ur) {
         ur->appsrc = NULL;
     }
     buffer_pool_stop(ur);
+    if (ur->rtsp_context != NULL) {
+        g_main_context_unref(ur->rtsp_context);
+        ur->rtsp_context = NULL;
+    }
     g_mutex_clear(&ur->lock);
     g_free(ur);
 }
