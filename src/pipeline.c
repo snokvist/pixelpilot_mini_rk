@@ -74,8 +74,9 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, UdpReceiver **receiv
         goto fail;
     }
 
-    g_object_set(appsrc_elem, "is-live", TRUE, "format", GST_FORMAT_BYTES, "stream-type",
-                 GST_APP_STREAM_TYPE_STREAM, "max-bytes", (guint64)(4 * 1024 * 1024), NULL);
+    g_object_set(appsrc_elem, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
+                 GST_APP_STREAM_TYPE_STREAM, "max-bytes", (guint64)(4 * 1024 * 1024),
+                 "do-timestamp", TRUE, NULL);
 
     GstAppSrc *appsrc = GST_APP_SRC(appsrc_elem);
     gst_app_src_set_caps(appsrc, caps);

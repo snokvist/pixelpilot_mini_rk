@@ -446,17 +446,12 @@ static gpointer receiver_thread(gpointer data) {
         int active_fd = -1;
         gboolean active_is_primary = FALSE;
 
+        gboolean switching_from_fallback = FALSE;
+
         if (primary_ready) {
-            if (ur->using_fallback) {
-                LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
-                g_mutex_lock(&ur->lock);
-                reset_stats_locked(ur);
-                ur->discont_pending = TRUE;
-                g_mutex_unlock(&ur->lock);
-            }
-            ur->using_fallback = FALSE;
             active_fd = ur->sockfd_primary;
             active_is_primary = TRUE;
+            switching_from_fallback = ur->using_fallback;
         } else if (fallback_ready && ur->fallback_enabled && ur->using_fallback) {
             active_fd = ur->sockfd_secondary;
         }
@@ -519,8 +514,19 @@ static gpointer receiver_thread(gpointer data) {
 
         gst_buffer_unmap(gstbuf, &map);
 
+        if (switching_from_fallback && ur->using_fallback) {
+            LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
+            g_mutex_lock(&ur->lock);
+            reset_stats_locked(ur);
+            ur->discont_pending = TRUE;
+            g_mutex_unlock(&ur->lock);
+            mark_discont = TRUE;
+            ur->using_fallback = FALSE;
+        }
+
         if (mark_discont) {
             GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_DISCONT);
+            GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
         }
 
         flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
