@@ -25,10 +25,11 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
 #include <gst/rtsp/gstrtspdefs.h>
-#include <gst/rtsp/gstrtpsrc.h>
 #include <gst/rtsp/gstrtsptransport.h>
 #include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
+
+typedef struct _GstRTSPSrc GstRTSPSrc;
 
 #define RTP_MIN_HEADER 12
 #define FRAME_EWMA_ALPHA 0.1
