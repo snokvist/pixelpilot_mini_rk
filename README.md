@@ -74,5 +74,8 @@ CFLAGS="-O2 -g -fno-omit-frame-pointer"
 gcc $CFLAGS -o pixelpilot_mini_rk main.c ...
 ```
 
+The bundled `Makefile` now enables the same GCC flags by default, so a plain `make` produces profiling-friendly binaries
+without additional configuration.
+
 Pair these binaries with the in-app timers and named threads (see `src/udp_receiver.c` and `src/pipeline.c`) to quickly spot
 outlier latencies in `perf top`, `perf sched`, or `gdb` captures.

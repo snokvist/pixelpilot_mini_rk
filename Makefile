@@ -5,7 +5,8 @@ PKG_DRMLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs libdrm libudev)
 PKG_GSTCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0)
 PKG_GSTLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0)
 
-CFLAGS ?= -O2 -Wall
+DEFAULT_CFLAGS := -O2 -g -fno-omit-frame-pointer -Wall
+CFLAGS ?= $(DEFAULT_CFLAGS)
 CFLAGS += -Iinclude
 ifeq ($(strip $(PKG_DRMCFLAGS)),)
 CFLAGS += -I/usr/include/libdrm
