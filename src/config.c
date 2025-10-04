@@ -22,7 +22,7 @@ static void usage(const char *prog) {
             "  --udp-fallback-port N        (default: 5601)\n"
             "  --splash-rtsp                (enable RTSP splash fallback)\n"
             "  --no-splash-rtsp             (disable RTSP splash fallback)\n"
-            "  --splash-rtsp-url URL        (RTSP URL for splash fallback)\n"
+            "  --splash-rtsp-url URL        (RTSP URL for splash fallback; default: %s)\n"
             "  --splash-rtsp-latency N      (latency ms for RTSP splash; default: 100)\n"
             "  --splash-rtsp-protocols STR  (RTSP protocols: udp|tcp|any; default: udp)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
@@ -45,7 +45,7 @@ static void usage(const char *prog) {
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
-            prog);
+            prog, DEFAULT_SPLASH_RTSP_URL);
 }
 
 void cfg_defaults(AppCfg *c) {
@@ -59,7 +59,7 @@ void cfg_defaults(AppCfg *c) {
     c->udp_port = 5600;
     c->udp_fallback_port = 5601;
     c->splash_rtsp_enable = 0;
-    c->splash_rtsp_url[0] = '\0';
+    strcpy(c->splash_rtsp_url, DEFAULT_SPLASH_RTSP_URL);
     c->splash_rtsp_latency_ms = 100;
     strcpy(c->splash_rtsp_protocols, "udp");
     c->vid_pt = 97;

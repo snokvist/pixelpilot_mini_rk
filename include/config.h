@@ -6,6 +6,8 @@
 
 #include "osd_layout.h"
 
+#define DEFAULT_SPLASH_RTSP_URL "rtsp://127.0.0.1:8554/splash"
+
 #ifndef CPU_SETSIZE
 #define CPU_SETSIZE ((int)(sizeof(cpu_set_t) * CHAR_BIT))
 #endif

@@ -975,10 +975,13 @@ UdpReceiver *udp_receiver_create(const AppCfg *cfg, GstAppSrc *appsrc) {
     ur->rtsp_pad = NULL;
     ur->rtsp_pad_linked = FALSE;
 
-    if (cfg->splash_rtsp_enable && cfg->splash_rtsp_url[0] != '\0') {
+    if (cfg->splash_rtsp_enable) {
+        const char *rtsp_url = cfg->splash_rtsp_url[0] != '\0'
+                                   ? cfg->splash_rtsp_url
+                                   : DEFAULT_SPLASH_RTSP_URL;
         ur->fallback_mode = FALLBACK_RTSP;
         ur->fallback_enabled = TRUE;
-        g_strlcpy(ur->rtsp_location, cfg->splash_rtsp_url, sizeof(ur->rtsp_location));
+        g_strlcpy(ur->rtsp_location, rtsp_url, sizeof(ur->rtsp_location));
     } else if (cfg->udp_fallback_port > 0 && cfg->udp_fallback_port != cfg->udp_port) {
         ur->fallback_mode = FALLBACK_UDP_PORT;
         ur->fallback_enabled = TRUE;
