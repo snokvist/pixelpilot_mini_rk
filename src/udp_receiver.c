@@ -28,6 +28,7 @@
 #include <gst/rtsp/gstrtsptransport.h>
 #include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
+#include <glib-object.h>
 
 typedef struct _GstRTSPSrc GstRTSPSrc;
 
@@ -232,6 +233,42 @@ static GstRTSPLowerTrans parse_rtsp_protocols_string(const char *value) {
     return protocols;
 }
 
+static gboolean rtsp_set_keepalive_options(GstElement *src) {
+    if (src == NULL) {
+        return FALSE;
+    }
+
+    GObjectClass *klass = G_OBJECT_GET_CLASS(src);
+    if (klass == NULL) {
+        return FALSE;
+    }
+
+    GParamSpec *pspec = g_object_class_find_property(klass, "keep-alive");
+    if (pspec == NULL || !G_IS_PARAM_SPEC_ENUM(pspec)) {
+        return FALSE;
+    }
+
+    GParamSpecEnum *espec = G_PARAM_SPEC_ENUM(pspec);
+    if (espec->enum_class == NULL) {
+        return FALSE;
+    }
+
+    const GEnumValue *values = espec->enum_class->values;
+    if (values == NULL) {
+        return FALSE;
+    }
+
+    for (const GEnumValue *v = values; v->value_name != NULL; ++v) {
+        if ((v->value_name != NULL && g_strcmp0(v->value_name, "GST_RTSP_KEEP_ALIVE_OPTIONS") == 0) ||
+            (v->value_nick != NULL && g_strcmp0(v->value_nick, "options") == 0)) {
+            g_object_set(src, "keep-alive", v->value, NULL);
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 static GstCaps *pad_query_caps_or_current(GstPad *pad) {
     if (pad == NULL) {
         return NULL;
@@ -364,8 +401,10 @@ static gboolean rtsp_pipeline_start(struct UdpReceiver *ur, guint64 now_ns) {
     }
 
     g_object_set(src, "location", ur->rtsp_location, "latency", ur->rtsp_latency_ms, "protocols",
-                 ur->rtsp_protocols, "do-rtsp-keep-alive", TRUE, "keep-alive",
-                 GST_RTSP_KEEP_ALIVE_OPTIONS, NULL);
+                 ur->rtsp_protocols, "do-rtsp-keep-alive", TRUE, NULL);
+    if (!rtsp_set_keepalive_options(src)) {
+        LOGW("UDP receiver: RTSP fallback keep-alive OPTIONS mode unavailable");
+    }
     g_object_set(queue, "leaky", 2, "max-size-buffers", 16, "max-size-bytes", (guint64)0,
                  "max-size-time", (guint64)0, NULL);
     g_object_set(sink, "emit-signals", FALSE, "sync", FALSE, "max-buffers", 8, "drop", TRUE, NULL);
