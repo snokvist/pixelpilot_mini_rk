@@ -81,6 +81,7 @@ typedef struct {
 typedef struct OSD {
     int enabled;
     int active;
+    int plane_attached;
     uint32_t requested_plane_id;
     uint32_t plane_id;
     struct DumbFB fb;

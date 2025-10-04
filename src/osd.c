@@ -3,6 +3,7 @@
 #include "drm_props.h"
 #include "logging.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -2310,6 +2311,9 @@ static int osd_commit_enable(int fd, uint32_t crtc_id, OSD *o) {
     }
     int ret = drmModeAtomicCommit(fd, req, 0, NULL);
     drmModeAtomicFree(req);
+    if (ret == 0) {
+        o->plane_attached = 1;
+    }
     return ret;
 }
 
@@ -2325,6 +2329,9 @@ static int osd_commit_disable(int fd, OSD *o) {
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, 0);
     int ret = drmModeAtomicCommit(fd, req, 0, NULL);
     drmModeAtomicFree(req);
+    if (ret == 0) {
+        o->plane_attached = 0;
+    }
     return ret;
 }
 
@@ -2334,9 +2341,26 @@ static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
         return;
     }
     drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, o->fb.fb_id);
-    drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
-    drmModeAtomicCommit(fd, req, 0, NULL);
+
+    int flags = DRM_MODE_ATOMIC_NONBLOCK;
+    if (!o->plane_attached) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
+        flags |= DRM_MODE_ATOMIC_ALLOW_MODESET;
+    }
+
+    int ret = drmModeAtomicCommit(fd, req, flags, NULL);
+    if (ret != 0 && (flags & DRM_MODE_ATOMIC_NONBLOCK)) {
+        ret = drmModeAtomicCommit(fd, req, flags & ~DRM_MODE_ATOMIC_NONBLOCK, NULL);
+    }
+
     drmModeAtomicFree(req);
+
+    if (ret == 0) {
+        o->plane_attached = 1;
+    } else {
+        o->plane_attached = 0;
+        LOGW("OSD: plane FB refresh failed: %s", strerror(errno));
+    }
 }
 
 static void osd_destroy_fb(int fd, OSD *o) {
