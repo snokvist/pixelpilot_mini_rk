@@ -46,7 +46,7 @@ void osd_layout_defaults(OsdLayout *layout) {
         "HDMI {display.mode} plane={drm.video_plane_id}",
         "UDP:{udp.port} PTv={udp.vid_pt} PTa={udp.aud_pt} lat={pipeline.latency_ms}ms",
         "Pipeline: {pipeline.state} restarts={pipeline.restart_count}{pipeline.audio_suffix}",
-        "RTP vpkts={udp.video_packets} net-loss={udp.lost_packets} reo={udp.reordered_packets} dup={udp.duplicate_packets} jitter={udp.jitter.latest_ms}/{udp.jitter.avg_ms}ms br={udp.bitrate.latest_mbps}/{udp.bitrate.avg_mbps}Mbps",
+        "RTP vpkts={udp.video_packets} net-loss={udp.lost_packets} reo={udp.reordered_packets} dup={udp.duplicate_packets} jitter={udp.jitter.latest_ms}/{udp.jitter.avg_ms}ms",
         "Frames={udp.frames.count} incomplete={udp.frames.incomplete} last={udp.frames.last_bytes}KB avg={udp.frames.avg_bytes}KB seq={udp.expected_sequence}"
     };
     for (size_t i = 0; i < sizeof(default_lines) / sizeof(default_lines[0]) && i < OSD_MAX_TEXT_LINES; ++i) {
@@ -58,9 +58,9 @@ void osd_layout_defaults(OsdLayout *layout) {
 
     OsdElementConfig *plot = &layout->elements[1];
     plot->type = OSD_WIDGET_LINE;
-    strncpy(plot->name, "bitrate", sizeof(plot->name) - 1);
+    strncpy(plot->name, "jitter", sizeof(plot->name) - 1);
     placement_defaults(&plot->placement, OSD_POS_BOTTOM_LEFT);
     line_defaults(&plot->data.line);
-    strncpy(plot->data.line.metric, "udp.bitrate.latest_mbps", sizeof(plot->data.line.metric) - 1);
-    strncpy(plot->data.line.label, "Mbit/s", sizeof(plot->data.line.label) - 1);
+    strncpy(plot->data.line.metric, "udp.jitter.latest_ms", sizeof(plot->data.line.metric) - 1);
+    strncpy(plot->data.line.label, "Jitter (ms)", sizeof(plot->data.line.label) - 1);
 }
