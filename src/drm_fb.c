@@ -8,8 +8,24 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
+#if defined(__has_include)
+#if __has_include(<libdrm/drm.h>)
 #include <libdrm/drm.h>
-#include <drm_fourcc.h>
+#else
+#include <drm/drm.h>
+#endif
+#else
+#include <libdrm/drm.h>
+#endif
+#if defined(__has_include)
+#if __has_include(<libdrm/drm_fourcc.h>)
+#include <libdrm/drm_fourcc.h>
+#else
+#include <drm/drm_fourcc.h>
+#endif
+#else
+#include <drm/drm_fourcc.h>
+#endif
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 

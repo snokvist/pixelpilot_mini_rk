@@ -3,9 +3,14 @@
 #include "pipeline.h"
 #include "logging.h"
 
+#ifndef GST_USE_UNSTABLE_API
+#define GST_USE_UNSTABLE_API
+#endif
+
 #include <errno.h>
 #include <glib.h>
 #include <gst/app/gstappsrc.h>
+#include <gst/app/gstappsink.h>
 #include <gst/gst.h>
 #include <pthread.h>
 #include <sched.h>
@@ -276,39 +281,34 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
     GstElement *queue_pre = gst_element_factory_make("queue", "video_queue_pre");
     GstElement *depay = gst_element_factory_make("rtph265depay", "video_depay");
     GstElement *parser = gst_element_factory_make("h265parse", "video_parser");
-    GstElement *decoder = gst_element_factory_make("mppvideodec", "video_decoder");
     GstElement *queue_post = gst_element_factory_make("queue", "video_queue_post");
-    GstElement *queue_sink = gst_element_factory_make("queue", "video_queue_sink");
-    GstElement *sink = gst_element_factory_make("kmssink", "video_sink");
+    GstElement *appsink = gst_element_factory_make("appsink", "video_appsink");
 
     CHECK_ELEM(queue_pre, "queue");
     CHECK_ELEM(depay, "rtph265depay");
     CHECK_ELEM(parser, "h265parse");
-    CHECK_ELEM(decoder, "mppvideodec");
     CHECK_ELEM(queue_post, "queue");
-    CHECK_ELEM(queue_sink, "queue");
-    CHECK_ELEM(sink, "kmssink");
+    CHECK_ELEM(appsink, "appsink");
 
     g_object_set(queue_pre, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_pre_buffers,
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
     g_object_set(queue_post, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_post_buffers,
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
-    g_object_set(queue_sink, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_sink_buffers,
-                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    g_object_set(sink, "plane-id", cfg->plane_id, "sync", cfg->kmssink_sync ? TRUE : FALSE, "qos",
-                 cfg->kmssink_qos ? TRUE : FALSE, "max-lateness", (gint64)cfg->max_lateness_ns, NULL);
+    g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
+    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
+    gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
-    gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL);
+    gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, queue_post, appsink, NULL);
 
-    if (!gst_element_link_many(queue_pre, depay, parser, decoder, queue_post, queue_sink, sink, NULL)) {
+    if (!gst_element_link_many(queue_pre, depay, parser, queue_post, appsink, NULL)) {
         LOGE("Failed to link video branch");
         return FALSE;
     }
 
     ps->video_branch_entry = queue_pre;
-    ps->video_sink = sink;
+    ps->video_sink = appsink;
     return TRUE;
 
 fail:
@@ -369,6 +369,61 @@ static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, cons
 fail:
     ps->audio_branch_entry = NULL;
     return FALSE;
+}
+
+static gpointer appsink_thread_func(gpointer data) {
+    PipelineState *ps = (PipelineState *)data;
+    GstAppSink *appsink = ps->video_sink != NULL ? GST_APP_SINK(ps->video_sink) : NULL;
+    if (appsink == NULL) {
+        g_mutex_lock(&ps->lock);
+        ps->appsink_thread_running = FALSE;
+        g_mutex_unlock(&ps->lock);
+        return NULL;
+    }
+
+    size_t max_packet = video_decoder_max_packet_size(ps->decoder_initialized ? &ps->decoder : NULL);
+    if (max_packet == 0) {
+        max_packet = 1024 * 1024;
+    }
+
+    while (TRUE) {
+        g_mutex_lock(&ps->lock);
+        gboolean stop_requested = ps->stop_requested;
+        gboolean decoder_running = ps->decoder_running;
+        g_mutex_unlock(&ps->lock);
+
+        if (stop_requested || !decoder_running) {
+            break;
+        }
+
+        GstSample *sample = gst_app_sink_try_pull_sample(appsink, 100 * GST_MSECOND);
+        if (sample == NULL) {
+            continue;
+        }
+
+        GstBuffer *buffer = gst_sample_get_buffer(sample);
+        if (buffer != NULL) {
+            GstMapInfo map;
+            if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                if (map.size > 0 && map.size <= max_packet) {
+                    if (video_decoder_feed(&ps->decoder, map.data, map.size) != 0) {
+                        LOGV("Video decoder feed busy; retrying");
+                    }
+                } else if (map.size > max_packet) {
+                    LOGW("Video sample too large (%zu bytes > %zu)", map.size, max_packet);
+                }
+                gst_buffer_unmap(buffer, &map);
+            }
+        }
+        gst_sample_unref(sample);
+    }
+
+    video_decoder_send_eos(&ps->decoder);
+
+    g_mutex_lock(&ps->lock);
+    ps->appsink_thread_running = FALSE;
+    g_mutex_unlock(&ps->lock);
+    return NULL;
 }
 
 static gpointer bus_thread_func(gpointer data) {
@@ -463,6 +518,18 @@ static gpointer bus_thread_func(gpointer data) {
 }
 
 static void cleanup_pipeline(PipelineState *ps) {
+    if (ps->appsink_thread != NULL) {
+        g_thread_join(ps->appsink_thread);
+        ps->appsink_thread = NULL;
+    }
+    ps->appsink_thread_running = FALSE;
+
+    if (ps->decoder_initialized) {
+        video_decoder_deinit(&ps->decoder);
+        ps->decoder_initialized = FALSE;
+        ps->decoder_running = FALSE;
+    }
+
     if (ps->udp_receiver != NULL) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
@@ -488,9 +555,14 @@ static void cleanup_pipeline(PipelineState *ps) {
     g_mutex_unlock(&ps->lock);
 }
 
-int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
+int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int audio_disabled, PipelineState *ps) {
     if (ps->state != PIPELINE_STOPPED) {
         LOGW("pipeline_start: refused (state=%d)", ps->state);
+        return -1;
+    }
+
+    if (ms == NULL) {
+        LOGE("pipeline_start: modeset information unavailable");
         return -1;
     }
 
@@ -512,6 +584,10 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     ps->video_pad = NULL;
     ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
+    ps->appsink_thread = NULL;
+    ps->appsink_thread_running = FALSE;
+    ps->decoder_initialized = FALSE;
+    ps->decoder_running = FALSE;
     ps->cfg = cfg;
     ps->bus_thread_cpu_slot = 0;
 
@@ -583,6 +659,31 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
         }
     }
 
+    if (drm_fd < 0) {
+        LOGE("Invalid DRM file descriptor");
+        goto fail;
+    }
+
+    if (video_decoder_init(&ps->decoder, cfg, ms, drm_fd) != 0) {
+        LOGE("Failed to initialise video decoder");
+        goto fail;
+    }
+    ps->decoder_initialized = TRUE;
+
+    if (video_decoder_start(&ps->decoder) != 0) {
+        LOGE("Failed to start video decoder threads");
+        goto fail;
+    }
+    ps->decoder_running = TRUE;
+
+    ps->appsink_thread_running = TRUE;
+    ps->appsink_thread = g_thread_new("appsink-pump", appsink_thread_func, ps);
+    if (ps->appsink_thread == NULL) {
+        ps->appsink_thread_running = FALSE;
+        LOGE("Failed to start appsink thread");
+        goto fail;
+    }
+
     int cpu_slot = 0;
 
     if (ps->udp_receiver != NULL) {
@@ -608,6 +709,10 @@ int pipeline_start(const AppCfg *cfg, int audio_disabled, PipelineState *ps) {
     return 0;
 
 fail:
+    g_mutex_lock(&ps->lock);
+    ps->stop_requested = TRUE;
+    ps->decoder_running = FALSE;
+    g_mutex_unlock(&ps->lock);
     if (ps->bus_thread != NULL) {
         g_thread_join(ps->bus_thread);
         ps->bus_thread = NULL;
@@ -628,6 +733,7 @@ void pipeline_stop(PipelineState *ps, int wait_ms_total) {
     g_mutex_lock(&ps->lock);
     ps->state = PIPELINE_STOPPING;
     ps->stop_requested = TRUE;
+    ps->decoder_running = FALSE;
     g_mutex_unlock(&ps->lock);
 
     if (ps->udp_receiver != NULL) {
