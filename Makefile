@@ -35,15 +35,27 @@ SRC := $(wildcard src/*.c)
 OBJ := $(SRC:.c=.o)
 TARGET := pixelpilot_mini_rk
 
-all: $(TARGET)
+SPINNER_ZIP ?= spinner_h256.zip
+SPINNER_DIR ?= spinner_h256
+
+all: $(TARGET) unpack_spinner
 
 $(TARGET): $(OBJ)
 	$(CC) $(OBJ) -o $@ $(LDFLAGS)
+
+unpack_spinner: $(TARGET)
+	@if [ -f $(SPINNER_ZIP) ]; then \
+		echo "Unpacking $(SPINNER_ZIP) into $(CURDIR)"; \
+		unzip -o $(SPINNER_ZIP) -d $(CURDIR); \
+	else \
+		echo "spinner archive '$(SPINNER_ZIP)' not found; skipping unpack."; \
+	fi
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
 	rm -f $(OBJ) $(TARGET)
+	rm -rf $(SPINNER_DIR)
 
-.PHONY: all clean
+.PHONY: all clean unpack_spinner
