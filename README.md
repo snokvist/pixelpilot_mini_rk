@@ -56,3 +56,23 @@ pipeline will then create a bare `udpsrc` element and UEP/receiver statistics ar
 Use this mode when integrating with external tooling or experimenting with alternative buffering strategies where the
 application-level receiver is unnecessary. Revert with `--no-gst-udpsrc` or by clearing the INI key to restore the default
 behaviour and regain access to the telemetry counters.
+
+## Profiling-friendly builds
+
+CPU hotspots are easiest to diagnose when the binaries retain debug symbols and frame pointers. The following recipes rebuild
+the project with the minimal optimizations needed for accurate ARM64 callgraphs while keeping runtime overhead low:
+
+```sh
+meson setup build -Dbuildtype=release -Doptimization=2 -Dc_args="-O2 -g -fno-omit-frame-pointer"
+meson compile -C build
+```
+
+For direct GCC builds use:
+
+```sh
+CFLAGS="-O2 -g -fno-omit-frame-pointer"
+gcc $CFLAGS -o pixelpilot_mini_rk main.c ...
+```
+
+Pair these binaries with the in-app timers and named threads (see `src/udp_receiver.c` and `src/pipeline.c`) to quickly spot
+outlier latencies in `perf top`, `perf sched`, or `gdb` captures.

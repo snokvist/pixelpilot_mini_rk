@@ -16,6 +16,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef GST_USE_UNSTABLE_API
@@ -160,8 +161,39 @@ static inline gint16 seq_delta(guint16 a, guint16 b) {
 }
 
 static inline guint64 get_time_ns(void) {
-    return (guint64)g_get_monotonic_time() * 1000ull;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ((guint64)ts.tv_sec * 1000000000ull) + (guint64)ts.tv_nsec;
 }
+
+typedef struct {
+    const char *label;
+    guint64 start_ns;
+    guint64 threshold_ns;
+} ScopeTimer;
+
+static inline ScopeTimer scope_timer_start(const char *label, guint64 threshold_ns) {
+    ScopeTimer timer = {
+        .label = label,
+        .start_ns = get_time_ns(),
+        .threshold_ns = threshold_ns,
+    };
+    return timer;
+}
+
+static inline void scope_timer_end(const ScopeTimer *timer) {
+    if (G_UNLIKELY(timer == NULL || timer->label == NULL)) {
+        return;
+    }
+    guint64 end_ns = get_time_ns();
+    guint64 dt = end_ns - timer->start_ns;
+    if (G_UNLIKELY(dt > timer->threshold_ns)) {
+        fprintf(stderr, "[%s] %.3f ms\n", timer->label, (double)dt / 1e6);
+    }
+}
+
+#define UDP_SCOPE_THRESHOLD_NS (2000000ull)
+#define SCOPE_TIMER(name, label) ScopeTimer name = scope_timer_start((label), UDP_SCOPE_THRESHOLD_NS)
 
 static void history_push(struct UdpReceiver *ur, const UdpReceiverPacketSample *sample) {
     ur->history[ur->stats.history_head] = *sample;
@@ -394,6 +426,11 @@ static gpointer receiver_thread(gpointer data) {
     const guint64 fallback_delay_ns = 2000000000ull; // 2 seconds
     const gint poll_timeout_ms = 100;
 
+    int name_err = pthread_setname_np(pthread_self(), "udp_rx");
+    if (G_UNLIKELY(name_err != 0)) {
+        LOGW("UDP receiver: pthread_setname_np failed: %s", g_strerror(name_err));
+    }
+
     cpu_set_t thread_mask;
     if (cfg_get_thread_affinity(ur->cfg, ur->cpu_slot, &thread_mask)) {
         int err = pthread_setaffinity_np(pthread_self(), sizeof(thread_mask), &thread_mask);
@@ -487,7 +524,9 @@ static gpointer receiver_thread(gpointer data) {
         }
 
         GstBuffer *gstbuf = NULL;
+        SCOPE_TIMER(timer_acquire, "udp_buf_acquire");
         GstFlowReturn flow = gst_buffer_pool_acquire_buffer(ur->pool, &gstbuf, NULL);
+        scope_timer_end(&timer_acquire);
         if (flow != GST_FLOW_OK || gstbuf == NULL) {
             LOGE("UDP receiver: failed to acquire buffer from pool (flow=%s)",
                  gst_flow_get_name(flow));
@@ -496,7 +535,10 @@ static gpointer receiver_thread(gpointer data) {
         }
 
         GstMapInfo map;
-        if (!gst_buffer_map(gstbuf, &map, GST_MAP_WRITE)) {
+        SCOPE_TIMER(timer_map, "udp_buf_map");
+        gboolean mapped = gst_buffer_map(gstbuf, &map, GST_MAP_WRITE);
+        scope_timer_end(&timer_map);
+        if (!mapped) {
             LOGE("UDP receiver: buffer map failed");
             gst_buffer_unref(gstbuf);
             g_usleep(1000);
@@ -505,7 +547,9 @@ static gpointer receiver_thread(gpointer data) {
 
         struct sockaddr_in src;
         socklen_t slen = sizeof(src);
+        SCOPE_TIMER(timer_recv, "udp_recv");
         ssize_t n = recvfrom(active_fd, map.data, max_pkt, 0, (struct sockaddr *)&src, &slen);
+        scope_timer_end(&timer_recv);
         if (n < 0) {
             int err = errno;
             gst_buffer_unmap(gstbuf, &map);
@@ -556,7 +600,9 @@ static gpointer receiver_thread(gpointer data) {
             GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
         }
 
+        SCOPE_TIMER(timer_push, "udp_push");
         flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
+        scope_timer_end(&timer_push);
         if (flow != GST_FLOW_OK) {
             LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
             if (flow == GST_FLOW_FLUSHING) {

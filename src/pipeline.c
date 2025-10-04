@@ -373,6 +373,10 @@ fail:
 
 static gpointer bus_thread_func(gpointer data) {
     PipelineState *ps = (PipelineState *)data;
+    int name_err = pthread_setname_np(pthread_self(), "pp_proc");
+    if (G_UNLIKELY(name_err != 0)) {
+        LOGW("Pipeline bus thread: pthread_setname_np failed: %s", g_strerror(name_err));
+    }
     cpu_set_t thread_mask;
     if (cfg_get_thread_affinity(ps->cfg, ps->bus_thread_cpu_slot, &thread_mask)) {
         int err = pthread_setaffinity_np(pthread_self(), sizeof(thread_mask), &thread_mask);
