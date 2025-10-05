@@ -136,6 +136,7 @@ static GstElement *create_udp_source(const AppCfg *cfg, gboolean video_only, Udp
 
 static GParamSpec *find_property_with_aliases(GObjectClass *klass, const char *property);
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick);
+static gboolean set_boolean_property(GObject *object, const char *property, gboolean value);
 
 typedef struct {
     gboolean stream_format_supported;
@@ -143,6 +144,7 @@ typedef struct {
 } H265ParserCapsSupport;
 
 static H265ParserCapsSupport configure_h265_parser_caps(GstElement *parser);
+static gboolean configure_h265_depay_byte_stream(GstElement *depay);
 static GstCaps *build_h265_enforced_caps(const H265ParserCapsSupport *support);
 
 static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *cfg) {
@@ -165,6 +167,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
 
     depay = gst_element_factory_make("rtph265depay", "video_depay");
     CHECK_ELEM(depay, "rtph265depay");
+    configure_h265_depay_byte_stream(depay);
     parser = gst_element_factory_make("h265parse", "video_parser");
     CHECK_ELEM(parser, "h265parse");
     capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
@@ -267,6 +270,14 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
     if (error != NULL) {
         LOGW("udpsrc pipeline reported warnings: %s", error->message);
         g_error_free(error);
+    }
+
+    GstElement *depay = gst_bin_get_by_name(GST_BIN(pipeline), "video_depay");
+    if (depay != NULL) {
+        configure_h265_depay_byte_stream(depay);
+        gst_object_unref(depay);
+    } else {
+        LOGW("udpsrc pipeline missing depayloader; byte-stream enforcement skipped");
     }
 
     GstElement *appsink = gst_bin_get_by_name(GST_BIN(pipeline), "out_appsink");
@@ -613,6 +624,26 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
     return success;
 }
 
+static gboolean set_boolean_property(GObject *object, const char *property, gboolean value) {
+    if (object == NULL || property == NULL) {
+        return FALSE;
+    }
+
+    GObjectClass *klass = G_OBJECT_GET_CLASS(object);
+    if (klass == NULL) {
+        return FALSE;
+    }
+
+    GParamSpec *pspec = find_property_with_aliases(klass, property);
+    if (pspec == NULL) {
+        return FALSE;
+    }
+
+    const char *canon_property = pspec->name != NULL ? pspec->name : property;
+    g_object_set(object, canon_property, value ? TRUE : FALSE, NULL);
+    return TRUE;
+}
+
 typedef enum {
     FORCE_PROP_RESULT_SUCCESS,
     FORCE_PROP_RESULT_UNSUPPORTED,
@@ -668,6 +699,30 @@ static H265ParserCapsSupport configure_h265_parser_caps(GstElement *parser) {
     return support;
 }
 
+static gboolean configure_h265_depay_byte_stream(GstElement *depay) {
+    if (depay == NULL) {
+        return FALSE;
+    }
+
+    GObject *object = G_OBJECT(depay);
+    const char *name = GST_ELEMENT_NAME(depay);
+    if (name == NULL) {
+        name = G_OBJECT_TYPE_NAME(depay);
+    }
+
+    if (!element_supports_property(object, "byte-stream")) {
+        LOGI("%s does not expose a 'byte-stream' property; using plugin default", name);
+        return FALSE;
+    }
+
+    if (!set_boolean_property(object, "byte-stream", TRUE)) {
+        LOGW("Failed to enable %s byte-stream output; downstream decoder may misbehave", name);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 static GstCaps *build_h265_enforced_caps(const H265ParserCapsSupport *support) {
     GstCaps *caps = gst_caps_new_empty_simple("video/x-h265");
     if (caps == NULL) {
@@ -705,6 +760,7 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
 
     CHECK_ELEM(queue_pre, "queue");
     CHECK_ELEM(depay, "rtph265depay");
+    configure_h265_depay_byte_stream(depay);
     CHECK_ELEM(parser, "h265parse");
     CHECK_ELEM(capsfilter, "capsfilter");
     CHECK_ELEM(queue_post, "queue");
