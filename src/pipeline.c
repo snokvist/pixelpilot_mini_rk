@@ -134,6 +134,80 @@ static GstElement *create_udp_source(const AppCfg *cfg, gboolean video_only, Udp
     return create_udp_app_source(cfg, video_only, receiver_out);
 }
 
+static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) {
+    if (ps == NULL || cfg == NULL) {
+        return FALSE;
+    }
+
+    gchar *desc = g_strdup_printf(
+        "udpsrc name=udp_source port=%d caps=\"application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000\" ! "
+        "rtph265depay name=video_depay ! "
+        "h265parse name=video_parser config-interval=-1 ! "
+        "video/x-h265, stream-format=\"byte-stream\" ! "
+        "appsink drop=true name=out_appsink",
+        cfg->udp_port);
+
+    if (desc == NULL) {
+        LOGE("Failed to allocate udpsrc pipeline description");
+        return FALSE;
+    }
+
+    GError *error = NULL;
+    GstElement *pipeline = gst_parse_launch(desc, &error);
+    g_free(desc);
+
+    if (pipeline == NULL) {
+        LOGE("Failed to create udpsrc pipeline: %s", error != NULL ? error->message : "unknown error");
+        if (error != NULL) {
+            g_error_free(error);
+        }
+        return FALSE;
+    }
+    if (error != NULL) {
+        LOGW("udpsrc pipeline reported warnings: %s", error->message);
+        g_error_free(error);
+    }
+
+    GstElement *appsink = gst_bin_get_by_name(GST_BIN(pipeline), "out_appsink");
+    if (appsink == NULL) {
+        LOGE("Failed to find appsink in udpsrc pipeline");
+        gst_object_unref(pipeline);
+        return FALSE;
+    }
+
+    g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
+    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
+    gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
+
+    GstCaps *caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
+                                        "alignment", G_TYPE_STRING, "au", NULL);
+    if (caps != NULL) {
+        gst_app_sink_set_caps(GST_APP_SINK(appsink), caps);
+        gst_caps_unref(caps);
+    } else {
+        LOGW("Failed to allocate caps for udpsrc appsink");
+    }
+
+    GstElement *parser = gst_bin_get_by_name(GST_BIN(pipeline), "video_parser");
+    if (parser != NULL) {
+        if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
+            LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
+        }
+        if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
+            LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
+        }
+        gst_object_unref(parser);
+    } else {
+        LOGW("udpsrc pipeline missing h265parse element; byte-stream enforcement skipped");
+    }
+
+    ps->pipeline = pipeline;
+    ps->video_sink = appsink;
+
+    gst_object_unref(appsink);
+    return TRUE;
+}
+
 static GstCaps *make_rtp_caps(const char *media, int payload_type, int clock_rate, const char *encoding_name) {
     return gst_caps_new_simple("application/x-rtp", "media", G_TYPE_STRING, media, "payload", G_TYPE_INT,
                                payload_type, "clock-rate", G_TYPE_INT, clock_rate, "encoding-name", G_TYPE_STRING,
@@ -743,9 +817,7 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         ps->initialized = TRUE;
     }
 
-    GstElement *pipeline = gst_pipeline_new("pixelpilot-pipeline");
-    CHECK_ELEM(pipeline, "pipeline");
-    ps->pipeline = pipeline;
+    ps->pipeline = NULL;
     ps->source = NULL;
     ps->rtpbin = NULL;
     ps->video_branch_entry = NULL;
@@ -753,6 +825,7 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->video_pad = NULL;
     ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
+    ps->video_sink = NULL;
     ps->appsink_thread = NULL;
     ps->appsink_thread_running = FALSE;
     ps->decoder_initialized = FALSE;
@@ -760,84 +833,95 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->cfg = cfg;
     ps->bus_thread_cpu_slot = 0;
 
-    gboolean video_only = cfg->no_audio || cfg->aud_pt < 0;
-
-    UdpReceiver *receiver = NULL;
-    GstElement *source = create_udp_source(cfg, video_only, &receiver);
-    if (source == NULL) {
-        goto fail;
-    }
-
-    GstElement *rtpbin = NULL;
-    GstElement *jitter = NULL;
+    GstElement *pipeline = NULL;
+    gboolean force_audio_disabled = FALSE;
 
     if (cfg->use_gst_udpsrc) {
         LOGI("Using GStreamer udpsrc; UDP receiver stats disabled");
-    }
-
-    if (!build_video_branch(ps, pipeline, cfg)) {
-        goto fail;
-    }
-
-    if (video_only) {
-        jitter = gst_element_factory_make("rtpjitterbuffer", "video_jitter");
-        if (jitter != NULL) {
-            g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-late", TRUE, "do-lost", TRUE, NULL);
-            gst_bin_add_many(GST_BIN(pipeline), source, jitter, NULL);
-            if (!gst_element_link_many(source, jitter, ps->video_branch_entry, NULL)) {
-                LOGE("Failed to link video-only path through rtpjitterbuffer");
-                goto fail;
-            }
-        } else {
-            LOGW("Failed to create rtpjitterbuffer; linking video source directly");
-            gst_bin_add(GST_BIN(pipeline), source);
-            if (!gst_element_link(source, ps->video_branch_entry)) {
-                LOGE("Failed to link video-only source to decoder branch");
-                goto fail;
-            }
-        }
-        ps->audio_branch_entry = NULL;
-        ps->audio_disabled = 1;
-    } else {
-        rtpbin = gst_element_factory_make("rtpbin", "rtpbin");
-        CHECK_ELEM(rtpbin, "rtpbin");
-        g_object_set(rtpbin, "latency", cfg->latency_ms, NULL);
-
-        gst_bin_add_many(GST_BIN(pipeline), source, rtpbin, NULL);
-
-        GstPad *rtp_sink = gst_element_get_request_pad(rtpbin, "recv_rtp_sink_0");
-        GstPad *src_pad = gst_element_get_static_pad(source, "src");
-        if (rtp_sink == NULL || src_pad == NULL) {
-            LOGE("Failed to obtain pads for linking source to rtpbin");
-            if (src_pad != NULL) {
-                gst_object_unref(src_pad);
-            }
-            if (rtp_sink != NULL) {
-                gst_object_unref(rtp_sink);
-            }
+        if (!setup_gst_udpsrc_pipeline(ps, cfg)) {
             goto fail;
         }
-        if (gst_pad_link(src_pad, rtp_sink) != GST_PAD_LINK_OK) {
-            LOGE("Failed to link source to rtpbin");
+        pipeline = ps->pipeline;
+        force_audio_disabled = TRUE;
+    } else {
+        pipeline = gst_pipeline_new("pixelpilot-pipeline");
+        CHECK_ELEM(pipeline, "pipeline");
+        ps->pipeline = pipeline;
+
+        gboolean video_only = cfg->no_audio || cfg->aud_pt < 0;
+        UdpReceiver *receiver = NULL;
+        GstElement *source = create_udp_source(cfg, video_only, &receiver);
+        if (source == NULL) {
+            goto fail;
+        }
+
+        GstElement *rtpbin = NULL;
+        GstElement *jitter = NULL;
+
+        if (!build_video_branch(ps, pipeline, cfg)) {
+            goto fail;
+        }
+
+        if (video_only) {
+            jitter = gst_element_factory_make("rtpjitterbuffer", "video_jitter");
+            if (jitter != NULL) {
+                g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-late", TRUE, "do-lost", TRUE, NULL);
+                gst_bin_add_many(GST_BIN(pipeline), source, jitter, NULL);
+                if (!gst_element_link_many(source, jitter, ps->video_branch_entry, NULL)) {
+                    LOGE("Failed to link video-only path through rtpjitterbuffer");
+                    goto fail;
+                }
+            } else {
+                LOGW("Failed to create rtpjitterbuffer; linking video source directly");
+                gst_bin_add(GST_BIN(pipeline), source);
+                if (!gst_element_link(source, ps->video_branch_entry)) {
+                    LOGE("Failed to link video-only source to decoder branch");
+                    goto fail;
+                }
+            }
+            ps->audio_branch_entry = NULL;
+            ps->audio_disabled = 1;
+        } else {
+            rtpbin = gst_element_factory_make("rtpbin", "rtpbin");
+            CHECK_ELEM(rtpbin, "rtpbin");
+            g_object_set(rtpbin, "latency", cfg->latency_ms, NULL);
+
+            gst_bin_add_many(GST_BIN(pipeline), source, rtpbin, NULL);
+
+            GstPad *rtp_sink = gst_element_get_request_pad(rtpbin, "recv_rtp_sink_0");
+            GstPad *src_pad = gst_element_get_static_pad(source, "src");
+            if (rtp_sink == NULL || src_pad == NULL) {
+                LOGE("Failed to obtain pads for linking source to rtpbin");
+                if (src_pad != NULL) {
+                    gst_object_unref(src_pad);
+                }
+                if (rtp_sink != NULL) {
+                    gst_object_unref(rtp_sink);
+                }
+                goto fail;
+            }
+            if (gst_pad_link(src_pad, rtp_sink) != GST_PAD_LINK_OK) {
+                LOGE("Failed to link source to rtpbin");
+                gst_object_unref(src_pad);
+                gst_object_unref(rtp_sink);
+                goto fail;
+            }
             gst_object_unref(src_pad);
             gst_object_unref(rtp_sink);
-            goto fail;
-        }
-        gst_object_unref(src_pad);
-        gst_object_unref(rtp_sink);
 
-        if (!build_audio_branch(ps, pipeline, cfg, audio_disabled)) {
-            goto fail;
+            if (!build_audio_branch(ps, pipeline, cfg, audio_disabled)) {
+                goto fail;
+            }
+
+            g_signal_connect(rtpbin, "pad-added", G_CALLBACK(rtpbin_pad_added_cb), ps);
+            g_signal_connect(rtpbin, "pad-removed", G_CALLBACK(rtpbin_pad_removed_cb), ps);
+            g_signal_connect(rtpbin, "request-pt-map", G_CALLBACK(rtpbin_request_pt_map_cb), ps);
         }
 
-        g_signal_connect(rtpbin, "pad-added", G_CALLBACK(rtpbin_pad_added_cb), ps);
-        g_signal_connect(rtpbin, "pad-removed", G_CALLBACK(rtpbin_pad_removed_cb), ps);
-        g_signal_connect(rtpbin, "request-pt-map", G_CALLBACK(rtpbin_request_pt_map_cb), ps);
+        ps->source = source;
+        ps->rtpbin = rtpbin;
+        ps->udp_receiver = receiver;
     }
-
-    ps->source = source;
-    ps->rtpbin = rtpbin;
-    ps->udp_receiver = receiver;
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
@@ -900,7 +984,7 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->bus_thread_running = TRUE;
     ps->stop_requested = FALSE;
     ps->encountered_error = FALSE;
-    ps->audio_disabled = (audio_disabled || cfg->no_audio || cfg->aud_pt < 0) ? 1 : 0;
+    ps->audio_disabled = (audio_disabled || cfg->no_audio || cfg->aud_pt < 0 || force_audio_disabled) ? 1 : 0;
     ps->bus_thread_cpu_slot = cpu_slot;
     ps->bus_thread = g_thread_new("gst-bus", bus_thread_func, ps);
     if (ps->bus_thread == NULL) {
