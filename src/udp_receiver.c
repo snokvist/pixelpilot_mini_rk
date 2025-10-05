@@ -107,6 +107,8 @@ struct UdpReceiver {
 
     guint32 video_ssrc;
     gboolean have_video_ssrc;
+
+    guint64 last_packet_ns;
 };
 
 static gboolean parse_rtp(const guint8 *data, gsize len, RtpParseResult *out) {
@@ -471,6 +473,11 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
 
     g_mutex_lock(&ur->lock);
 
+    ur->last_packet_ns = arrival_ns;
+    if (ur->stats_enabled) {
+        ur->stats.last_packet_ns = arrival_ns;
+    }
+
     gboolean filter_non_video = FALSE;
     if (ur->cfg != NULL && ur->cfg->no_audio) {
         filter_non_video = TRUE;
@@ -748,6 +755,7 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     ur->stats_enabled = FALSE;
     ur->pool = NULL;
     ur->buffer_size = 0;
+    ur->last_packet_ns = 0;
     return ur;
 }
 
@@ -934,6 +942,7 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
     g_mutex_lock(&ur->lock);
     neon_copy_bytes((guint8 *)stats, (const guint8 *)&ur->stats, sizeof(*stats));
     copy_history(stats->history, ur->history, UDP_RECEIVER_HISTORY);
+    stats->last_packet_ns = ur->last_packet_ns;
     g_mutex_unlock(&ur->lock);
 }
 
@@ -951,4 +960,14 @@ void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
         reset_stats_locked(ur);
     }
     g_mutex_unlock(&ur->lock);
+}
+
+guint64 udp_receiver_get_last_packet_time(UdpReceiver *ur) {
+    if (ur == NULL) {
+        return 0;
+    }
+    g_mutex_lock(&ur->lock);
+    guint64 value = ur->last_packet_ns;
+    g_mutex_unlock(&ur->lock);
+    return value;
 }
