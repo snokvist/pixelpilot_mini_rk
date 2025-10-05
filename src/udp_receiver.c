@@ -439,14 +439,16 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     gboolean is_video = have_preview && preview.payload_type == ur->vid_pt;
     gboolean is_audio = have_preview && preview.payload_type == ur->aud_pt;
 
+    const RtpParseResult *parsed = have_preview ? &preview : NULL;
+    if (ur->stats_enabled) {
+        process_rtp(ur, map->data, (gsize)bytes_read, arrival_ns, parsed);
+    }
+
     if (filter_non_video && have_preview && !is_video) {
         drop_packet = TRUE;
     } else if (is_audio && ur->audio_appsrc == NULL) {
         drop_packet = TRUE;
     } else {
-        const RtpParseResult *parsed = have_preview ? &preview : NULL;
-        process_rtp(ur, map->data, (gsize)bytes_read, arrival_ns, parsed);
-
         if (is_audio && ur->audio_appsrc != NULL) {
             target_appsrc = ur->audio_appsrc;
             target_is_audio = TRUE;

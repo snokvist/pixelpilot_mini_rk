@@ -41,3 +41,33 @@ will then create a bare `udpsrc` element and UEP/receiver statistics are disable
 Use this mode when integrating with external tooling or experimenting with alternative buffering strategies where the
 application-level receiver is unnecessary. Revert with `--custom-sink receiver` (or remove the INI override) to restore the
 default behaviour and regain access to the telemetry counters.
+
+## UDP receiver statistics
+
+The custom receiver keeps a rolling telemetry snapshot that is exposed through the OSD token table and the `udp.*` metric
+namespace. Statistics are computed only while the feature is enabled (for example when the OSD requests them); toggling stats on
+resets the counters and history buffer so each session starts with a clean slate.
+
+| Counter | Description |
+| --- | --- |
+| `udp.total_packets` | All RTP packets observed, regardless of payload type. |
+| `udp.video_packets` / `udp.audio_packets` | Packets that matched the configured video or audio payload types. Audio packets are still counted even when the audio pipeline is disabled so you can confirm that the sender is transmitting them. |
+| `udp.ignored_packets` | Packets whose payload type did not match either configured stream. |
+| `udp.duplicate_packets` | Packets that re-used the most recent sequence number. |
+| `udp.lost_packets` | The cumulative count of missing sequence numbers detected while walking the video stream. |
+| `udp.reordered_packets` | Packets that arrived with a sequence number lower than expected (but not a duplicate). |
+| `udp.total_bytes` / `udp.video_bytes` / `udp.audio_bytes` | Byte counters that mirror the packet counters above. |
+| `udp.bitrate.latest_mbps` | Instantaneous bitrate computed over a sliding 200 ms window. |
+| `udp.bitrate.avg_mbps` | Exponentially weighted moving average of the instantaneous bitrate. |
+| `udp.jitter.latest_ms` | RFC 3550 style inter-arrival jitter, reported in milliseconds. |
+| `udp.jitter.avg_ms` | EWMA of the jitter metric to smooth short-term spikes. |
+| `udp.frame.count` | Number of completed video frames detected via RTP marker bits. |
+| `udp.frame.incomplete` | Frames that ended with missing packets. |
+| `udp.frame.last_kib` | Size of the most recent completed frame (KiB). |
+| `udp.frame.avg_kib` | EWMA of recent frame sizes (KiB). |
+| `udp.sequence.expected` | The next video sequence number the receiver is waiting for. |
+| `udp.timestamp.last_video` | RTP timestamp from the most recent video packet. |
+
+The history buffer exposed through `udp.history.*` tokens retains the 512 most recent packet samples, including packet size,
+payload type, arrival timestamp, and flags for loss, reordering, duplication, and frame boundaries. This makes it possible to
+build custom diagnostics or render per-packet overlays directly from the INI configuration.
