@@ -10,6 +10,7 @@
 
 #include <float.h>
 #include <ctype.h>
+#include <pixman.h>
 
 #if defined(__has_include)
 #if __has_include(<libdrm/drm_fourcc.h>)
@@ -47,15 +48,72 @@ static int clampi(int v, int min_v, int max_v) {
     return v;
 }
 
-static void osd_clear(OSD *o, uint32_t argb) {
-    if (!o->fb.map) {
+static inline uint16_t osd_expand_channel(uint8_t v) {
+    return (uint16_t)v * 257u;
+}
+
+static pixman_color_t osd_argb_to_pixman_color(uint32_t argb) {
+    pixman_color_t color = {
+        .alpha = osd_expand_channel((uint8_t)(argb >> 24)),
+        .red = osd_expand_channel((uint8_t)(argb >> 16)),
+        .green = osd_expand_channel((uint8_t)(argb >> 8)),
+        .blue = osd_expand_channel((uint8_t)(argb >> 0)),
+    };
+    return color;
+}
+
+static pixman_image_t *osd_fb_image(OSD *o) {
+    if (!o || !o->fb.map) {
+        return NULL;
+    }
+    if (!o->pixman_fb) {
+        o->pixman_fb = pixman_image_create_bits(PIXMAN_a8r8g8b8, o->fb.w, o->fb.h,
+                                                (uint32_t *)o->fb.map, o->fb.pitch);
+    }
+    return o->pixman_fb;
+}
+
+static void osd_destroy_pixman_surface(OSD *o) {
+    if (!o) {
         return;
     }
-    uint32_t *px = (uint32_t *)o->fb.map;
-    size_t count = o->fb.size / 4;
-    for (size_t i = 0; i < count; ++i) {
-        px[i] = argb;
+    if (o->pixman_fb) {
+        pixman_image_unref(o->pixman_fb);
+        o->pixman_fb = NULL;
     }
+}
+
+static void osd_reset_glyph_cache_entry(OsdGlyphCacheEntry *entry) {
+    if (!entry) {
+        return;
+    }
+    for (size_t i = 0; i < sizeof(entry->glyphs) / sizeof(entry->glyphs[0]); ++i) {
+        if (entry->glyphs[i]) {
+            pixman_image_unref(entry->glyphs[i]);
+            entry->glyphs[i] = NULL;
+        }
+    }
+    entry->scale = 0;
+}
+
+static void osd_reset_glyph_cache(OSD *o) {
+    if (!o) {
+        return;
+    }
+    for (int i = 0; i < OSD_MAX_GLYPH_SCALES; ++i) {
+        osd_reset_glyph_cache_entry(&o->glyph_cache[i]);
+    }
+    o->glyph_cache_count = 0;
+}
+
+static void osd_clear(OSD *o, uint32_t argb) {
+    pixman_image_t *dest = osd_fb_image(o);
+    if (!dest) {
+        return;
+    }
+    pixman_color_t color = osd_argb_to_pixman_color(argb);
+    pixman_rectangle16_t rect = {0, 0, (uint16_t)o->fb.w, (uint16_t)o->fb.h};
+    pixman_image_fill_rectangles(PIXMAN_OP_SRC, dest, &color, 1, &rect);
 }
 
 // Font data derived from the public domain VGA 8x8 font by Marcel Sondaar,
@@ -129,16 +187,21 @@ static const uint8_t font8x8_basic[128][8] = {
     {0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 };
 
-static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale) {
-    if ((unsigned char)c >= 128) {
-        return;
+static pixman_image_t *osd_create_glyph_image(int scale, unsigned char c) {
+    if (scale <= 0) {
+        scale = 1;
     }
-    if (c >= 'a' && c <= 'z') {
-        c = (char)(c - 'a' + 'A');
+    pixman_image_t *mask = pixman_image_create_bits(PIXMAN_a8, 8 * scale, 8 * scale, NULL, 0);
+    if (!mask) {
+        return NULL;
     }
-    const uint8_t *glyph = font8x8_basic[(unsigned char)c];
-    uint32_t *fb = (uint32_t *)o->fb.map;
-    int pitch = o->fb.pitch / 4;
+
+    uint8_t *data = (uint8_t *)pixman_image_get_data(mask);
+    int stride = pixman_image_get_stride(mask);
+    int height = pixman_image_get_height(mask);
+    memset(data, 0, stride * height);
+
+    const uint8_t *glyph = font8x8_basic[c];
     for (int row = 0; row < 8; ++row) {
         uint8_t bits = glyph[row];
         if (!bits) {
@@ -149,23 +212,104 @@ static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale
                 continue;
             }
             for (int sy = 0; sy < scale; ++sy) {
-                int py = y + row * scale + sy;
-                if (py < 0 || py >= o->h) {
-                    continue;
-                }
-                uint32_t *row_px = fb + py * pitch;
+                int py = row * scale + sy;
+                uint8_t *row_data = data + py * stride;
                 for (int sx = 0; sx < scale; ++sx) {
-                    int px = x + col * scale + sx;
-                    if (px >= 0 && px < o->w) {
-                        row_px[px] = argb;
-                    }
+                    int px = col * scale + sx;
+                    row_data[px] = 0xFF;
                 }
             }
         }
     }
+    return mask;
+}
+
+static OsdGlyphCacheEntry *osd_glyph_cache_for_scale(OSD *o, int scale) {
+    if (!o) {
+        return NULL;
+    }
+    if (scale <= 0) {
+        scale = 1;
+    }
+
+    for (int i = 0; i < o->glyph_cache_count; ++i) {
+        if (o->glyph_cache[i].scale == scale) {
+            return &o->glyph_cache[i];
+        }
+    }
+
+    for (int i = 0; i < OSD_MAX_GLYPH_SCALES; ++i) {
+        if (o->glyph_cache[i].scale == 0) {
+            o->glyph_cache[i].scale = scale;
+            memset(o->glyph_cache[i].glyphs, 0, sizeof(o->glyph_cache[i].glyphs));
+            if (i >= o->glyph_cache_count) {
+                o->glyph_cache_count = i + 1;
+            }
+            return &o->glyph_cache[i];
+        }
+    }
+
+    OsdGlyphCacheEntry *entry = &o->glyph_cache[0];
+    osd_reset_glyph_cache_entry(entry);
+    entry->scale = scale;
+    return entry;
+}
+
+static pixman_image_t *osd_lookup_glyph(OSD *o, int scale, unsigned char c) {
+    OsdGlyphCacheEntry *entry = osd_glyph_cache_for_scale(o, scale);
+    if (!entry) {
+        return NULL;
+    }
+    if (!entry->glyphs[c]) {
+        entry->glyphs[c] = osd_create_glyph_image(scale, c);
+    }
+    return entry->glyphs[c];
+}
+
+static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    pixman_image_t *dest = osd_fb_image(o);
+    if (!dest) {
+        return;
+    }
+    int x0 = clampi(x, 0, o->w);
+    int y0 = clampi(y, 0, o->h);
+    int x1 = clampi(x + w, 0, o->w);
+    int y1 = clampi(y + h, 0, o->h);
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+
+    pixman_color_t color = osd_argb_to_pixman_color(argb);
+    pixman_rectangle16_t rect = {
+        .x = (int16_t)x0,
+        .y = (int16_t)y0,
+        .width = (uint16_t)(x1 - x0),
+        .height = (uint16_t)(y1 - y0),
+    };
+    pixman_image_fill_rectangles(PIXMAN_OP_SRC, dest, &color, 1, &rect);
 }
 
 static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, int scale) {
+    if (!s || !*s) {
+        return;
+    }
+    pixman_image_t *dest = osd_fb_image(o);
+    if (!dest) {
+        return;
+    }
+    if (scale <= 0) {
+        scale = 1;
+    }
+
+    pixman_color_t color = osd_argb_to_pixman_color(argb);
+    pixman_image_t *solid = pixman_image_create_solid_fill(&color);
+    if (!solid) {
+        return;
+    }
+
     const int advance = (8 + 1) * scale;
     const int line_advance = (8 + 1) * scale;
     int pen_x = x;
@@ -176,30 +320,26 @@ static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, in
             pen_x = x;
             continue;
         }
-        osd_draw_char(o, pen_x, pen_y, *p, argb, scale);
+        unsigned char glyph_c = (unsigned char)*p;
+        if (glyph_c >= 128) {
+            pen_x += advance;
+            continue;
+        }
+        if (glyph_c >= 'a' && glyph_c <= 'z') {
+            glyph_c = (unsigned char)(glyph_c - 'a' + 'A');
+        }
+        pixman_image_t *glyph = osd_lookup_glyph(o, scale, glyph_c);
+        if (!glyph) {
+            pen_x += advance;
+            continue;
+        }
+        int glyph_w = pixman_image_get_width(glyph);
+        int glyph_h = pixman_image_get_height(glyph);
+        pixman_image_composite32(PIXMAN_OP_OVER, solid, glyph, dest, 0, 0, 0, 0, pen_x, pen_y, glyph_w, glyph_h);
         pen_x += advance;
     }
-}
 
-static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
-    if (!o->fb.map || w <= 0 || h <= 0) {
-        return;
-    }
-    int x0 = clampi(x, 0, o->w);
-    int y0 = clampi(y, 0, o->h);
-    int x1 = clampi(x + w, 0, o->w);
-    int y1 = clampi(y + h, 0, o->h);
-    if (x0 >= x1 || y0 >= y1) {
-        return;
-    }
-    uint32_t *fb = (uint32_t *)o->fb.map;
-    int pitch = o->fb.pitch / 4;
-    for (int py = y0; py < y1; ++py) {
-        uint32_t *row = fb + py * pitch;
-        for (int px = x0; px < x1; ++px) {
-            row[px] = argb;
-        }
-    }
+    pixman_image_unref(solid);
 }
 
 static void osd_store_rect(OSDRect *r, int x, int y, int w, int h) {
@@ -647,7 +787,7 @@ static void osd_draw_vline(OSD *o, int x, int y, int h, uint32_t argb) {
 }
 
 static void osd_draw_line(OSD *o, int x0, int y0, int x1, int y1, uint32_t argb) {
-    if (!o->fb.map) {
+    if (!osd_fb_image(o)) {
         return;
     }
     int dx = x1 > x0 ? (x1 - x0) : (x0 - x1);
@@ -2348,8 +2488,9 @@ static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
 }
 
 static void osd_destroy_fb(int fd, OSD *o) {
+    osd_destroy_pixman_surface(o);
+    osd_reset_glyph_cache(o);
     destroy_dumb_fb(fd, &o->fb);
-    o->fb.map = NULL;
 }
 
 int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plane_id, OSD *o) {
@@ -2393,6 +2534,13 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");
+        o->enabled = 0;
+        return -1;
+    }
+
+    if (!osd_fb_image(o)) {
+        LOGW("OSD: pixman surface init failed. Disabling OSD.");
+        osd_destroy_fb(fd, o);
         o->enabled = 0;
         return -1;
     }
