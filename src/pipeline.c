@@ -136,7 +136,14 @@ static GstElement *create_udp_source(const AppCfg *cfg, gboolean video_only, Udp
 
 static GParamSpec *find_property_with_aliases(GObjectClass *klass, const char *property);
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick);
-static void configure_h265_parser_caps(GstElement *parser);
+
+typedef struct {
+    gboolean stream_format_supported;
+    gboolean alignment_supported;
+} H265ParserCapsSupport;
+
+static H265ParserCapsSupport configure_h265_parser_caps(GstElement *parser);
+static GstCaps *build_h265_enforced_caps(const H265ParserCapsSupport *support);
 
 static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *cfg) {
     GstElement *pipeline = NULL;
@@ -170,12 +177,11 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    configure_h265_parser_caps(parser);
+    H265ParserCapsSupport parser_caps = configure_h265_parser_caps(parser);
 
-    raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
-                                   "alignment", G_TYPE_STRING, "au", NULL);
+    raw_caps = build_h265_enforced_caps(&parser_caps);
     if (raw_caps == NULL) {
-        LOGE("Failed to allocate caps for video byte-stream enforcement");
+        LOGE("Failed to allocate caps for video parser output");
         goto fail;
     }
     g_object_set(capsfilter, "caps", raw_caps, NULL);
@@ -238,7 +244,7 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         "udpsrc name=udp_source port=%d caps=\"application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000\" ! "
         "rtph265depay name=video_depay ! "
         "h265parse name=video_parser config-interval=-1 ! "
-        "video/x-h265, stream-format=\"byte-stream\" ! "
+        "capsfilter name=video_capsfilter ! "
         "appsink drop=true name=out_appsink",
         cfg->udp_port);
 
@@ -274,21 +280,29 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
     gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
-    GstCaps *caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
-                                        "alignment", G_TYPE_STRING, "au", NULL);
-    if (caps != NULL) {
-        gst_app_sink_set_caps(GST_APP_SINK(appsink), caps);
-        gst_caps_unref(caps);
-    } else {
-        LOGW("Failed to allocate caps for udpsrc appsink");
-    }
-
     GstElement *parser = gst_bin_get_by_name(GST_BIN(pipeline), "video_parser");
+    H265ParserCapsSupport parser_caps = configure_h265_parser_caps(parser);
     if (parser != NULL) {
-        configure_h265_parser_caps(parser);
         gst_object_unref(parser);
     } else {
         LOGW("udpsrc pipeline missing h265parse element; byte-stream enforcement skipped");
+    }
+
+    GstCaps *caps = build_h265_enforced_caps(&parser_caps);
+    if (caps != NULL) {
+        gst_app_sink_set_caps(GST_APP_SINK(appsink), caps);
+
+        GstElement *capsfilter = gst_bin_get_by_name(GST_BIN(pipeline), "video_capsfilter");
+        if (capsfilter != NULL) {
+            g_object_set(capsfilter, "caps", caps, NULL);
+            gst_object_unref(capsfilter);
+        } else {
+            LOGW("udpsrc pipeline missing capsfilter; sink caps set only");
+        }
+
+        gst_caps_unref(caps);
+    } else {
+        LOGW("Failed to allocate caps for udpsrc appsink");
     }
 
     ps->pipeline = pipeline;
@@ -617,12 +631,11 @@ static ForcePropResult try_set_enum_property(GObject *object, const char *proper
     return FORCE_PROP_RESULT_FAILED;
 }
 
-static void configure_h265_parser_caps(GstElement *parser) {
-    static gsize missing_stream_format_once = 0;
-    static gsize missing_alignment_once = 0;
+static H265ParserCapsSupport configure_h265_parser_caps(GstElement *parser) {
+    H265ParserCapsSupport support = { FALSE, FALSE };
 
     if (parser == NULL) {
-        return;
+        return support;
     }
 
     const char *name = GST_ELEMENT_NAME(parser);
@@ -632,12 +645,9 @@ static void configure_h265_parser_caps(GstElement *parser) {
 
     switch (try_set_enum_property(G_OBJECT(parser), "stream-format", "byte-stream")) {
     case FORCE_PROP_RESULT_SUCCESS:
+        support.stream_format_supported = TRUE;
         break;
     case FORCE_PROP_RESULT_UNSUPPORTED:
-        if (g_once_init_enter(&missing_stream_format_once)) {
-            LOGI("GStreamer %s element does not expose a 'stream-format' property; using plugin default", name);
-            g_once_init_leave(&missing_stream_format_once, 1);
-        }
         break;
     case FORCE_PROP_RESULT_FAILED:
         LOGW("Failed to force %s stream-format=byte-stream; downstream decoder may misbehave", name);
@@ -646,17 +656,43 @@ static void configure_h265_parser_caps(GstElement *parser) {
 
     switch (try_set_enum_property(G_OBJECT(parser), "alignment", "au")) {
     case FORCE_PROP_RESULT_SUCCESS:
+        support.alignment_supported = TRUE;
         break;
     case FORCE_PROP_RESULT_UNSUPPORTED:
-        if (g_once_init_enter(&missing_alignment_once)) {
-            LOGI("GStreamer %s element does not expose an 'alignment' property; using plugin default", name);
-            g_once_init_leave(&missing_alignment_once, 1);
-        }
         break;
     case FORCE_PROP_RESULT_FAILED:
         LOGW("Failed to force %s alignment=au; downstream decoder may misbehave", name);
         break;
     }
+
+    return support;
+}
+
+static GstCaps *build_h265_enforced_caps(const H265ParserCapsSupport *support) {
+    GstCaps *caps = gst_caps_new_empty_simple("video/x-h265");
+    if (caps == NULL) {
+        return NULL;
+    }
+
+    if (support == NULL) {
+        return caps;
+    }
+
+    GstStructure *structure = gst_caps_get_structure(caps, 0);
+    if (structure == NULL) {
+        gst_caps_unref(caps);
+        return NULL;
+    }
+
+    if (support->stream_format_supported) {
+        gst_structure_set(structure, "stream-format", G_TYPE_STRING, "byte-stream", NULL);
+    }
+
+    if (support->alignment_supported) {
+        gst_structure_set(structure, "alignment", G_TYPE_STRING, "au", NULL);
+    }
+
+    return caps;
 }
 
 static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, const AppCfg *cfg) {
@@ -680,12 +716,11 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    configure_h265_parser_caps(parser);
+    H265ParserCapsSupport parser_caps = configure_h265_parser_caps(parser);
 
-    GstCaps *raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
-                                            "alignment", G_TYPE_STRING, "au", NULL);
+    GstCaps *raw_caps = build_h265_enforced_caps(&parser_caps);
     if (raw_caps == NULL) {
-        LOGE("Failed to allocate caps for video byte-stream enforcement");
+        LOGE("Failed to allocate caps for video parser output");
         goto fail;
     }
     g_object_set(capsfilter, "caps", raw_caps, NULL);
