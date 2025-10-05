@@ -10,6 +10,11 @@
 #define CPU_SETSIZE ((int)(sizeof(cpu_set_t) * CHAR_BIT))
 #endif
 
+typedef enum {
+    CUSTOM_SINK_RECEIVER = 0,
+    CUSTOM_SINK_UDPSRC,
+} CustomSinkMode;
+
 typedef struct {
     char card_path[64];
     char connector_name[32];
@@ -30,7 +35,7 @@ typedef struct {
     int video_queue_pre_buffers;
     int video_queue_post_buffers;
     int video_queue_sink_buffers;
-    int use_gst_udpsrc;
+    CustomSinkMode custom_sink;
     char aud_dev[128];
 
     int no_audio;
@@ -59,5 +64,7 @@ int cfg_parse_cpu_list(const char *list, AppCfg *cfg);
 int cfg_has_cpu_affinity(const AppCfg *cfg);
 void cfg_get_process_affinity(const AppCfg *cfg, cpu_set_t *set_out);
 int cfg_get_thread_affinity(const AppCfg *cfg, int slot, cpu_set_t *set_out);
+int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out);
+const char *cfg_custom_sink_mode_name(CustomSinkMode mode);
 
 #endif // CONFIG_H

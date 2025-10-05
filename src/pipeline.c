@@ -125,7 +125,7 @@ fail:
 }
 
 static GstElement *create_udp_source(const AppCfg *cfg, gboolean video_only, UdpReceiver **receiver_out) {
-    if (cfg->use_gst_udpsrc) {
+    if (cfg->custom_sink == CUSTOM_SINK_UDPSRC) {
         if (receiver_out != NULL) {
             *receiver_out = NULL;
         }
@@ -836,8 +836,8 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;
 
-    if (cfg->use_gst_udpsrc) {
-        LOGI("Using GStreamer udpsrc; UDP receiver stats disabled");
+    if (cfg->custom_sink == CUSTOM_SINK_UDPSRC) {
+        LOGI("Custom sink mode 'udpsrc' selected; UDP receiver stats disabled");
         if (!setup_gst_udpsrc_pipeline(ps, cfg)) {
             goto fail;
         }
