@@ -357,7 +357,7 @@ static GParamSpec *find_property_with_aliases(GObjectClass *klass, const char *p
 
     for (guint i = 0; i < n_props; ++i) {
         const char *name = props[i]->name;
-        const char *nick = props[i]->nick;
+        const char *nick = g_param_spec_get_nick(props[i]);
         if ((name != NULL && (enum_matches_string(name, property) || enum_matches_string(property, name))) ||
             (nick != NULL && (enum_matches_string(nick, property) || enum_matches_string(property, nick)))) {
             pspec = props[i];
