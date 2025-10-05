@@ -72,6 +72,18 @@ struct VideoDecoder {
     GThread *display_thread;
 };
 
+VideoDecoder *video_decoder_new(void) {
+    return g_new0(VideoDecoder, 1);
+}
+
+void video_decoder_free(VideoDecoder *vd) {
+    if (vd == NULL) {
+        return;
+    }
+    video_decoder_deinit(vd);
+    g_free(vd);
+}
+
 static inline guint64 get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -514,10 +526,19 @@ void video_decoder_stop(VideoDecoder *vd) {
         return;
     }
 
-    g_mutex_lock(&vd->lock);
-    vd->running = FALSE;
-    g_cond_broadcast(&vd->cond);
-    g_mutex_unlock(&vd->lock);
+    if (vd->lock_initialized) {
+        g_mutex_lock(&vd->lock);
+        vd->running = FALSE;
+        if (vd->cond_initialized) {
+            g_cond_broadcast(&vd->cond);
+        }
+        g_mutex_unlock(&vd->lock);
+    } else {
+        vd->running = FALSE;
+        if (vd->cond_initialized) {
+            g_cond_broadcast(&vd->cond);
+        }
+    }
 
     if (vd->frame_thread) {
         g_thread_join(vd->frame_thread);

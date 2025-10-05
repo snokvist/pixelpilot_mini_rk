@@ -10,6 +10,9 @@
 
 typedef struct VideoDecoder VideoDecoder;
 
+VideoDecoder *video_decoder_new(void);
+void video_decoder_free(VideoDecoder *vd);
+
 int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult *ms, int drm_fd);
 void video_decoder_deinit(VideoDecoder *vd);
 

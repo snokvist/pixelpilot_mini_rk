@@ -381,7 +381,7 @@ static gpointer appsink_thread_func(gpointer data) {
         return NULL;
     }
 
-    size_t max_packet = video_decoder_max_packet_size(ps->decoder_initialized ? &ps->decoder : NULL);
+    size_t max_packet = video_decoder_max_packet_size(ps->decoder_initialized ? ps->decoder : NULL);
     if (max_packet == 0) {
         max_packet = 1024 * 1024;
     }
@@ -406,7 +406,7 @@ static gpointer appsink_thread_func(gpointer data) {
             GstMapInfo map;
             if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
                 if (map.size > 0 && map.size <= max_packet) {
-                    if (video_decoder_feed(&ps->decoder, map.data, map.size) != 0) {
+                    if (video_decoder_feed(ps->decoder, map.data, map.size) != 0) {
                         LOGV("Video decoder feed busy; retrying");
                     }
                 } else if (map.size > max_packet) {
@@ -418,7 +418,9 @@ static gpointer appsink_thread_func(gpointer data) {
         gst_sample_unref(sample);
     }
 
-    video_decoder_send_eos(&ps->decoder);
+    if (ps->decoder != NULL) {
+        video_decoder_send_eos(ps->decoder);
+    }
 
     g_mutex_lock(&ps->lock);
     ps->appsink_thread_running = FALSE;
@@ -524,11 +526,12 @@ static void cleanup_pipeline(PipelineState *ps) {
     }
     ps->appsink_thread_running = FALSE;
 
-    if (ps->decoder_initialized) {
-        video_decoder_deinit(&ps->decoder);
-        ps->decoder_initialized = FALSE;
-        ps->decoder_running = FALSE;
+    if (ps->decoder != NULL) {
+        video_decoder_free(ps->decoder);
+        ps->decoder = NULL;
     }
+    ps->decoder_initialized = FALSE;
+    ps->decoder_running = FALSE;
 
     if (ps->udp_receiver != NULL) {
         udp_receiver_destroy(ps->udp_receiver);
@@ -664,13 +667,21 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         goto fail;
     }
 
-    if (video_decoder_init(&ps->decoder, cfg, ms, drm_fd) != 0) {
+    if (ps->decoder == NULL) {
+        ps->decoder = video_decoder_new();
+        if (ps->decoder == NULL) {
+            LOGE("Failed to allocate video decoder state");
+            goto fail;
+        }
+    }
+
+    if (video_decoder_init(ps->decoder, cfg, ms, drm_fd) != 0) {
         LOGE("Failed to initialise video decoder");
         goto fail;
     }
     ps->decoder_initialized = TRUE;
 
-    if (video_decoder_start(&ps->decoder) != 0) {
+    if (video_decoder_start(ps->decoder) != 0) {
         LOGE("Failed to start video decoder threads");
         goto fail;
     }

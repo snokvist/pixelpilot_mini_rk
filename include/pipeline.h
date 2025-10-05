@@ -36,7 +36,7 @@ typedef struct {
     const AppCfg *cfg;
     int bus_thread_cpu_slot;
     gboolean appsink_thread_running;
-    VideoDecoder decoder;
+    VideoDecoder *decoder;
     gboolean decoder_initialized;
     gboolean decoder_running;
 } PipelineState;
