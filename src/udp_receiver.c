@@ -249,24 +249,31 @@ static void finalize_frame(struct UdpReceiver *ur) {
     ur->frame_missing = FALSE;
 }
 
-static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, guint64 arrival_ns) {
-    RtpParseResult rtp;
-    if (!parse_rtp(data, len, &rtp)) {
-        return;
-    }
-
-    gboolean is_video = (rtp.payload_type == ur->vid_pt);
-    gboolean is_audio = (rtp.payload_type == ur->aud_pt);
-
+static void process_rtp(struct UdpReceiver *ur,
+                        const guint8 *data,
+                        gsize len,
+                        guint64 arrival_ns,
+                        const RtpParseResult *parsed) {
     if (!ur->stats_enabled) {
         return;
     }
 
+    RtpParseResult local;
+    if (parsed == NULL) {
+        if (!parse_rtp(data, len, &local)) {
+            return;
+        }
+        parsed = &local;
+    }
+
+    gboolean is_video = (parsed->payload_type == ur->vid_pt);
+    gboolean is_audio = (parsed->payload_type == ur->aud_pt);
+
     UdpReceiverPacketSample sample = {0};
-    sample.sequence = rtp.sequence;
-    sample.timestamp = rtp.timestamp;
-    sample.payload_type = rtp.payload_type;
-    sample.marker = rtp.marker;
+    sample.sequence = parsed->sequence;
+    sample.timestamp = parsed->timestamp;
+    sample.payload_type = parsed->payload_type;
+    sample.marker = parsed->marker;
     sample.size = (guint32)len;
     sample.arrival_ns = arrival_ns;
 
@@ -276,14 +283,14 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
     if (is_video) {
         ur->stats.video_packets++;
         ur->stats.video_bytes += len;
-        ur->stats.last_video_timestamp = rtp.timestamp;
+        ur->stats.last_video_timestamp = parsed->timestamp;
 
-        if (!ur->frame_active || ur->frame_timestamp != rtp.timestamp) {
+        if (!ur->frame_active || ur->frame_timestamp != parsed->timestamp) {
             if (ur->frame_active) {
                 finalize_frame(ur);
             }
             ur->frame_active = TRUE;
-            ur->frame_timestamp = rtp.timestamp;
+            ur->frame_timestamp = parsed->timestamp;
             ur->frame_bytes = len;
             ur->frame_missing = FALSE;
         } else {
@@ -292,15 +299,15 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
 
         if (!ur->seq_initialized) {
             ur->seq_initialized = TRUE;
-            ur->expected_seq = seq_next(rtp.sequence);
+            ur->expected_seq = seq_next(parsed->sequence);
             ur->stats.expected_sequence = ur->expected_seq;
         } else {
-            gint16 delta = seq_delta(rtp.sequence, ur->expected_seq);
+            gint16 delta = seq_delta(parsed->sequence, ur->expected_seq);
             if (delta == 0) {
-                ur->expected_seq = seq_next(rtp.sequence);
+                ur->expected_seq = seq_next(parsed->sequence);
             } else if (delta > 0) {
                 ur->stats.lost_packets += delta;
-                ur->expected_seq = seq_next(rtp.sequence);
+                ur->expected_seq = seq_next(parsed->sequence);
                 ur->frame_missing = TRUE;
                 sample.flags |= UDP_SAMPLE_FLAG_LOSS;
             } else { // delta < 0
@@ -310,15 +317,15 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
             ur->stats.expected_sequence = ur->expected_seq;
         }
 
-        if (ur->have_last_seq && rtp.sequence == ur->last_seq) {
+        if (ur->have_last_seq && parsed->sequence == ur->last_seq) {
             ur->stats.duplicate_packets++;
             sample.flags |= UDP_SAMPLE_FLAG_DUPLICATE;
         }
-        ur->last_seq = rtp.sequence;
+        ur->last_seq = parsed->sequence;
         ur->have_last_seq = TRUE;
 
         double arrival_rtp = (double)arrival_ns / 1e9 * 90000.0;
-        double transit = arrival_rtp - (double)rtp.timestamp;
+        double transit = arrival_rtp - (double)parsed->timestamp;
         if (!ur->transit_initialized) {
             ur->transit_initialized = TRUE;
             ur->last_transit = transit;
@@ -341,7 +348,7 @@ static void process_rtp(struct UdpReceiver *ur, const guint8 *data, gsize len, g
         ur->stats.ignored_packets++;
     }
 
-    if (rtp.marker && is_video) {
+    if (parsed->marker && is_video) {
         sample.flags |= UDP_SAMPLE_FLAG_FRAME_END;
         finalize_frame(ur);
     }
@@ -527,13 +534,18 @@ static gpointer receiver_thread(gpointer data) {
 
         gboolean drop_packet = FALSE;
         RtpParseResult preview;
-        gboolean have_preview = parse_rtp(map.data, (gsize)n, &preview);
+        gboolean have_preview = FALSE;
+        gboolean preview_initialized = FALSE;
         gboolean filter_non_video = FALSE;
         if (ur->cfg != NULL && ur->cfg->no_audio) {
             filter_non_video = TRUE;
         }
         if (ur->aud_pt < 0) {
             filter_non_video = TRUE;
+        }
+        if (filter_non_video) {
+            have_preview = parse_rtp(map.data, (gsize)n, &preview);
+            preview_initialized = TRUE;
         }
 
         guint64 arrival_ns = get_time_ns();
@@ -546,10 +558,14 @@ static gpointer receiver_thread(gpointer data) {
         if (active_is_primary) {
             ur->last_primary_data_ns = arrival_ns;
         }
+        if (!preview_initialized && ur->stats_enabled) {
+            have_preview = parse_rtp(map.data, (gsize)n, &preview);
+            preview_initialized = TRUE;
+        }
         if (filter_non_video && have_preview && preview.payload_type != ur->vid_pt) {
             drop_packet = TRUE;
         } else {
-            process_rtp(ur, map.data, (gsize)n, arrival_ns);
+            process_rtp(ur, map.data, (gsize)n, arrival_ns, have_preview ? &preview : NULL);
         }
         g_mutex_unlock(&ur->lock);
 
