@@ -59,7 +59,8 @@ typedef struct {
 
 typedef struct UdpReceiver UdpReceiver;
 
-UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *appsrc);
+UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *video_appsrc);
+void udp_receiver_set_audio_appsrc(UdpReceiver *ur, GstAppSrc *audio_appsrc);
 int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot);
 void udp_receiver_stop(UdpReceiver *ur);
 void udp_receiver_destroy(UdpReceiver *ur);

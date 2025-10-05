@@ -593,14 +593,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->plane_id = atoi(value);
             return 0;
         }
-        if (strcasecmp(key, "blank-primary") == 0) {
-            int v = 0;
-            if (parse_bool(value, &v) != 0) {
-                return -1;
-            }
-            cfg->blank_primary = v;
-            return 0;
-        }
         if (strcasecmp(key, "osd-plane-id") == 0) {
             cfg->osd_plane_id = atoi(value);
             return 0;
@@ -635,22 +627,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->latency_ms = atoi(value);
             return 0;
         }
-        if (strcasecmp(key, "video-queue-leaky") == 0) {
-            cfg->video_queue_leaky = atoi(value);
-            return 0;
-        }
-        if (strcasecmp(key, "video-queue-pre-buffers") == 0) {
-            cfg->video_queue_pre_buffers = atoi(value);
-            return 0;
-        }
-        if (strcasecmp(key, "video-queue-post-buffers") == 0) {
-            cfg->video_queue_post_buffers = atoi(value);
-            return 0;
-        }
-        if (strcasecmp(key, "video-queue-sink-buffers") == 0) {
-            cfg->video_queue_sink_buffers = atoi(value);
-            return 0;
-        }
         if (strcasecmp(key, "custom-sink") == 0) {
             CustomSinkMode mode;
             if (cfg_parse_custom_sink_mode(value, &mode) != 0) {
@@ -667,10 +643,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             }
             LOGW("INI key pipeline.use-gst-udpsrc is deprecated; use pipeline.custom-sink instead");
             cfg->custom_sink = v ? CUSTOM_SINK_UDPSRC : CUSTOM_SINK_RECEIVER;
-            return 0;
-        }
-        if (strcasecmp(key, "max-lateness-ns") == 0) {
-            cfg->max_lateness_ns = atoi(value);
             return 0;
         }
         return -1;

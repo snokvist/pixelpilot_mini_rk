@@ -304,15 +304,6 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         drmModeAtomicAddProperty(req, cfg->plane_id, plane_zpos_id, v_z);
     }
 
-    int primary_plane_id = cfg->blank_primary ? find_primary_plane_for_crtc(fd, res, crtc->crtc_id) : -1;
-    if (primary_plane_id > 0) {
-        uint32_t prim_fb_id = 0, prim_crtc_id = 0;
-        drm_get_prop_id(fd, (uint32_t)primary_plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &prim_fb_id);
-        drm_get_prop_id(fd, (uint32_t)primary_plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &prim_crtc_id);
-        drmModeAtomicAddProperty(req, (uint32_t)primary_plane_id, prim_fb_id, 0);
-        drmModeAtomicAddProperty(req, (uint32_t)primary_plane_id, prim_crtc_id, 0);
-    }
-
     int flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
     int ret = drmModeAtomicCommit(fd, req, flags, NULL);
     if (ret != 0) {
