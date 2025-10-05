@@ -620,10 +620,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->udp_port = atoi(value);
             return 0;
         }
-        if (strcasecmp(key, "fallback-port") == 0) {
-            cfg->udp_fallback_port = atoi(value);
-            return 0;
-        }
         if (strcasecmp(key, "video-pt") == 0) {
             cfg->vid_pt = atoi(value);
             return 0;
