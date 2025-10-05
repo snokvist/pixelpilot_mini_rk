@@ -134,6 +134,8 @@ static GstElement *create_udp_source(const AppCfg *cfg, gboolean video_only, Udp
     return create_udp_app_source(cfg, video_only, receiver_out);
 }
 
+static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick);
+
 static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) {
     if (ps == NULL || cfg == NULL) {
         return FALSE;
@@ -477,13 +479,11 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
     }
 
     gboolean success = FALSE;
-    const GEnumValue *target_value = NULL;
     for (gint i = 0; i < enum_class->n_values; ++i) {
         const GEnumValue *value = &enum_class->values[i];
         if ((value->value_name != NULL && enum_matches_string(value->value_name, nick)) ||
             (value->value_nick != NULL && enum_matches_string(value->value_nick, nick))) {
             g_object_set(object, canon_property, value->value, NULL);
-            target_value = value;
             success = TRUE;
             break;
         }
