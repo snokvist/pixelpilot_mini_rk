@@ -112,6 +112,33 @@ struct UdpReceiver {
     guint64 last_packet_ns;
 };
 
+// Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
+static inline void udp_receiver_last_packet_store(struct UdpReceiver *ur, guint64 value) {
+#if GLIB_CHECK_VERSION(2, 30, 0)
+    g_atomic_int64_set((gint64 *)&ur->last_packet_ns, (gint64)value);
+#elif defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+    __atomic_store_n(&ur->last_packet_ns, value, __ATOMIC_RELAXED);
+#else
+    g_mutex_lock(&ur->lock);
+    ur->last_packet_ns = value;
+    g_mutex_unlock(&ur->lock);
+#endif
+}
+
+static inline guint64 udp_receiver_last_packet_load(struct UdpReceiver *ur) {
+#if GLIB_CHECK_VERSION(2, 30, 0)
+    return (guint64)g_atomic_int64_get((gint64 *)&ur->last_packet_ns);
+#elif defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+    return __atomic_load_n(&ur->last_packet_ns, __ATOMIC_RELAXED);
+#else
+    guint64 value;
+    g_mutex_lock(&ur->lock);
+    value = ur->last_packet_ns;
+    g_mutex_unlock(&ur->lock);
+    return value;
+#endif
+}
+
 static void update_fastpath_locked(struct UdpReceiver *ur) {
     if (ur == NULL) {
         return;
@@ -535,7 +562,7 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     gst_buffer_set_size(gstbuf, (gsize)bytes_read);
 
     guint64 arrival_ns = get_time_ns();
-    g_atomic_int64_set((gint64 *)&ur->last_packet_ns, (gint64)arrival_ns);
+    udp_receiver_last_packet_store(ur, arrival_ns);
 
     if (g_atomic_int_get(&ur->fastpath_enabled)) {
         if (handle_received_packet_fastpath(ur, gstbuf, map, bytes_read)) {
@@ -833,7 +860,7 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     g_atomic_int_set(&ur->fastpath_enabled, 1);
     ur->pool = NULL;
     ur->buffer_size = 0;
-    g_atomic_int64_set((gint64 *)&ur->last_packet_ns, 0);
+    ur->last_packet_ns = 0;
     return ur;
 }
 
@@ -917,7 +944,7 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
     ur->audio_discont_pending = TRUE;
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
-    g_atomic_int64_set((gint64 *)&ur->last_packet_ns, 0);
+    ur->last_packet_ns = 0;
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 
@@ -1025,7 +1052,7 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
     neon_copy_bytes((guint8 *)stats, (const guint8 *)&ur->stats, sizeof(*stats));
     copy_history(stats->history, ur->history, UDP_RECEIVER_HISTORY);
     g_mutex_unlock(&ur->lock);
-    stats->last_packet_ns = (guint64)g_atomic_int64_get((gint64 *)&ur->last_packet_ns);
+    stats->last_packet_ns = udp_receiver_last_packet_load(ur);
 }
 
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
@@ -1049,5 +1076,5 @@ guint64 udp_receiver_get_last_packet_time(UdpReceiver *ur) {
     if (ur == NULL) {
         return 0;
     }
-    return (guint64)g_atomic_int64_get((gint64 *)&ur->last_packet_ns);
+    return udp_receiver_last_packet_load(ur);
 }
