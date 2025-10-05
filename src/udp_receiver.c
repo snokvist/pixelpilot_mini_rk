@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -34,6 +35,7 @@
 #define BITRATE_WINDOW_NS 100000000ULL // 100 ms
 #define BITRATE_EWMA_ALPHA 0.1
 #define UDP_RECEIVER_MAX_PACKET 4096
+#define UDP_RECEIVER_BATCH 8
 
 typedef struct {
     guint16 sequence;
@@ -357,6 +359,92 @@ static void process_rtp(struct UdpReceiver *ur,
     history_push(ur, &sample);
 }
 
+static gboolean handle_received_packet(struct UdpReceiver *ur,
+                                       GstBuffer *gstbuf,
+                                       GstMapInfo *map,
+                                       gssize bytes_read,
+                                       gboolean active_is_primary,
+                                       gboolean *switching_from_fallback) {
+    if (bytes_read <= 0) {
+        gst_buffer_unmap(gstbuf, map);
+        gst_buffer_unref(gstbuf);
+        return FALSE;
+    }
+
+    gst_buffer_set_size(gstbuf, (gsize)bytes_read);
+
+    gboolean drop_packet = FALSE;
+    RtpParseResult preview;
+    gboolean have_preview = FALSE;
+    gboolean preview_initialized = FALSE;
+    gboolean filter_non_video = FALSE;
+    if (ur->cfg != NULL && ur->cfg->no_audio) {
+        filter_non_video = TRUE;
+    }
+    if (ur->aud_pt < 0) {
+        filter_non_video = TRUE;
+    }
+    if (filter_non_video) {
+        have_preview = parse_rtp(map->data, (gsize)bytes_read, &preview);
+        preview_initialized = TRUE;
+    }
+
+    guint64 arrival_ns = get_time_ns();
+    gboolean mark_discont = FALSE;
+    g_mutex_lock(&ur->lock);
+    if (ur->discont_pending) {
+        mark_discont = TRUE;
+        ur->discont_pending = FALSE;
+    }
+    if (active_is_primary) {
+        ur->last_primary_data_ns = arrival_ns;
+    }
+    if (!preview_initialized && ur->stats_enabled) {
+        have_preview = parse_rtp(map->data, (gsize)bytes_read, &preview);
+        preview_initialized = TRUE;
+    }
+    if (filter_non_video && have_preview && preview.payload_type != ur->vid_pt) {
+        drop_packet = TRUE;
+    } else {
+        process_rtp(ur, map->data, (gsize)bytes_read, arrival_ns, have_preview ? &preview : NULL);
+    }
+    g_mutex_unlock(&ur->lock);
+
+    gst_buffer_unmap(gstbuf, map);
+
+    if (drop_packet) {
+        gst_buffer_unref(gstbuf);
+        return TRUE;
+    }
+
+    if (switching_from_fallback != NULL && *switching_from_fallback && ur->using_fallback) {
+        LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
+        push_stream_reset_events(ur);
+        g_mutex_lock(&ur->lock);
+        reset_stats_locked(ur);
+        ur->discont_pending = TRUE;
+        g_mutex_unlock(&ur->lock);
+        mark_discont = TRUE;
+        ur->using_fallback = FALSE;
+        *switching_from_fallback = FALSE;
+    }
+
+    if (mark_discont) {
+        GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_DISCONT);
+        GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
+    }
+
+    GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
+    if (flow != GST_FLOW_OK) {
+        LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
+        if (flow == GST_FLOW_FLUSHING) {
+            g_usleep(1000);
+        }
+    }
+
+    return TRUE;
+}
+
 static gboolean buffer_pool_start(struct UdpReceiver *ur) {
     if (ur->pool != NULL) {
         gst_buffer_pool_set_active(ur->pool, FALSE);
@@ -493,30 +581,56 @@ static gpointer receiver_thread(gpointer data) {
             continue;
         }
 
-        GstBuffer *gstbuf = NULL;
-        GstFlowReturn flow = gst_buffer_pool_acquire_buffer(ur->pool, &gstbuf, NULL);
-        if (flow != GST_FLOW_OK || gstbuf == NULL) {
-            LOGE("UDP receiver: failed to acquire buffer from pool (flow=%s)",
-                 gst_flow_get_name(flow));
+        GstBuffer *buffers[UDP_RECEIVER_BATCH] = {0};
+        GstMapInfo maps[UDP_RECEIVER_BATCH];
+        struct mmsghdr msgs[UDP_RECEIVER_BATCH];
+        struct iovec iovecs[UDP_RECEIVER_BATCH];
+        guint prepared = 0;
+
+        while (prepared < UDP_RECEIVER_BATCH) {
+            GstBuffer *gstbuf = NULL;
+            GstFlowReturn flow = gst_buffer_pool_acquire_buffer(ur->pool, &gstbuf, NULL);
+            if (flow != GST_FLOW_OK || gstbuf == NULL) {
+                LOGE("UDP receiver: failed to acquire buffer from pool (flow=%s)",
+                     gst_flow_get_name(flow));
+                if (gstbuf != NULL) {
+                    gst_buffer_unref(gstbuf);
+                }
+                break;
+            }
+            if (!gst_buffer_map(gstbuf, &maps[prepared], GST_MAP_WRITE)) {
+                LOGE("UDP receiver: buffer map failed");
+                gst_buffer_unref(gstbuf);
+                break;
+            }
+
+            buffers[prepared] = gstbuf;
+            memset(&msgs[prepared], 0, sizeof(msgs[prepared]));
+            iovecs[prepared].iov_base = maps[prepared].data;
+            iovecs[prepared].iov_len = max_pkt;
+            msgs[prepared].msg_hdr.msg_iov = &iovecs[prepared];
+            msgs[prepared].msg_hdr.msg_iovlen = 1;
+            prepared++;
+        }
+
+        if (prepared == 0) {
             g_usleep(1000);
             continue;
         }
 
-        GstMapInfo map;
-        if (!gst_buffer_map(gstbuf, &map, GST_MAP_WRITE)) {
-            LOGE("UDP receiver: buffer map failed");
-            gst_buffer_unref(gstbuf);
-            g_usleep(1000);
-            continue;
-        }
-
-        struct sockaddr_in src;
-        socklen_t slen = sizeof(src);
-        ssize_t n = recvfrom(active_fd, map.data, max_pkt, 0, (struct sockaddr *)&src, &slen);
-        if (n < 0) {
+        int flags = 0;
+#ifdef MSG_WAITFORONE
+        flags |= MSG_WAITFORONE;
+#endif
+        int received = recvmmsg(active_fd, msgs, prepared, flags, NULL);
+        if (received < 0) {
             int err = errno;
-            gst_buffer_unmap(gstbuf, &map);
-            gst_buffer_unref(gstbuf);
+            for (guint i = 0; i < prepared; i++) {
+                if (buffers[i] != NULL) {
+                    gst_buffer_unmap(buffers[i], &maps[i]);
+                    gst_buffer_unref(buffers[i]);
+                }
+            }
             if (err == EINTR) {
                 continue;
             }
@@ -525,79 +639,34 @@ static gpointer receiver_thread(gpointer data) {
                 continue;
             }
             if (!ur->stop_requested) {
-                LOGE("UDP receiver: recvfrom failed: %s", g_strerror(err));
+                LOGE("UDP receiver: recvmmsg failed: %s", g_strerror(err));
             }
             break;
         }
 
-        gst_buffer_set_size(gstbuf, (gsize)n);
-
-        gboolean drop_packet = FALSE;
-        RtpParseResult preview;
-        gboolean have_preview = FALSE;
-        gboolean preview_initialized = FALSE;
-        gboolean filter_non_video = FALSE;
-        if (ur->cfg != NULL && ur->cfg->no_audio) {
-            filter_non_video = TRUE;
-        }
-        if (ur->aud_pt < 0) {
-            filter_non_video = TRUE;
-        }
-        if (filter_non_video) {
-            have_preview = parse_rtp(map.data, (gsize)n, &preview);
-            preview_initialized = TRUE;
-        }
-
-        guint64 arrival_ns = get_time_ns();
-        gboolean mark_discont = FALSE;
-        g_mutex_lock(&ur->lock);
-        if (ur->discont_pending) {
-            mark_discont = TRUE;
-            ur->discont_pending = FALSE;
-        }
-        if (active_is_primary) {
-            ur->last_primary_data_ns = arrival_ns;
-        }
-        if (!preview_initialized && ur->stats_enabled) {
-            have_preview = parse_rtp(map.data, (gsize)n, &preview);
-            preview_initialized = TRUE;
-        }
-        if (filter_non_video && have_preview && preview.payload_type != ur->vid_pt) {
-            drop_packet = TRUE;
-        } else {
-            process_rtp(ur, map.data, (gsize)n, arrival_ns, have_preview ? &preview : NULL);
-        }
-        g_mutex_unlock(&ur->lock);
-
-        gst_buffer_unmap(gstbuf, &map);
-
-        if (drop_packet) {
-            gst_buffer_unref(gstbuf);
-            continue;
-        }
-
-        if (switching_from_fallback && ur->using_fallback) {
-            LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
-            push_stream_reset_events(ur);
-            g_mutex_lock(&ur->lock);
-            reset_stats_locked(ur);
-            ur->discont_pending = TRUE;
-            g_mutex_unlock(&ur->lock);
-            mark_discont = TRUE;
-            ur->using_fallback = FALSE;
-        }
-
-        if (mark_discont) {
-            GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_DISCONT);
-            GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
-        }
-
-        flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
-        if (flow != GST_FLOW_OK) {
-            LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
-            if (flow == GST_FLOW_FLUSHING) {
-                g_usleep(1000);
+        for (int i = received; i < (int)prepared; i++) {
+            if (buffers[i] != NULL) {
+                gst_buffer_unmap(buffers[i], &maps[i]);
+                gst_buffer_unref(buffers[i]);
             }
+        }
+
+        gboolean switching_flag = switching_from_fallback;
+        for (int i = 0; i < received; i++) {
+            if (msgs[i].msg_hdr.msg_flags & MSG_TRUNC) {
+                LOGW("UDP receiver: truncated UDP packet dropped");
+                gst_buffer_unmap(buffers[i], &maps[i]);
+                gst_buffer_unref(buffers[i]);
+                continue;
+            }
+
+            gssize n = (gssize)msgs[i].msg_len;
+            handle_received_packet(ur,
+                                   buffers[i],
+                                   &maps[i],
+                                   n,
+                                   active_is_primary,
+                                   switching_from_fallback ? &switching_flag : NULL);
         }
     }
 
