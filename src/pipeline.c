@@ -136,6 +136,102 @@ static GstElement *create_udp_source(const AppCfg *cfg, gboolean video_only, Udp
 
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick);
 
+static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *cfg) {
+    GstElement *pipeline = NULL;
+    GstElement *appsrc = NULL;
+    GstElement *depay = NULL;
+    GstElement *parser = NULL;
+    GstElement *capsfilter = NULL;
+    GstElement *appsink = NULL;
+    GstCaps *raw_caps = NULL;
+    UdpReceiver *receiver = NULL;
+
+    pipeline = gst_pipeline_new("pixelpilot-receiver");
+    CHECK_ELEM(pipeline, "pipeline");
+
+    appsrc = create_udp_app_source(cfg, TRUE, &receiver);
+    if (appsrc == NULL) {
+        goto fail;
+    }
+
+    depay = gst_element_factory_make("rtph265depay", "video_depay");
+    CHECK_ELEM(depay, "rtph265depay");
+    parser = gst_element_factory_make("h265parse", "video_parser");
+    CHECK_ELEM(parser, "h265parse");
+    capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
+    CHECK_ELEM(capsfilter, "capsfilter");
+    appsink = gst_element_factory_make("appsink", "out_appsink");
+    CHECK_ELEM(appsink, "appsink");
+
+    g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
+    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
+    gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
+
+    g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
+    if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
+        LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
+    }
+    if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
+        LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
+    }
+
+    raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
+                                   "alignment", G_TYPE_STRING, "au", NULL);
+    if (raw_caps == NULL) {
+        LOGE("Failed to allocate caps for video byte-stream enforcement");
+        goto fail;
+    }
+    g_object_set(capsfilter, "caps", raw_caps, NULL);
+    gst_app_sink_set_caps(GST_APP_SINK(appsink), raw_caps);
+    gst_caps_unref(raw_caps);
+    raw_caps = NULL;
+
+    gst_bin_add_many(GST_BIN(pipeline), appsrc, depay, parser, capsfilter, appsink, NULL);
+    if (!gst_element_link_many(appsrc, depay, parser, capsfilter, appsink, NULL)) {
+        LOGE("Failed to link UDP receiver passthrough pipeline");
+        goto fail;
+    }
+
+    ps->pipeline = pipeline;
+    ps->source = appsrc;
+    ps->video_sink = appsink;
+    ps->udp_receiver = receiver;
+    ps->video_branch_entry = NULL;
+    ps->audio_branch_entry = NULL;
+    return TRUE;
+
+fail:
+    if (raw_caps != NULL) {
+        gst_caps_unref(raw_caps);
+    }
+    if (receiver != NULL) {
+        udp_receiver_destroy(receiver);
+    }
+    if (appsink != NULL && GST_OBJECT_PARENT(appsink) == NULL) {
+        gst_object_unref(appsink);
+    }
+    if (capsfilter != NULL && GST_OBJECT_PARENT(capsfilter) == NULL) {
+        gst_object_unref(capsfilter);
+    }
+    if (parser != NULL && GST_OBJECT_PARENT(parser) == NULL) {
+        gst_object_unref(parser);
+    }
+    if (depay != NULL && GST_OBJECT_PARENT(depay) == NULL) {
+        gst_object_unref(depay);
+    }
+    if (appsrc != NULL && GST_OBJECT_PARENT(appsrc) == NULL) {
+        gst_object_unref(appsrc);
+    }
+    if (pipeline != NULL) {
+        gst_object_unref(pipeline);
+    }
+    ps->pipeline = NULL;
+    ps->source = NULL;
+    ps->video_sink = NULL;
+    ps->udp_receiver = NULL;
+    return FALSE;
+}
+
 static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) {
     if (ps == NULL || cfg == NULL) {
         return FALSE;
@@ -839,6 +935,13 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     if (cfg->custom_sink == CUSTOM_SINK_UDPSRC) {
         LOGI("Custom sink mode 'udpsrc' selected; UDP receiver stats disabled");
         if (!setup_gst_udpsrc_pipeline(ps, cfg)) {
+            goto fail;
+        }
+        pipeline = ps->pipeline;
+        force_audio_disabled = TRUE;
+    } else if (cfg->custom_sink == CUSTOM_SINK_RECEIVER) {
+        LOGI("Custom sink mode 'receiver' selected; using direct RTP pipeline");
+        if (!setup_udp_receiver_passthrough(ps, cfg)) {
             goto fail;
         }
         pipeline = ps->pipeline;
