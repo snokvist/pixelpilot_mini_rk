@@ -85,7 +85,7 @@ int main(int argc, char **argv) {
             } else {
                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
             }
-            if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
+            if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
                 LOGE("Failed to start pipeline");
                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
             } else {
@@ -154,7 +154,7 @@ int main(int argc, char **argv) {
                             if (ps.state != PIPELINE_STOPPED) {
                                 pipeline_stop(&ps, 700);
                             }
-                            if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
+                            if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
                                 LOGE("Failed to start pipeline after hotplug");
                                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
                             } else {
@@ -200,7 +200,7 @@ int main(int argc, char **argv) {
                 LOGW("Audio device likely busy; switching audio branch to fakesink to avoid restart loop.");
             }
             LOGW("Pipeline not running; restarting%s...", audio_disabled ? " (audio=fakesink)" : "");
-            if (pipeline_start(&cfg, audio_disabled, &ps) != 0) {
+            if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
                 LOGE("Restart failed");
                 pipeline_set_receiver_stats_enabled(&ps, FALSE);
             } else {
