@@ -88,6 +88,11 @@ typedef struct {
 } OsdGlyphCacheEntry;
 
 typedef struct {
+    struct DumbFB fb;
+    pixman_image_t *pixman;
+} OsdSurface;
+
+typedef struct {
     pixman_image_t **frames;
     int frame_count;
     int frame_capacity;
@@ -115,8 +120,10 @@ typedef struct OSD {
     int active;
     uint32_t requested_plane_id;
     uint32_t plane_id;
-    struct DumbFB fb;
-    pixman_image_t *pixman_fb;
+    OsdSurface surfaces[2];
+    int surface_count;
+    int front_idx;
+    int back_idx;
     int w;
     int h;
     int scale;

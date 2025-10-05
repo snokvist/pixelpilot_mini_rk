@@ -65,24 +65,34 @@ static pixman_color_t osd_argb_to_pixman_color(uint32_t argb) {
     return color;
 }
 
-static pixman_image_t *osd_fb_image(OSD *o) {
-    if (!o || !o->fb.map) {
+static OsdSurface *osd_active_surface(OSD *o, int idx) {
+    if (!o || idx < 0 || idx >= o->surface_count) {
         return NULL;
     }
-    if (!o->pixman_fb) {
-        o->pixman_fb = pixman_image_create_bits(PIXMAN_a8r8g8b8, o->fb.w, o->fb.h,
-                                                (uint32_t *)o->fb.map, o->fb.pitch);
+    return &o->surfaces[idx];
+}
+
+static pixman_image_t *osd_fb_image(OSD *o) {
+    OsdSurface *surface = osd_active_surface(o, o->back_idx);
+    if (!surface || !surface->fb.map) {
+        return NULL;
     }
-    return o->pixman_fb;
+    if (!surface->pixman) {
+        surface->pixman = pixman_image_create_bits(PIXMAN_a8r8g8b8, surface->fb.w, surface->fb.h,
+                                                   (uint32_t *)surface->fb.map, surface->fb.pitch);
+    }
+    return surface->pixman;
 }
 
 static void osd_destroy_pixman_surface(OSD *o) {
     if (!o) {
         return;
     }
-    if (o->pixman_fb) {
-        pixman_image_unref(o->pixman_fb);
-        o->pixman_fb = NULL;
+    for (int i = 0; i < 2; ++i) {
+        if (o->surfaces[i].pixman) {
+            pixman_image_unref(o->surfaces[i].pixman);
+            o->surfaces[i].pixman = NULL;
+        }
     }
 }
 
@@ -338,7 +348,7 @@ static void osd_clear(OSD *o, uint32_t argb) {
         return;
     }
     pixman_color_t color = osd_argb_to_pixman_color(argb);
-    pixman_rectangle16_t rect = {0, 0, (uint16_t)o->fb.w, (uint16_t)o->fb.h};
+    pixman_rectangle16_t rect = {0, 0, (uint16_t)o->w, (uint16_t)o->h};
     pixman_image_fill_rectangles(PIXMAN_OP_SRC, dest, &color, 1, &rect);
 }
 
@@ -2843,11 +2853,15 @@ static int osd_query_plane_props(int fd, uint32_t plane_id, OSD *o) {
 }
 
 static int osd_commit_enable(int fd, uint32_t crtc_id, OSD *o) {
+    OsdSurface *front = osd_active_surface(o, o->front_idx);
+    if (!front || front->fb.fb_id == 0) {
+        return -1;
+    }
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req) {
         return -1;
     }
-    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, o->fb.fb_id);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, front->fb.fb_id);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_x, 0);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_y, 0);
@@ -2903,21 +2917,53 @@ static int osd_commit_disable(int fd, OSD *o) {
 }
 
 static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
+    OsdSurface *back = osd_active_surface(o, o->back_idx);
+    if (!back || back->fb.fb_id == 0) {
+        return;
+    }
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req) {
         return;
     }
-    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, o->fb.fb_id);
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, back->fb.fb_id);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, crtc_id);
-    drmModeAtomicCommit(fd, req, 0, NULL);
+    int ret = drmModeAtomicCommit(fd, req, 0, NULL);
     drmModeAtomicFree(req);
+    if (ret == 0) {
+        o->front_idx = o->back_idx;
+    }
 }
 
 static void osd_destroy_fb(int fd, OSD *o) {
     osd_destroy_pixman_surface(o);
     osd_reset_glyph_cache(o);
     osd_destroy_image_cache(o);
-    destroy_dumb_fb(fd, &o->fb);
+    for (int i = 0; i < 2; ++i) {
+        destroy_dumb_fb(fd, &o->surfaces[i].fb);
+        o->surfaces[i].pixman = NULL;
+    }
+    o->surface_count = 0;
+    o->front_idx = 0;
+    o->back_idx = 0;
+}
+
+static void osd_prepare_back_buffer(OSD *o) {
+    if (!o || o->surface_count <= 0) {
+        return;
+    }
+    if (o->surface_count > 1) {
+        int next = (o->front_idx + 1) % o->surface_count;
+        o->back_idx = next;
+        OsdSurface *front = osd_active_surface(o, o->front_idx);
+        OsdSurface *back = osd_active_surface(o, o->back_idx);
+        if (front && back && front->fb.map && back->fb.map && front->fb.size == back->fb.size) {
+            memcpy(back->fb.map, front->fb.map, front->fb.size);
+        } else if (back && back->fb.map && back->fb.size > 0) {
+            memset(back->fb.map, 0, back->fb.size);
+        }
+    } else {
+        o->back_idx = o->front_idx;
+    }
 }
 
 int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plane_id, OSD *o) {
@@ -2959,10 +3005,24 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     }
     o->margin_px = clampi(12 * o->scale, 8, o->h / 4);
 
-    if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
+    memset(o->surfaces, 0, sizeof(o->surfaces));
+    o->surface_count = 0;
+    o->front_idx = 0;
+    o->back_idx = 0;
+
+    if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->surfaces[0].fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");
         o->enabled = 0;
         return -1;
+    }
+    o->surface_count = 1;
+    o->surfaces[0].pixman = NULL;
+
+    if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->surfaces[1].fb) == 0) {
+        o->surface_count = 2;
+        o->surfaces[1].pixman = NULL;
+    } else {
+        memset(&o->surfaces[1], 0, sizeof(o->surfaces[1]));
     }
 
     if (!osd_fb_image(o)) {
@@ -3008,6 +3068,8 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     if (!o->enabled || !o->active) {
         return;
     }
+
+    osd_prepare_back_buffer(o);
 
     OsdRenderContext ctx = {
         .cfg = cfg,
