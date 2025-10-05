@@ -13,10 +13,13 @@ typedef enum {
     PIPELINE_STOPPING = 2
 } PipelineStateEnum;
 
+struct Splash;
+
 typedef struct {
     PipelineStateEnum state;
     GstElement *pipeline;
     GstElement *video_sink;
+    GstElement *input_selector;
     UdpReceiver *udp_receiver;
     GThread *bus_thread;
     GThread *appsink_thread;
@@ -33,6 +36,16 @@ typedef struct {
     VideoDecoder *decoder;
     gboolean decoder_initialized;
     gboolean decoder_running;
+    struct Splash *splash;
+    GThread *splash_loop_thread;
+    gboolean splash_loop_running;
+    GstPad *selector_udp_pad;
+    GstPad *selector_splash_pad;
+    gboolean splash_active;
+    gboolean splash_available;
+    guint splash_idle_timeout_ms;
+    guint64 pipeline_start_ns;
+    guint64 last_udp_activity_ns;
 } PipelineState;
 
 #include "config.h"

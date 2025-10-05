@@ -35,6 +35,12 @@ to the defaults listed in `src/config.c` when omitted.
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].latency-ms` | Network jitter buffer target in milliseconds. This feeds the appsrc `latency` property as well as the OSD token `{pipeline.latency_ms}`. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
+| `[splash].enable` | `true` enables the idle fallback player that loops local H.265 sequences when the UDP stream is idle. |
+| `[splash].input` | Path to an Annex-B H.265 elementary stream with intra-only frames that the splash player should loop. |
+| `[splash].fps` | Frame rate used when timestamping splash buffers. |
+| `[splash].idle-timeout-ms` | Milliseconds of inactivity on the video stream before the splash source takes over. |
+| `[splash].default-sequence` | Optional name of the `[splash.sequence.*]` block that should start looping once idle. |
+| `[splash.sequence.NAME].start` / `end` | Inclusive frame range describing a named splash sequence that can be queued. |
 | `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
@@ -109,3 +115,34 @@ arriving on a different SSRC (or with a large sequence gap) is ignored entirely 
 The history buffer exposed through `udp.history.*` tokens retains the 512 most recent packet samples, including packet size,
 payload type, arrival timestamp, and flags for loss, reordering, duplication, and frame boundaries. This makes it possible to
 build custom diagnostics or render per-packet overlays directly from the INI configuration.
+
+## Splash fallback playback
+
+When the primary UDP stream drops out it is often desirable to display a "waiting" slate rather than leaving the screen idle.
+Set `[splash].enable = true` to arm the bundled splash player. The player loops H.265 frame ranges from a local Annex-B
+elementary stream and feeds them through the existing decode path whenever the configured `[splash].idle-timeout-ms`
+threshold elapses without new video packets. As soon as RTP traffic resumes the selector switches back to the live feed.
+
+Splash sequences are defined in `[splash.sequence.NAME]` blocks and reference inclusive start/end frame numbers inside the
+input file. Multiple sequences can be chained to create a simple playlist. The example below loops two segments while the
+receiver is idle:
+
+```ini
+[splash]
+enable = true
+input = /opt/pixelpilot/splash/standby.h265
+fps = 30.0
+idle-timeout-ms = 2000
+default-sequence = intro
+
+[splash.sequence.intro]
+start = 0
+end = 179
+
+[splash.sequence.loop]
+start = 180
+end = 359
+```
+
+Provide an H.265 stream with repeated key frames (all-I-frame content works best). Each sequence should align with GOP
+boundaries to avoid decoding artifacts. Disable the feature by omitting the `[splash]` section or setting `enable = false`.

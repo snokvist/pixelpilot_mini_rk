@@ -55,6 +55,7 @@ typedef struct {
     size_t history_count;
     size_t history_head;
     UdpReceiverPacketSample history[UDP_RECEIVER_HISTORY];
+    guint64 last_packet_ns;
 } UdpReceiverStats;
 
 typedef struct UdpReceiver UdpReceiver;
@@ -66,6 +67,7 @@ void udp_receiver_stop(UdpReceiver *ur);
 void udp_receiver_destroy(UdpReceiver *ur);
 void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats);
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled);
+guint64 udp_receiver_get_last_packet_time(UdpReceiver *ur);
 #ifdef __cplusplus
 }
 #endif

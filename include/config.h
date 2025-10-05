@@ -6,6 +6,8 @@
 
 #include "osd_layout.h"
 
+#define SPLASH_MAX_SEQUENCES 32
+
 #ifndef CPU_SETSIZE
 #define CPU_SETSIZE ((int)(sizeof(cpu_set_t) * CHAR_BIT))
 #endif
@@ -14,6 +16,22 @@ typedef enum {
     CUSTOM_SINK_RECEIVER = 0,
     CUSTOM_SINK_UDPSRC,
 } CustomSinkMode;
+
+typedef struct {
+    char name[64];
+    int start_frame;
+    int end_frame;
+} SplashSequenceCfg;
+
+typedef struct {
+    int enable;
+    int idle_timeout_ms;
+    double fps;
+    char input_path[PATH_MAX];
+    char default_sequence[64];
+    int sequence_count;
+    SplashSequenceCfg sequences[SPLASH_MAX_SEQUENCES];
+} SplashCfg;
 
 typedef struct {
     char card_path[64];
@@ -46,6 +64,8 @@ typedef struct {
     int cpu_affinity_count;
 
     OsdLayout osd_layout;
+
+    SplashCfg splash;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);

@@ -105,6 +105,18 @@ void cfg_defaults(AppCfg *c) {
     memset(c->cpu_affinity_order, 0, sizeof(c->cpu_affinity_order));
 
     osd_layout_defaults(&c->osd_layout);
+
+    c->splash.enable = 0;
+    c->splash.idle_timeout_ms = 2000;
+    c->splash.fps = 30.0;
+    c->splash.input_path[0] = '\0';
+    c->splash.default_sequence[0] = '\0';
+    c->splash.sequence_count = 0;
+    for (int i = 0; i < SPLASH_MAX_SEQUENCES; ++i) {
+        c->splash.sequences[i].name[0] = '\0';
+        c->splash.sequences[i].start_frame = -1;
+        c->splash.sequences[i].end_frame = -1;
+    }
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {

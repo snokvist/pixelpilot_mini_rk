@@ -2,6 +2,7 @@
 
 #include "pipeline.h"
 #include "logging.h"
+#include "splashlib.h"
 
 #ifndef GST_USE_UNSTABLE_API
 #define GST_USE_UNSTABLE_API
@@ -26,6 +27,325 @@
             goto fail;                                                                              \
         }                                                                                           \
     } while (0)
+
+static void release_selector_pad(GstElement *selector, GstPad **pad_slot) {
+    if (pad_slot == NULL || *pad_slot == NULL) {
+        return;
+    }
+
+    GstPad *pad = *pad_slot;
+    if (selector != NULL) {
+        gst_element_release_request_pad(selector, pad);
+    }
+
+    gst_object_unref(pad);
+    *pad_slot = NULL;
+}
+
+static guint64 monotonic_time_ns(void) {
+    return (guint64)g_get_monotonic_time() * 1000ull;
+}
+
+static gpointer splash_loop_thread_func(gpointer data) {
+    PipelineState *ps = (PipelineState *)data;
+    Splash *splash = NULL;
+
+    g_mutex_lock(&ps->lock);
+    ps->splash_loop_running = TRUE;
+    splash = ps->splash;
+    g_mutex_unlock(&ps->lock);
+
+    if (splash != NULL) {
+        splash_run(splash);
+    }
+
+    g_mutex_lock(&ps->lock);
+    ps->splash_loop_running = FALSE;
+    g_mutex_unlock(&ps->lock);
+    return NULL;
+}
+
+static gboolean pipeline_prepare_splash(PipelineState *ps,
+                                        const AppCfg *cfg,
+                                        GstElement *pipeline,
+                                        GstElement *selector) {
+    ps->splash_available = FALSE;
+    if (ps == NULL || cfg == NULL || pipeline == NULL || selector == NULL) {
+        return FALSE;
+    }
+
+    if (!cfg->splash.enable) {
+        return TRUE;
+    }
+    if (cfg->splash.sequence_count <= 0 || cfg->splash.input_path[0] == '\0') {
+        LOGW("Splash fallback enabled but missing input or sequences; disabling");
+        return TRUE;
+    }
+
+    Splash *splash = splash_new();
+    if (splash == NULL) {
+        LOGE("Failed to allocate splash player state");
+        return FALSE;
+    }
+    ps->splash = splash;
+
+    GstElement *splash_appsrc = NULL;
+    GstElement *splash_queue = NULL;
+    GstPad *splash_sink_pad = NULL;
+
+    int seq_count = cfg->splash.sequence_count;
+    if (seq_count > SPLASH_MAX_SEQUENCES) {
+        seq_count = SPLASH_MAX_SEQUENCES;
+    }
+
+    SplashSeq seqs[SPLASH_MAX_SEQUENCES];
+    for (int i = 0; i < seq_count; ++i) {
+        seqs[i].name = cfg->splash.sequences[i].name;
+        seqs[i].start_frame = cfg->splash.sequences[i].start_frame;
+        seqs[i].end_frame = cfg->splash.sequences[i].end_frame;
+    }
+
+    if (!splash_set_sequences(splash, seqs, seq_count)) {
+        LOGE("Failed to load splash sequences");
+        goto fail;
+    }
+
+    double fps = cfg->splash.fps > 0.0 ? cfg->splash.fps : 30.0;
+    SplashConfig splash_cfg = {0};
+    splash_cfg.input_path = cfg->splash.input_path;
+    splash_cfg.fps = fps;
+    splash_cfg.outputs = SPLASH_OUTPUT_APPSRC;
+
+    if (!splash_apply_config(splash, &splash_cfg)) {
+        LOGE("Failed to configure splash playback");
+        goto fail;
+    }
+
+    splash_clear_next(splash);
+    int order[SPLASH_MAX_SEQUENCES];
+    int order_count = 0;
+    int start_index = 0;
+    if (cfg->splash.default_sequence[0] != '\0') {
+        int idx = splash_find_index_by_name(splash, cfg->splash.default_sequence);
+        if (idx >= 0) {
+            start_index = idx;
+        } else {
+            LOGW("Splash default-sequence '%s' not found; starting from first sequence", cfg->splash.default_sequence);
+        }
+    }
+    for (int i = 0; i < seq_count; ++i) {
+        int idx = (start_index + i) % seq_count;
+        order[order_count++] = idx;
+    }
+    if (order_count > 0) {
+        SplashRepeatMode repeat_mode = order_count > 1 ? SPLASH_REPEAT_FULL : SPLASH_REPEAT_LAST;
+        if (!splash_enqueue_with_repeat(splash, order, order_count, repeat_mode)) {
+            LOGW("Failed to configure splash repeat order; disabling repeat loop");
+            splash_set_repeat_order(splash, NULL, 0);
+        }
+    }
+
+    splash_appsrc = splash_get_appsrc(splash);
+    if (splash_appsrc == NULL) {
+        LOGE("Failed to obtain splash appsrc element");
+        goto fail;
+    }
+
+    splash_queue = gst_element_factory_make("queue", "splash_queue");
+    if (splash_queue == NULL) {
+        LOGE("Failed to create splash queue element");
+        gst_object_unref(splash_appsrc);
+        goto fail;
+    }
+
+    g_object_set(splash_queue, "leaky", 2, "max-size-buffers", 16, "max-size-bytes", (guint64)0,
+                 "max-size-time", (guint64)0, NULL);
+
+    gst_bin_add_many(GST_BIN(pipeline), splash_appsrc, splash_queue, NULL);
+    if (!gst_element_link(splash_appsrc, splash_queue)) {
+        LOGE("Failed to link splash appsrc to queue");
+        gst_bin_remove(GST_BIN(pipeline), splash_queue);
+        gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
+        splash_queue = NULL;
+        splash_appsrc = NULL;
+        goto fail;
+    }
+
+    splash_sink_pad = gst_element_get_request_pad(selector, "sink_%u");
+    if (splash_sink_pad == NULL) {
+        LOGE("Failed to request selector pad for splash branch");
+        gst_bin_remove(GST_BIN(pipeline), splash_queue);
+        gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
+        splash_queue = NULL;
+        splash_appsrc = NULL;
+        goto fail;
+    }
+
+    GstPad *queue_src = gst_element_get_static_pad(splash_queue, "src");
+    if (queue_src == NULL) {
+        LOGE("Failed to get splash queue src pad");
+        release_selector_pad(selector, &splash_sink_pad);
+        gst_bin_remove(GST_BIN(pipeline), splash_queue);
+        gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
+        splash_queue = NULL;
+        splash_appsrc = NULL;
+        goto fail;
+    }
+
+    if (gst_pad_link(queue_src, splash_sink_pad) != GST_PAD_LINK_OK) {
+        LOGE("Failed to link splash queue into selector");
+        gst_object_unref(queue_src);
+        release_selector_pad(selector, &splash_sink_pad);
+        gst_bin_remove(GST_BIN(pipeline), splash_queue);
+        gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
+        splash_queue = NULL;
+        splash_appsrc = NULL;
+        goto fail;
+    }
+    gst_object_unref(queue_src);
+
+    ps->selector_splash_pad = splash_sink_pad;
+    splash_sink_pad = NULL;
+
+    ps->splash_loop_thread = g_thread_new("splash-loop", splash_loop_thread_func, ps);
+    if (ps->splash_loop_thread == NULL) {
+        LOGE("Failed to start splash main loop thread");
+        goto fail_thread;
+    }
+
+    if (!splash_start(splash)) {
+        LOGE("Failed to start splash playback");
+        goto fail_thread;
+    }
+
+    ps->splash_available = TRUE;
+    ps->splash_active = FALSE;
+    LOGI("Splash fallback ready with %d sequence(s)", order_count);
+    return TRUE;
+
+fail_thread:
+    if (ps->splash_loop_thread != NULL) {
+        splash_quit(ps->splash);
+        g_thread_join(ps->splash_loop_thread);
+        ps->splash_loop_thread = NULL;
+        ps->splash_loop_running = FALSE;
+    }
+    release_selector_pad(selector, &ps->selector_splash_pad);
+    release_selector_pad(selector, &splash_sink_pad);
+    if (splash_queue != NULL) {
+        if (GST_OBJECT_PARENT(splash_queue) == GST_OBJECT(pipeline)) {
+            gst_bin_remove(GST_BIN(pipeline), splash_queue);
+        } else {
+            gst_object_unref(splash_queue);
+        }
+        splash_queue = NULL;
+    }
+    if (splash_appsrc != NULL) {
+        if (GST_OBJECT_PARENT(splash_appsrc) == GST_OBJECT(pipeline)) {
+            gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
+        } else {
+            gst_object_unref(splash_appsrc);
+        }
+        splash_appsrc = NULL;
+    }
+fail:
+    release_selector_pad(selector, &ps->selector_splash_pad);
+    release_selector_pad(selector, &splash_sink_pad);
+    if (splash_queue != NULL) {
+        if (GST_OBJECT_PARENT(splash_queue) == GST_OBJECT(pipeline)) {
+            gst_bin_remove(GST_BIN(pipeline), splash_queue);
+        } else {
+            gst_object_unref(splash_queue);
+        }
+        splash_queue = NULL;
+    }
+    if (splash_appsrc != NULL) {
+        if (GST_OBJECT_PARENT(splash_appsrc) == GST_OBJECT(pipeline)) {
+            gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
+        } else {
+            gst_object_unref(splash_appsrc);
+        }
+        splash_appsrc = NULL;
+    }
+    if (ps->splash != NULL) {
+        splash_stop(ps->splash);
+        splash_free(ps->splash);
+        ps->splash = NULL;
+    }
+    ps->splash_available = FALSE;
+    ps->splash_active = FALSE;
+    return FALSE;
+}
+
+static void pipeline_teardown_splash(PipelineState *ps) {
+    if (ps == NULL) {
+        return;
+    }
+    if (ps->splash != NULL) {
+        splash_stop(ps->splash);
+    }
+    if (ps->splash_loop_thread != NULL) {
+        splash_quit(ps->splash);
+        g_thread_join(ps->splash_loop_thread);
+        ps->splash_loop_thread = NULL;
+    }
+    if (ps->splash != NULL) {
+        splash_free(ps->splash);
+        ps->splash = NULL;
+    }
+    ps->splash_loop_running = FALSE;
+    release_selector_pad(ps->input_selector, &ps->selector_udp_pad);
+    release_selector_pad(ps->input_selector, &ps->selector_splash_pad);
+    ps->input_selector = NULL;
+    ps->splash_available = FALSE;
+    ps->splash_active = FALSE;
+}
+
+static void pipeline_update_splash(PipelineState *ps) {
+    if (ps == NULL) {
+        return;
+    }
+    if (!ps->splash_available || ps->udp_receiver == NULL) {
+        return;
+    }
+
+    guint idle_ms = ps->splash_idle_timeout_ms;
+    if (idle_ms == 0) {
+        return;
+    }
+
+    guint64 last_packet = udp_receiver_get_last_packet_time(ps->udp_receiver);
+    guint64 reference_ns = last_packet != 0 ? last_packet : ps->pipeline_start_ns;
+    if (reference_ns == 0) {
+        return;
+    }
+
+    guint64 now_ns = monotonic_time_ns();
+    guint64 diff_ms = now_ns > reference_ns ? (now_ns - reference_ns) / 1000000ull : 0;
+
+    g_mutex_lock(&ps->lock);
+    gboolean active = ps->splash_active;
+    ps->last_udp_activity_ns = last_packet;
+    g_mutex_unlock(&ps->lock);
+
+    if (!active && diff_ms >= idle_ms) {
+        g_mutex_lock(&ps->lock);
+        if (!ps->splash_active && ps->selector_splash_pad != NULL && ps->input_selector != NULL) {
+            LOGI("Activating splash fallback after %u ms without video", idle_ms);
+            g_object_set(ps->input_selector, "active-pad", ps->selector_splash_pad, NULL);
+            ps->splash_active = TRUE;
+        }
+        g_mutex_unlock(&ps->lock);
+    } else if (active && last_packet != 0 && diff_ms < idle_ms) {
+        g_mutex_lock(&ps->lock);
+        if (ps->splash_active && ps->selector_udp_pad != NULL && ps->input_selector != NULL) {
+            LOGI("Video stream detected; returning to UDP input");
+            g_object_set(ps->input_selector, "active-pad", ps->selector_udp_pad, NULL);
+            ps->splash_active = FALSE;
+        }
+        g_mutex_unlock(&ps->lock);
+    }
+}
 
 static void ensure_gst_initialized(const AppCfg *cfg) {
     static gsize inited = 0;
@@ -103,10 +423,13 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     GstElement *pipeline = NULL;
     GstElement *appsrc = NULL;
     GstElement *depay = NULL;
+    GstElement *udp_queue = NULL;
+    GstElement *selector = NULL;
     GstElement *parser = NULL;
     GstElement *capsfilter = NULL;
     GstElement *appsink = NULL;
     GstCaps *raw_caps = NULL;
+    GstPad *udp_sink_pad = NULL;
     UdpReceiver *receiver = NULL;
     GstElement *audio_appsrc = NULL;
     GstElement *audio_queue_start = NULL;
@@ -118,6 +441,12 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     GstElement *audio_sink = NULL;
     GstCaps *audio_caps = NULL;
 
+    release_selector_pad(ps->input_selector, &ps->selector_udp_pad);
+    release_selector_pad(ps->input_selector, &ps->selector_splash_pad);
+    ps->input_selector = NULL;
+    ps->splash_active = FALSE;
+    ps->splash_available = FALSE;
+
     pipeline = gst_pipeline_new("pixelpilot-receiver");
     CHECK_ELEM(pipeline, "pipeline");
 
@@ -128,8 +457,14 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
 
     depay = gst_element_factory_make("rtph265depay", "video_depay");
     CHECK_ELEM(depay, "rtph265depay");
+    udp_queue = gst_element_factory_make("queue", "udp_queue");
+    CHECK_ELEM(udp_queue, "queue");
+    selector = gst_element_factory_make("input-selector", "video_selector");
+    CHECK_ELEM(selector, "input-selector");
     parser = gst_element_factory_make("h265parse", "video_parser");
     CHECK_ELEM(parser, "h265parse");
+    capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
+    CHECK_ELEM(capsfilter, "capsfilter");
     appsink = gst_element_factory_make("appsink", "out_appsink");
     CHECK_ELEM(appsink, "appsink");
 
@@ -145,9 +480,6 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
     }
 
-    capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
-    CHECK_ELEM(capsfilter, "capsfilter");
-
     raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
                                    "alignment", G_TYPE_STRING, "au", NULL);
     if (raw_caps == NULL) {
@@ -159,10 +491,46 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     gst_caps_unref(raw_caps);
     raw_caps = NULL;
 
-    gst_bin_add_many(GST_BIN(pipeline), appsrc, depay, parser, capsfilter, appsink, NULL);
-    if (!gst_element_link_many(appsrc, depay, parser, capsfilter, appsink, NULL)) {
+    g_object_set(udp_queue, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0,
+                 "max-size-buffers", 16, NULL);
+    g_object_set(selector, "sync-streams", FALSE, NULL);
+
+    gst_bin_add_many(GST_BIN(pipeline), appsrc, depay, udp_queue, selector, parser, capsfilter, appsink, NULL);
+    if (!gst_element_link_many(appsrc, depay, udp_queue, NULL)) {
+        LOGE("Failed to link UDP receiver passthrough source chain");
+        goto fail;
+    }
+    udp_sink_pad = gst_element_get_request_pad(selector, "sink_%u");
+    if (udp_sink_pad == NULL) {
+        LOGE("Failed to request selector pad for UDP branch");
+        goto fail;
+    }
+
+    GstPad *udp_src_pad = gst_element_get_static_pad(udp_queue, "src");
+    if (udp_src_pad == NULL) {
+        LOGE("Failed to get UDP queue src pad");
+        goto fail;
+    }
+    if (gst_pad_link(udp_src_pad, udp_sink_pad) != GST_PAD_LINK_OK) {
+        LOGE("Failed to link UDP queue into selector");
+        gst_object_unref(udp_src_pad);
+        goto fail;
+    }
+    gst_object_unref(udp_src_pad);
+    if (!gst_element_link_many(selector, parser, capsfilter, appsink, NULL)) {
         LOGE("Failed to link UDP receiver passthrough pipeline");
         goto fail;
+    }
+
+    ps->selector_udp_pad = udp_sink_pad;
+    udp_sink_pad = NULL;
+
+    if (!pipeline_prepare_splash(ps, cfg, pipeline, selector)) {
+        goto fail;
+    }
+
+    if (ps->selector_udp_pad != NULL) {
+        g_object_set(selector, "active-pad", ps->selector_udp_pad, NULL);
     }
 
     gboolean enable_audio = (!cfg->no_audio && cfg->aud_pt >= 0 && !audio_disabled);
@@ -186,8 +554,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         CHECK_ELEM(audio_sink, "alsasink");
 
         g_object_set(audio_appsrc, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
-                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, "max-bytes", (guint64)(1024 * 1024),
-                     NULL);
+                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, "max-bytes", (guint64)(1024 * 1024), NULL);
         gst_app_src_set_latency(GST_APP_SRC(audio_appsrc), 0, 0);
         gst_app_src_set_max_bytes(GST_APP_SRC(audio_appsrc), 1024 * 1024);
 
@@ -202,8 +569,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         gst_caps_unref(audio_caps);
         audio_caps = NULL;
 
-        g_object_set(audio_queue_start, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0,
-                     NULL);
+        g_object_set(audio_queue_start, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
         g_object_set(audio_queue_sink, "leaky", 2, NULL);
         g_object_set(audio_sink, "device", cfg->aud_dev, "sync", FALSE, "async", FALSE, NULL);
 
@@ -229,6 +595,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     ps->pipeline = pipeline;
     ps->video_sink = appsink;
     ps->udp_receiver = receiver;
+    ps->input_selector = selector;
     return TRUE;
 
 fail:
@@ -274,6 +641,12 @@ fail:
     if (parser != NULL && GST_OBJECT_PARENT(parser) == NULL) {
         gst_object_unref(parser);
     }
+    if (selector != NULL && GST_OBJECT_PARENT(selector) == NULL) {
+        gst_object_unref(selector);
+    }
+    if (udp_queue != NULL && GST_OBJECT_PARENT(udp_queue) == NULL) {
+        gst_object_unref(udp_queue);
+    }
     if (depay != NULL && GST_OBJECT_PARENT(depay) == NULL) {
         gst_object_unref(depay);
     }
@@ -286,8 +659,15 @@ fail:
     ps->pipeline = NULL;
     ps->video_sink = NULL;
     ps->udp_receiver = NULL;
+    ps->input_selector = NULL;
+    release_selector_pad(selector, &ps->selector_splash_pad);
+    release_selector_pad(selector, &ps->selector_udp_pad);
+    release_selector_pad(selector, &udp_sink_pad);
+    ps->splash_available = FALSE;
+    ps->splash_active = FALSE;
     return FALSE;
 }
+
 
 static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) {
     if (ps == NULL || cfg == NULL) {
@@ -666,6 +1046,7 @@ static void cleanup_pipeline(PipelineState *ps) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
     }
+    pipeline_teardown_splash(ps);
     ps->video_sink = NULL;
     if (ps->pipeline != NULL) {
         gst_object_unref(ps->pipeline);
@@ -707,6 +1088,15 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->cfg = cfg;
     ps->bus_thread_cpu_slot = 0;
 
+    if (cfg->splash.idle_timeout_ms > 0) {
+        ps->splash_idle_timeout_ms = (guint)cfg->splash.idle_timeout_ms;
+    } else {
+        ps->splash_idle_timeout_ms = 0;
+    }
+    ps->pipeline_start_ns = monotonic_time_ns();
+    ps->last_udp_activity_ns = 0;
+    ps->splash_active = FALSE;
+
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;
 
@@ -743,6 +1133,8 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
             goto fail;
         }
     }
+
+    ps->pipeline_start_ns = monotonic_time_ns();
 
     if (drm_fd < 0) {
         LOGE("Invalid DRM file descriptor");
@@ -884,6 +1276,8 @@ void pipeline_poll_child(PipelineState *ps) {
             LOGI("Pipeline exited cleanly");
         }
     }
+
+    pipeline_update_splash(ps);
 }
 
 void pipeline_set_receiver_stats_enabled(PipelineState *ps, gboolean enabled) {
