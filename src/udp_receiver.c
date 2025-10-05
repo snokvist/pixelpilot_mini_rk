@@ -253,29 +253,6 @@ static void log_udp_neon_status_once(void) {
     }
 }
 
-static void push_stream_reset_events(struct UdpReceiver *ur) {
-    if (ur == NULL || ur->appsrc == NULL) {
-        return;
-    }
-
-    GstEvent *event = gst_event_new_flush_start();
-    if (!gst_element_send_event(GST_ELEMENT(ur->appsrc), event)) {
-        LOGW("UDP receiver: failed to push flush-start event");
-    }
-
-    event = gst_event_new_flush_stop(TRUE);
-    if (!gst_element_send_event(GST_ELEMENT(ur->appsrc), event)) {
-        LOGW("UDP receiver: failed to push flush-stop event");
-    }
-
-    GstSegment segment;
-    gst_segment_init(&segment, GST_FORMAT_TIME);
-    event = gst_event_new_segment(&segment);
-    if (!gst_element_send_event(GST_ELEMENT(ur->appsrc), event)) {
-        LOGW("UDP receiver: failed to push new-segment event");
-    }
-}
-
 static void update_bitrate(struct UdpReceiver *ur, guint64 arrival_ns, guint32 bytes) {
     if (ur->bitrate_window_start_ns == 0) {
         ur->bitrate_window_start_ns = arrival_ns;
@@ -772,8 +749,6 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         }
         return -1;
     }
-
-    push_stream_reset_events(ur);
 
     g_mutex_lock(&ur->lock);
     ur->stop_requested = FALSE;
