@@ -82,7 +82,8 @@ resets the counters and history buffer so each session starts with a clean slate
 
 Once the RTP payload types have been separated, only the video stream (payload type matching `[udp].video-pt`) feeds the
 aggregate counters. Audio packets still increment `udp.audio_packets` so you can confirm the sender is active, but they no longer
-impact bitrate, jitter, history samples, or frame statistics.
+impact bitrate, jitter, history samples, or frame statistics. They do, however, advance the internal sequence tracker so that video
+loss detection is not confused by interleaved audio packets.
 
 | Counter | Description |
 | --- | --- |

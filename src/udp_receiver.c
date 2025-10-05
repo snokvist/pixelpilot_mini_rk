@@ -174,6 +174,19 @@ static inline guint64 get_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+static inline void advance_expected_sequence(struct UdpReceiver *ur, guint16 sequence) {
+    if (!ur->seq_initialized) {
+        ur->seq_initialized = TRUE;
+        ur->expected_seq = seq_next(sequence);
+    } else {
+        gint16 delta = seq_delta(sequence, ur->expected_seq);
+        if (delta >= 0) {
+            ur->expected_seq = seq_next(sequence);
+        }
+    }
+    ur->stats.expected_sequence = ur->expected_seq;
+}
+
 static inline void neon_copy_bytes(guint8 *dst, const guint8 *src, size_t size) {
 #if PIXELPILOT_NEON_AVAILABLE
     if (G_UNLIKELY(size == 0)) {
@@ -315,6 +328,7 @@ static void process_rtp(struct UdpReceiver *ur,
     if (is_audio) {
         ur->stats.audio_packets++;
         ur->stats.audio_bytes += len;
+        advance_expected_sequence(ur, parsed->sequence);
         return;
     }
 
