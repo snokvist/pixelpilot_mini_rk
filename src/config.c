@@ -16,19 +16,13 @@ static void usage(const char *prog) {
             "  --card /dev/dri/cardN        (default: /dev/dri/card0)\n"
             "  --connector NAME             (e.g. HDMI-A-1; default: first CONNECTED)\n"
             "  --plane-id N                 (video plane; default: 76)\n"
-            "  --blank-primary              (detach primary plane on commit)\n"
             "  --no-udev                    (disable hotplug listener)\n"
             "  --config PATH                (load settings from ini file)\n"
             "  --udp-port N                 (default: 5600)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --latency-ms N               (default: 8)\n"
-            "  --video-queue-leaky MODE     (0=none,1=upstream,2=downstream; default: 2)\n"
-            "  --video-queue-pre-buffers N  (default: 96)\n"
-            "  --video-queue-post-buffers N (default: 8)\n"
-            "  --video-queue-sink-buffers N (default: 8)\n"
             "  --custom-sink MODE           (receiver|udpsrc; default: receiver)\n"
-            "  --max-lateness NANOSECS      (default: 20000000)\n"
             "  --aud-dev STR                (default: plughw:CARD=rockchiphdmi0,DEV=0)\n"
             "  --no-audio                   (drop audio branch entirely)\n"
             "  --audio-optional             (auto-fallback to fakesink on failures; default)\n"
@@ -84,7 +78,6 @@ void cfg_defaults(AppCfg *c) {
     memset(c, 0, sizeof(*c));
     strcpy(c->card_path, "/dev/dri/card0");
     c->plane_id = 76;
-    c->blank_primary = 0;
     c->use_udev = 1;
     c->config_path[0] = '\0';
 
@@ -92,13 +85,6 @@ void cfg_defaults(AppCfg *c) {
     c->vid_pt = 97;
     c->aud_pt = 98;
     c->latency_ms = 8;
-    c->kmssink_sync = 0;
-    c->kmssink_qos = 1;
-    c->max_lateness_ns = 20000000;
-    c->video_queue_leaky = 2;
-    c->video_queue_pre_buffers = 96;
-    c->video_queue_post_buffers = 8;
-    c->video_queue_sink_buffers = 8;
     c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 
@@ -229,8 +215,6 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cli_copy_string(cfg->connector_name, sizeof(cfg->connector_name), argv[++i]);
         } else if (!strcmp(argv[i], "--plane-id") && i + 1 < argc) {
             cfg->plane_id = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--blank-primary")) {
-            cfg->blank_primary = 1;
         } else if (!strcmp(argv[i], "--no-udev")) {
             cfg->use_udev = 0;
         } else if (!strcmp(argv[i], "--udp-port") && i + 1 < argc) {
@@ -241,14 +225,6 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->aud_pt = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--latency-ms") && i + 1 < argc) {
             cfg->latency_ms = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--video-queue-leaky") && i + 1 < argc) {
-            cfg->video_queue_leaky = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--video-queue-pre-buffers") && i + 1 < argc) {
-            cfg->video_queue_pre_buffers = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--video-queue-post-buffers") && i + 1 < argc) {
-            cfg->video_queue_post_buffers = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--video-queue-sink-buffers") && i + 1 < argc) {
-            cfg->video_queue_sink_buffers = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--custom-sink") && i + 1 < argc) {
             const char *mode_str = argv[++i];
             CustomSinkMode mode;
@@ -266,8 +242,6 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--no-gst-udpsrc")) {
             LOGW("--no-gst-udpsrc is deprecated; use --custom-sink receiver instead");
             cfg->custom_sink = CUSTOM_SINK_RECEIVER;
-        } else if (!strcmp(argv[i], "--max-lateness") && i + 1 < argc) {
-            cfg->max_lateness_ns = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-dev") && i + 1 < argc) {
             cli_copy_string(cfg->aud_dev, sizeof(cfg->aud_dev), argv[++i]);
         } else if (!strcmp(argv[i], "--no-audio")) {

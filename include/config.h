@@ -20,20 +20,12 @@ typedef struct {
     char connector_name[32];
     char config_path[PATH_MAX];
     int plane_id;
-    int blank_primary;
     int use_udev;
 
     int udp_port;
     int vid_pt;
     int aud_pt;
     int latency_ms;
-    int kmssink_sync;
-    int kmssink_qos;
-    int max_lateness_ns;
-    int video_queue_leaky;
-    int video_queue_pre_buffers;
-    int video_queue_post_buffers;
-    int video_queue_sink_buffers;
     CustomSinkMode custom_sink;
     char aud_dev[128];
 

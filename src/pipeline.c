@@ -48,33 +48,6 @@ static GstCaps *build_appsrc_caps(const AppCfg *cfg, gboolean video_only) {
     return gst_caps_new_empty_simple("application/x-rtp");
 }
 
-static GstElement *create_udp_udpsrc(const AppCfg *cfg, gboolean video_only) {
-    GstElement *udpsrc = gst_element_factory_make("udpsrc", "udp_udpsrc");
-    GstCaps *caps = NULL;
-    CHECK_ELEM(udpsrc, "udpsrc");
-
-    caps = build_appsrc_caps(cfg, video_only);
-    if (caps == NULL) {
-        LOGE("Failed to allocate RTP caps for udpsrc");
-        goto fail;
-    }
-
-    g_object_set(udpsrc, "port", cfg->udp_port, "caps", caps, "buffer-size", 262144, NULL);
-    gst_caps_unref(caps);
-    caps = NULL;
-
-    return udpsrc;
-
-fail:
-    if (caps != NULL) {
-        gst_caps_unref(caps);
-    }
-    if (udpsrc != NULL) {
-        gst_object_unref(udpsrc);
-    }
-    return NULL;
-}
-
 static GstElement *create_udp_app_source(const AppCfg *cfg, gboolean video_only, UdpReceiver **receiver_out) {
     GstElement *appsrc_elem = gst_element_factory_make("appsrc", "udp_appsrc");
     UdpReceiver *receiver = NULL;
@@ -124,19 +97,9 @@ fail:
     return NULL;
 }
 
-static GstElement *create_udp_source(const AppCfg *cfg, gboolean video_only, UdpReceiver **receiver_out) {
-    if (cfg->custom_sink == CUSTOM_SINK_UDPSRC) {
-        if (receiver_out != NULL) {
-            *receiver_out = NULL;
-        }
-        return create_udp_udpsrc(cfg, video_only);
-    }
-    return create_udp_app_source(cfg, video_only, receiver_out);
-}
-
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick);
 
-static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *cfg) {
+static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *cfg, int audio_disabled) {
     GstElement *pipeline = NULL;
     GstElement *appsrc = NULL;
     GstElement *depay = NULL;
@@ -145,6 +108,15 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     GstElement *appsink = NULL;
     GstCaps *raw_caps = NULL;
     UdpReceiver *receiver = NULL;
+    GstElement *audio_appsrc = NULL;
+    GstElement *audio_queue_start = NULL;
+    GstElement *audio_depay = NULL;
+    GstElement *audio_decoder = NULL;
+    GstElement *audio_convert = NULL;
+    GstElement *audio_resample = NULL;
+    GstElement *audio_queue_sink = NULL;
+    GstElement *audio_sink = NULL;
+    GstCaps *audio_caps = NULL;
 
     pipeline = gst_pipeline_new("pixelpilot-receiver");
     CHECK_ELEM(pipeline, "pipeline");
@@ -158,8 +130,6 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     CHECK_ELEM(depay, "rtph265depay");
     parser = gst_element_factory_make("h265parse", "video_parser");
     CHECK_ELEM(parser, "h265parse");
-    capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
-    CHECK_ELEM(capsfilter, "capsfilter");
     appsink = gst_element_factory_make("appsink", "out_appsink");
     CHECK_ELEM(appsink, "appsink");
 
@@ -174,6 +144,9 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
         LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
     }
+
+    capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
+    CHECK_ELEM(capsfilter, "capsfilter");
 
     raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
                                    "alignment", G_TYPE_STRING, "au", NULL);
@@ -192,20 +165,105 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         goto fail;
     }
 
+    gboolean enable_audio = (!cfg->no_audio && cfg->aud_pt >= 0 && !audio_disabled);
+    if (enable_audio) {
+        audio_appsrc = gst_element_factory_make("appsrc", "udp_audio_appsrc");
+        audio_queue_start = gst_element_factory_make("queue", "audio_queue_start");
+        audio_depay = gst_element_factory_make("rtpopusdepay", "audio_depay");
+        audio_decoder = gst_element_factory_make("opusdec", "audio_decoder");
+        audio_convert = gst_element_factory_make("audioconvert", "audio_convert");
+        audio_resample = gst_element_factory_make("audioresample", "audio_resample");
+        audio_queue_sink = gst_element_factory_make("queue", "audio_queue_sink");
+        audio_sink = gst_element_factory_make("alsasink", "audio_sink");
+
+        CHECK_ELEM(audio_appsrc, "appsrc");
+        CHECK_ELEM(audio_queue_start, "queue");
+        CHECK_ELEM(audio_depay, "rtpopusdepay");
+        CHECK_ELEM(audio_decoder, "opusdec");
+        CHECK_ELEM(audio_convert, "audioconvert");
+        CHECK_ELEM(audio_resample, "audioresample");
+        CHECK_ELEM(audio_queue_sink, "queue");
+        CHECK_ELEM(audio_sink, "alsasink");
+
+        g_object_set(audio_appsrc, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
+                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, "max-bytes", (guint64)(1024 * 1024),
+                     NULL);
+        gst_app_src_set_latency(GST_APP_SRC(audio_appsrc), 0, 0);
+        gst_app_src_set_max_bytes(GST_APP_SRC(audio_appsrc), 1024 * 1024);
+
+        audio_caps = gst_caps_new_simple("application/x-rtp", "media", G_TYPE_STRING, "audio", "payload",
+                                         G_TYPE_INT, cfg->aud_pt, "clock-rate", G_TYPE_INT, 48000, "encoding-name",
+                                         G_TYPE_STRING, "OPUS", NULL);
+        if (audio_caps == NULL) {
+            LOGE("Failed to allocate RTP caps for audio appsrc");
+            goto fail;
+        }
+        gst_app_src_set_caps(GST_APP_SRC(audio_appsrc), audio_caps);
+        gst_caps_unref(audio_caps);
+        audio_caps = NULL;
+
+        g_object_set(audio_queue_start, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0,
+                     NULL);
+        g_object_set(audio_queue_sink, "leaky", 2, NULL);
+        g_object_set(audio_sink, "device", cfg->aud_dev, "sync", FALSE, "async", FALSE, NULL);
+
+        gst_bin_add_many(GST_BIN(pipeline), audio_appsrc, audio_queue_start, audio_depay, audio_decoder,
+                         audio_convert, audio_resample, audio_queue_sink, audio_sink, NULL);
+        if (!gst_element_link_many(audio_appsrc, audio_queue_start, audio_depay, audio_decoder, audio_convert,
+                                   audio_resample, audio_queue_sink, audio_sink, NULL)) {
+            LOGE("Failed to link audio branch for UDP receiver passthrough");
+            goto fail;
+        }
+
+        if (receiver != NULL) {
+            udp_receiver_set_audio_appsrc(receiver, GST_APP_SRC(audio_appsrc));
+        }
+        ps->audio_disabled = 0;
+    } else {
+        if (receiver != NULL) {
+            udp_receiver_set_audio_appsrc(receiver, NULL);
+        }
+        ps->audio_disabled = 1;
+    }
+
     ps->pipeline = pipeline;
-    ps->source = appsrc;
     ps->video_sink = appsink;
     ps->udp_receiver = receiver;
-    ps->video_branch_entry = NULL;
-    ps->audio_branch_entry = NULL;
     return TRUE;
 
 fail:
     if (raw_caps != NULL) {
         gst_caps_unref(raw_caps);
     }
+    if (audio_caps != NULL) {
+        gst_caps_unref(audio_caps);
+    }
     if (receiver != NULL) {
         udp_receiver_destroy(receiver);
+    }
+    if (audio_sink != NULL && GST_OBJECT_PARENT(audio_sink) == NULL) {
+        gst_object_unref(audio_sink);
+    }
+    if (audio_queue_sink != NULL && GST_OBJECT_PARENT(audio_queue_sink) == NULL) {
+        gst_object_unref(audio_queue_sink);
+    }
+    if (audio_resample != NULL && GST_OBJECT_PARENT(audio_resample) == NULL) {
+        gst_object_unref(audio_resample);
+    }
+    if (audio_convert != NULL && GST_OBJECT_PARENT(audio_convert) == NULL) {
+        gst_object_unref(audio_convert);
+    }
+    if (audio_decoder != NULL && GST_OBJECT_PARENT(audio_decoder) == NULL) {
+        gst_object_unref(audio_decoder);
+    }
+    if (audio_depay != NULL && GST_OBJECT_PARENT(audio_depay) == NULL) {
+        gst_object_unref(audio_depay);
+    }
+    if (audio_queue_start != NULL && GST_OBJECT_PARENT(audio_queue_start) == NULL) {
+        gst_object_unref(audio_queue_start);
+    }
+    if (audio_appsrc != NULL && GST_OBJECT_PARENT(audio_appsrc) == NULL) {
+        gst_object_unref(audio_appsrc);
     }
     if (appsink != NULL && GST_OBJECT_PARENT(appsink) == NULL) {
         gst_object_unref(appsink);
@@ -226,7 +284,6 @@ fail:
         gst_object_unref(pipeline);
     }
     ps->pipeline = NULL;
-    ps->source = NULL;
     ps->video_sink = NULL;
     ps->udp_receiver = NULL;
     return FALSE;
@@ -304,157 +361,6 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
 
     gst_object_unref(appsink);
     return TRUE;
-}
-
-static GstCaps *make_rtp_caps(const char *media, int payload_type, int clock_rate, const char *encoding_name) {
-    return gst_caps_new_simple("application/x-rtp", "media", G_TYPE_STRING, media, "payload", G_TYPE_INT,
-                               payload_type, "clock-rate", G_TYPE_INT, clock_rate, "encoding-name", G_TYPE_STRING,
-                               encoding_name, NULL);
-}
-
-static GstCaps *caps_for_payload(const PipelineState *ps, gint payload_type) {
-    if (ps == NULL || ps->cfg == NULL) {
-        return NULL;
-    }
-
-    const AppCfg *cfg = ps->cfg;
-    if (payload_type == cfg->vid_pt) {
-        return make_rtp_caps("video", cfg->vid_pt, 90000, "H265");
-    }
-
-    if (payload_type == cfg->aud_pt && cfg->aud_pt >= 0) {
-        return make_rtp_caps("audio", cfg->aud_pt, 48000, "OPUS");
-    }
-
-    return NULL;
-}
-
-static GstCaps *rtpbin_request_pt_map_cb(GstElement *element, guint session, guint payload_type, gpointer user_data) {
-    (void)element;
-    (void)session;
-    PipelineState *ps = (PipelineState *)user_data;
-    GstCaps *caps = caps_for_payload(ps, (gint)payload_type);
-    if (caps == NULL) {
-        LOGW("No caps mapping available for payload type %u", payload_type);
-    }
-    return caps;
-}
-
-static gboolean link_pad_to_queue(GstPad *src_pad, GstElement *queue, GstPad **stored_pad, const char *name) {
-    if (queue == NULL || src_pad == NULL) {
-        return FALSE;
-    }
-
-    if (stored_pad != NULL && *stored_pad != NULL) {
-        return TRUE;
-    }
-
-    GstPad *sink_pad = gst_element_get_static_pad(queue, "sink");
-    if (sink_pad == NULL) {
-        LOGE("Failed to get sink pad for %s branch", name);
-        return FALSE;
-    }
-
-    GstPadLinkReturn link_ret = gst_pad_link(src_pad, sink_pad);
-    gst_object_unref(sink_pad);
-    if (link_ret != GST_PAD_LINK_OK) {
-        LOGE("Failed to link rtpbin pad to %s branch (ret=%d)", name, link_ret);
-        return FALSE;
-    }
-
-    if (stored_pad != NULL) {
-        *stored_pad = gst_object_ref(src_pad);
-    }
-    LOGI("Linked rtpbin %s pad", name);
-    return TRUE;
-}
-
-static gboolean pad_has_media(GstPad *pad, const char *media_type) {
-    GstCaps *caps = gst_pad_get_current_caps(pad);
-    gboolean matches = FALSE;
-    if (caps != NULL) {
-        const GstStructure *s = gst_caps_get_structure(caps, 0);
-        const gchar *media = s != NULL ? gst_structure_get_string(s, "media") : NULL;
-        if (media != NULL && g_strcmp0(media, media_type) == 0) {
-            matches = TRUE;
-        }
-        gst_caps_unref(caps);
-    }
-    return matches;
-}
-
-static gint pad_payload_type(GstPad *pad) {
-    gint payload_type = -1;
-    if (pad == NULL) {
-        return payload_type;
-    }
-
-    GObjectClass *klass = G_OBJECT_GET_CLASS(pad);
-    if (klass != NULL && g_object_class_find_property(klass, "pt") != NULL) {
-        g_object_get(pad, "pt", &payload_type, NULL);
-    }
-
-    if (payload_type < 0) {
-        const gchar *pad_name = GST_OBJECT_NAME(pad);
-        if (pad_name != NULL) {
-            const gchar *underscore = strrchr(pad_name, '_');
-            if (underscore != NULL) {
-                payload_type = (gint)g_ascii_strtoll(underscore + 1, NULL, 10);
-            }
-        }
-    }
-
-    return payload_type;
-}
-
-static void rtpbin_pad_added_cb(GstElement *element, GstPad *pad, gpointer user_data) {
-    (void)element;
-    PipelineState *ps = (PipelineState *)user_data;
-    gboolean is_video = pad_has_media(pad, "video");
-    gboolean is_audio = pad_has_media(pad, "audio");
-    if (!is_video && !is_audio) {
-        gint payload_type = pad_payload_type(pad);
-        if (payload_type == ps->cfg->vid_pt) {
-            is_video = TRUE;
-        } else if (payload_type == ps->cfg->aud_pt && ps->cfg->aud_pt >= 0) {
-            is_audio = TRUE;
-        }
-    }
-
-    if (is_video) {
-        if (!link_pad_to_queue(pad, ps->video_branch_entry, &ps->video_pad, "video")) {
-            LOGW("Failed to link newly added video pad from rtpbin");
-        }
-        return;
-    }
-    if (is_audio) {
-        if (!link_pad_to_queue(pad, ps->audio_branch_entry, &ps->audio_pad, "audio")) {
-            LOGW("Failed to link newly added audio pad from rtpbin");
-        }
-        return;
-    }
-    LOGW("Ignoring rtpbin pad with unsupported media type");
-}
-
-static void rtpbin_pad_removed_cb(GstElement *element, GstPad *pad, gpointer user_data) {
-    (void)element;
-    PipelineState *ps = (PipelineState *)user_data;
-    if (ps->video_pad == pad) {
-        gst_object_unref(ps->video_pad);
-        ps->video_pad = NULL;
-        LOGI("rtpbin video pad removed");
-    } else if (ps->audio_pad == pad) {
-        gst_object_unref(ps->audio_pad);
-        ps->audio_pad = NULL;
-        LOGI("rtpbin audio pad removed");
-    }
-}
-
-static void clear_stored_pad(GstPad **pad) {
-    if (pad != NULL && *pad != NULL) {
-        gst_object_unref(*pad);
-        *pad = NULL;
-    }
 }
 
 static gchar *canonicalize_enum_token(const char *input) {
@@ -592,119 +498,6 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
 
     g_type_class_unref(enum_class);
     return success;
-}
-
-static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, const AppCfg *cfg) {
-    GstElement *queue_pre = gst_element_factory_make("queue", "video_queue_pre");
-    GstElement *depay = gst_element_factory_make("rtph265depay", "video_depay");
-    GstElement *parser = gst_element_factory_make("h265parse", "video_parser");
-    GstElement *capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
-    GstElement *queue_post = gst_element_factory_make("queue", "video_queue_post");
-    GstElement *appsink = gst_element_factory_make("appsink", "video_appsink");
-
-    CHECK_ELEM(queue_pre, "queue");
-    CHECK_ELEM(depay, "rtph265depay");
-    CHECK_ELEM(parser, "h265parse");
-    CHECK_ELEM(capsfilter, "capsfilter");
-    CHECK_ELEM(queue_post, "queue");
-    CHECK_ELEM(appsink, "appsink");
-
-    g_object_set(queue_pre, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_pre_buffers,
-                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
-    g_object_set(queue_post, "leaky", cfg->video_queue_leaky, "max-size-buffers", cfg->video_queue_post_buffers,
-                 "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
-
-    g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
-        LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
-    }
-    if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
-        LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
-    }
-
-    GstCaps *raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
-                                            "alignment", G_TYPE_STRING, "au", NULL);
-    if (raw_caps == NULL) {
-        LOGE("Failed to allocate caps for video byte-stream enforcement");
-        goto fail;
-    }
-    g_object_set(capsfilter, "caps", raw_caps, NULL);
-    gst_app_sink_set_caps(GST_APP_SINK(appsink), raw_caps);
-    gst_caps_unref(raw_caps);
-
-    g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
-    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
-    gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
-
-    gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, capsfilter, queue_post, appsink, NULL);
-
-    if (!gst_element_link_many(queue_pre, depay, parser, capsfilter, queue_post, appsink, NULL)) {
-        LOGE("Failed to link video branch");
-        return FALSE;
-    }
-
-    ps->video_branch_entry = queue_pre;
-    ps->video_sink = appsink;
-    return TRUE;
-
-fail:
-    ps->video_branch_entry = NULL;
-    return FALSE;
-}
-
-static gboolean build_audio_branch(PipelineState *ps, GstElement *pipeline, const AppCfg *cfg, int audio_disabled) {
-    gboolean disable_audio_branch = cfg->no_audio || audio_disabled;
-
-    GstElement *queue_start = gst_element_factory_make("queue", "audio_queue_start");
-    CHECK_ELEM(queue_start, "queue");
-    g_object_set(queue_start, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
-
-    if (disable_audio_branch) {
-        GstElement *fakesink = gst_element_factory_make("fakesink", "audio_fakesink");
-        CHECK_ELEM(fakesink, "fakesink");
-        g_object_set(fakesink, "sync", FALSE, NULL);
-
-        gst_bin_add_many(GST_BIN(pipeline), queue_start, fakesink, NULL);
-        if (!gst_element_link(queue_start, fakesink)) {
-            LOGE("Failed to link audio fakesink branch");
-            return FALSE;
-        }
-        ps->audio_branch_entry = queue_start;
-        ps->audio_disabled = 1;
-        return TRUE;
-    }
-
-    GstElement *depay = gst_element_factory_make("rtpopusdepay", "audio_depay");
-    GstElement *decoder = gst_element_factory_make("opusdec", "audio_decoder");
-    GstElement *aconv = gst_element_factory_make("audioconvert", "audio_convert");
-    GstElement *ares = gst_element_factory_make("audioresample", "audio_resample");
-    GstElement *queue_sink = gst_element_factory_make("queue", "audio_queue_sink");
-    GstElement *alsa = gst_element_factory_make("alsasink", "audio_sink");
-
-    CHECK_ELEM(depay, "rtpopusdepay");
-    CHECK_ELEM(decoder, "opusdec");
-    CHECK_ELEM(aconv, "audioconvert");
-    CHECK_ELEM(ares, "audioresample");
-    CHECK_ELEM(queue_sink, "queue");
-    CHECK_ELEM(alsa, "alsasink");
-
-    g_object_set(queue_sink, "leaky", 2, NULL);
-    g_object_set(alsa, "device", cfg->aud_dev, "sync", FALSE, "async", FALSE, NULL);
-
-    gst_bin_add_many(GST_BIN(pipeline), queue_start, depay, decoder, aconv, ares, queue_sink, alsa, NULL);
-
-    if (!gst_element_link_many(queue_start, depay, decoder, aconv, ares, queue_sink, alsa, NULL)) {
-        LOGE("Failed to link audio branch");
-        return FALSE;
-    }
-
-    ps->audio_branch_entry = queue_start;
-    ps->audio_disabled = 0;
-    return TRUE;
-
-fail:
-    ps->audio_branch_entry = NULL;
-    return FALSE;
 }
 
 static gpointer appsink_thread_func(gpointer data) {
@@ -873,16 +666,7 @@ static void cleanup_pipeline(PipelineState *ps) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
     }
-    if (ps->rtpbin != NULL) {
-        g_signal_handlers_disconnect_by_data(ps->rtpbin, ps);
-        ps->rtpbin = NULL;
-    }
-    clear_stored_pad(&ps->video_pad);
-    clear_stored_pad(&ps->audio_pad);
-    ps->video_branch_entry = NULL;
-    ps->audio_branch_entry = NULL;
     ps->video_sink = NULL;
-    ps->source = NULL;
     if (ps->pipeline != NULL) {
         gst_object_unref(ps->pipeline);
         ps->pipeline = NULL;
@@ -914,12 +698,6 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     }
 
     ps->pipeline = NULL;
-    ps->source = NULL;
-    ps->rtpbin = NULL;
-    ps->video_branch_entry = NULL;
-    ps->audio_branch_entry = NULL;
-    ps->video_pad = NULL;
-    ps->audio_pad = NULL;
     ps->udp_receiver = NULL;
     ps->video_sink = NULL;
     ps->appsink_thread = NULL;
@@ -941,89 +719,14 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         force_audio_disabled = TRUE;
     } else if (cfg->custom_sink == CUSTOM_SINK_RECEIVER) {
         LOGI("Custom sink mode 'receiver' selected; using direct RTP pipeline");
-        if (!setup_udp_receiver_passthrough(ps, cfg)) {
+        if (!setup_udp_receiver_passthrough(ps, cfg, audio_disabled)) {
             goto fail;
         }
         pipeline = ps->pipeline;
-        force_audio_disabled = TRUE;
+        force_audio_disabled = ps->audio_disabled;
     } else {
-        pipeline = gst_pipeline_new("pixelpilot-pipeline");
-        CHECK_ELEM(pipeline, "pipeline");
-        ps->pipeline = pipeline;
-
-        gboolean video_only = cfg->no_audio || cfg->aud_pt < 0;
-        UdpReceiver *receiver = NULL;
-        GstElement *source = create_udp_source(cfg, video_only, &receiver);
-        if (source == NULL) {
-            goto fail;
-        }
-
-        GstElement *rtpbin = NULL;
-        GstElement *jitter = NULL;
-
-        if (!build_video_branch(ps, pipeline, cfg)) {
-            goto fail;
-        }
-
-        if (video_only) {
-            jitter = gst_element_factory_make("rtpjitterbuffer", "video_jitter");
-            if (jitter != NULL) {
-                g_object_set(jitter, "latency", cfg->latency_ms, "drop-on-late", TRUE, "do-lost", TRUE, NULL);
-                gst_bin_add_many(GST_BIN(pipeline), source, jitter, NULL);
-                if (!gst_element_link_many(source, jitter, ps->video_branch_entry, NULL)) {
-                    LOGE("Failed to link video-only path through rtpjitterbuffer");
-                    goto fail;
-                }
-            } else {
-                LOGW("Failed to create rtpjitterbuffer; linking video source directly");
-                gst_bin_add(GST_BIN(pipeline), source);
-                if (!gst_element_link(source, ps->video_branch_entry)) {
-                    LOGE("Failed to link video-only source to decoder branch");
-                    goto fail;
-                }
-            }
-            ps->audio_branch_entry = NULL;
-            ps->audio_disabled = 1;
-        } else {
-            rtpbin = gst_element_factory_make("rtpbin", "rtpbin");
-            CHECK_ELEM(rtpbin, "rtpbin");
-            g_object_set(rtpbin, "latency", cfg->latency_ms, NULL);
-
-            gst_bin_add_many(GST_BIN(pipeline), source, rtpbin, NULL);
-
-            GstPad *rtp_sink = gst_element_get_request_pad(rtpbin, "recv_rtp_sink_0");
-            GstPad *src_pad = gst_element_get_static_pad(source, "src");
-            if (rtp_sink == NULL || src_pad == NULL) {
-                LOGE("Failed to obtain pads for linking source to rtpbin");
-                if (src_pad != NULL) {
-                    gst_object_unref(src_pad);
-                }
-                if (rtp_sink != NULL) {
-                    gst_object_unref(rtp_sink);
-                }
-                goto fail;
-            }
-            if (gst_pad_link(src_pad, rtp_sink) != GST_PAD_LINK_OK) {
-                LOGE("Failed to link source to rtpbin");
-                gst_object_unref(src_pad);
-                gst_object_unref(rtp_sink);
-                goto fail;
-            }
-            gst_object_unref(src_pad);
-            gst_object_unref(rtp_sink);
-
-            if (!build_audio_branch(ps, pipeline, cfg, audio_disabled)) {
-                goto fail;
-            }
-
-            g_signal_connect(rtpbin, "pad-added", G_CALLBACK(rtpbin_pad_added_cb), ps);
-            g_signal_connect(rtpbin, "pad-removed", G_CALLBACK(rtpbin_pad_removed_cb), ps);
-            g_signal_connect(rtpbin, "request-pt-map", G_CALLBACK(rtpbin_request_pt_map_cb), ps);
-        }
-
-        ps->source = source;
-        ps->rtpbin = rtpbin;
-        ps->udp_receiver = receiver;
+        LOGE("Unknown custom sink mode %d", cfg->custom_sink);
+        goto fail;
     }
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);

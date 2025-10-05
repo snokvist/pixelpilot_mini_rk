@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -505,8 +506,13 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
 
     set_mpp_decoding_parameters(vd);
 
+#if defined(MPP_SET_OUTPUT_TIMEOUT)
+    int64_t timeout = -1;
+    vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_TIMEOUT, &timeout);
+#else
     int block = MPP_POLL_BLOCK;
     vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_BLOCK, &block);
+#endif
 
     g_mutex_init(&vd->lock);
     g_cond_init(&vd->cond);
