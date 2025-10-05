@@ -72,6 +72,7 @@ struct UdpReceiver {
     gboolean running;
     gboolean stop_requested;
     gboolean stats_enabled;
+    gint fastpath_enabled;
 
     int udp_port;
     int vid_pt;
@@ -110,6 +111,44 @@ struct UdpReceiver {
 
     guint64 last_packet_ns;
 };
+
+// Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
+static inline void udp_receiver_last_packet_store(struct UdpReceiver *ur, guint64 value) {
+#if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+    __atomic_store_n(&ur->last_packet_ns, value, __ATOMIC_RELAXED);
+#elif GLIB_CHECK_VERSION(2, 30, 0) && defined(G_ATOMIC_LOCK_FREE)
+    g_atomic_int64_set((gint64 *)&ur->last_packet_ns, (gint64)value);
+#else
+    g_mutex_lock(&ur->lock);
+    ur->last_packet_ns = value;
+    g_mutex_unlock(&ur->lock);
+#endif
+}
+
+static inline guint64 udp_receiver_last_packet_load(struct UdpReceiver *ur) {
+#if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+    return __atomic_load_n(&ur->last_packet_ns, __ATOMIC_RELAXED);
+#elif GLIB_CHECK_VERSION(2, 30, 0) && defined(G_ATOMIC_LOCK_FREE)
+    return (guint64)g_atomic_int64_get((gint64 *)&ur->last_packet_ns);
+#else
+    guint64 value;
+    g_mutex_lock(&ur->lock);
+    value = ur->last_packet_ns;
+    g_mutex_unlock(&ur->lock);
+    return value;
+#endif
+}
+
+static void update_fastpath_locked(struct UdpReceiver *ur) {
+    if (ur == NULL) {
+        return;
+    }
+
+    gboolean stats_enabled = ur->stats_enabled ? TRUE : FALSE;
+    gboolean have_audio = (ur->audio_appsrc != NULL);
+    gboolean fastpath = (!stats_enabled && !have_audio) ? TRUE : FALSE;
+    g_atomic_int_set(&ur->fastpath_enabled, fastpath ? 1 : 0);
+}
 
 static gboolean parse_rtp(const guint8 *data, gsize len, RtpParseResult *out) {
     if (len < RTP_MIN_HEADER) {
@@ -451,6 +490,65 @@ static void process_rtp(struct UdpReceiver *ur,
     history_push(ur, &sample);
 }
 
+static gboolean handle_received_packet_fastpath(struct UdpReceiver *ur,
+                                               GstBuffer *gstbuf,
+                                               GstMapInfo *map,
+                                               gssize bytes_read) {
+    if (bytes_read <= 0) {
+        gst_buffer_unmap(gstbuf, map);
+        gst_buffer_unref(gstbuf);
+        return TRUE;
+    }
+
+    gboolean filter_non_video = FALSE;
+    if (ur->cfg != NULL && ur->cfg->no_audio) {
+        filter_non_video = TRUE;
+    }
+    if (ur->aud_pt < 0) {
+        filter_non_video = TRUE;
+    }
+
+    RtpParseResult preview;
+    if (!parse_rtp(map->data, (gsize)bytes_read, &preview)) {
+        return FALSE;
+    }
+
+    gboolean is_video = (preview.payload_type == ur->vid_pt);
+    gboolean is_audio = (preview.payload_type == ur->aud_pt);
+
+    gboolean drop_packet = FALSE;
+    if (filter_non_video && !is_video) {
+        drop_packet = TRUE;
+    } else if (is_audio) {
+        drop_packet = TRUE;
+    }
+
+    if (drop_packet) {
+        gst_buffer_unmap(gstbuf, map);
+        gst_buffer_unref(gstbuf);
+        return TRUE;
+    }
+
+    gboolean mark_discont = g_atomic_int_compare_and_exchange((gint *)&ur->video_discont_pending, TRUE, FALSE);
+
+    gst_buffer_unmap(gstbuf, map);
+
+    if (mark_discont) {
+        GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_DISCONT);
+        GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
+    }
+
+    GstFlowReturn flow = gst_app_src_push_buffer(ur->video_appsrc, gstbuf);
+    if (flow != GST_FLOW_OK) {
+        LOGV("UDP receiver: push_buffer (video, fastpath) returned %s", gst_flow_get_name(flow));
+        if (flow == GST_FLOW_FLUSHING) {
+            g_usleep(1000);
+        }
+    }
+
+    return TRUE;
+}
+
 static gboolean handle_received_packet(struct UdpReceiver *ur,
                                        GstBuffer *gstbuf,
                                        GstMapInfo *map,
@@ -464,6 +562,14 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     gst_buffer_set_size(gstbuf, (gsize)bytes_read);
 
     guint64 arrival_ns = get_time_ns();
+    udp_receiver_last_packet_store(ur, arrival_ns);
+
+    if (g_atomic_int_get(&ur->fastpath_enabled)) {
+        if (handle_received_packet_fastpath(ur, gstbuf, map, bytes_read)) {
+            return TRUE;
+        }
+    }
+
     gboolean drop_packet = FALSE;
     gboolean mark_discont = FALSE;
     gboolean target_is_audio = FALSE;
@@ -507,16 +613,14 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
         if (is_audio && ur->audio_appsrc != NULL) {
             target_appsrc = ur->audio_appsrc;
             target_is_audio = TRUE;
-            if (ur->audio_discont_pending) {
+            if (g_atomic_int_compare_and_exchange((gint *)&ur->audio_discont_pending, TRUE, FALSE)) {
                 mark_discont = TRUE;
-                ur->audio_discont_pending = FALSE;
             }
         } else {
             target_appsrc = ur->video_appsrc;
             target_is_audio = FALSE;
-            if (ur->video_discont_pending) {
+            if (g_atomic_int_compare_and_exchange((gint *)&ur->video_discont_pending, TRUE, FALSE)) {
                 mark_discont = TRUE;
-                ur->video_discont_pending = FALSE;
             }
         }
     }
@@ -753,6 +857,7 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     ur->video_appsrc = GST_APP_SRC(gst_object_ref(video_appsrc));
     ur->audio_appsrc = NULL;
     ur->stats_enabled = FALSE;
+    g_atomic_int_set(&ur->fastpath_enabled, 1);
     ur->pool = NULL;
     ur->buffer_size = 0;
     ur->last_packet_ns = 0;
@@ -775,6 +880,7 @@ void udp_receiver_set_audio_appsrc(UdpReceiver *ur, GstAppSrc *audio_appsrc) {
     } else {
         ur->audio_discont_pending = TRUE;
     }
+    update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 }
 
@@ -838,6 +944,8 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
     ur->audio_discont_pending = TRUE;
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
+    ur->last_packet_ns = 0;
+    update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 
     if (setup_socket_for_port(ur->udp_port, &ur->sockfd, "udp") != 0) {
@@ -914,6 +1022,7 @@ void udp_receiver_stop(UdpReceiver *ur) {
     ur->stop_requested = FALSE;
     ur->video_discont_pending = TRUE;
     ur->audio_discont_pending = TRUE;
+    update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 }
 
@@ -942,8 +1051,8 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
     g_mutex_lock(&ur->lock);
     neon_copy_bytes((guint8 *)stats, (const guint8 *)&ur->stats, sizeof(*stats));
     copy_history(stats->history, ur->history, UDP_RECEIVER_HISTORY);
-    stats->last_packet_ns = ur->last_packet_ns;
     g_mutex_unlock(&ur->lock);
+    stats->last_packet_ns = udp_receiver_last_packet_load(ur);
 }
 
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
@@ -959,6 +1068,7 @@ void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
         log_udp_neon_status_once();
         reset_stats_locked(ur);
     }
+    update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 }
 
@@ -966,8 +1076,5 @@ guint64 udp_receiver_get_last_packet_time(UdpReceiver *ur) {
     if (ur == NULL) {
         return 0;
     }
-    g_mutex_lock(&ur->lock);
-    guint64 value = ur->last_packet_ns;
-    g_mutex_unlock(&ur->lock);
-    return value;
+    return udp_receiver_last_packet_load(ur);
 }
