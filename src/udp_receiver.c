@@ -525,6 +525,17 @@ static gpointer receiver_thread(gpointer data) {
 
         gst_buffer_set_size(gstbuf, (gsize)n);
 
+        gboolean drop_packet = FALSE;
+        RtpParseResult preview;
+        gboolean have_preview = parse_rtp(map.data, (gsize)n, &preview);
+        gboolean filter_non_video = FALSE;
+        if (ur->cfg != NULL && ur->cfg->no_audio) {
+            filter_non_video = TRUE;
+        }
+        if (ur->aud_pt < 0) {
+            filter_non_video = TRUE;
+        }
+
         guint64 arrival_ns = get_time_ns();
         gboolean mark_discont = FALSE;
         g_mutex_lock(&ur->lock);
@@ -535,10 +546,19 @@ static gpointer receiver_thread(gpointer data) {
         if (active_is_primary) {
             ur->last_primary_data_ns = arrival_ns;
         }
-        process_rtp(ur, map.data, (gsize)n, arrival_ns);
+        if (filter_non_video && have_preview && preview.payload_type != ur->vid_pt) {
+            drop_packet = TRUE;
+        } else {
+            process_rtp(ur, map.data, (gsize)n, arrival_ns);
+        }
         g_mutex_unlock(&ur->lock);
 
         gst_buffer_unmap(gstbuf, &map);
+
+        if (drop_packet) {
+            gst_buffer_unref(gstbuf);
+            continue;
+        }
 
         if (switching_from_fallback && ur->using_fallback) {
             LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
