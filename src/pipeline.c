@@ -42,6 +42,48 @@ static void release_selector_pad(GstElement *selector, GstPad **pad_slot) {
     *pad_slot = NULL;
 }
 
+// Simple context for filtering RTP payload types when udpsrc is active. Any
+// packet whose payload type does not match the configured video PT is dropped
+// before it reaches the depayloader so audio bursts do not flood the log.
+typedef struct {
+    gint video_pt;
+} UdpsrcPadFilterCtx;
+
+static GstPadProbeReturn udpsrc_pad_filter_probe(GstPad *pad, GstPadProbeInfo *info, gpointer user_data) {
+    UdpsrcPadFilterCtx *ctx = (UdpsrcPadFilterCtx *)user_data;
+    if (ctx == NULL || info == NULL) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    if ((info->type & GST_PAD_PROBE_TYPE_BUFFER) == 0) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    GstBuffer *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+    if (buffer == NULL) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    GstMapInfo map;
+    if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+        return GST_PAD_PROBE_OK;
+    }
+
+    gboolean drop = TRUE;
+    if (ctx->video_pt < 0 || ctx->video_pt > 127) {
+        drop = FALSE;
+    } else if (map.size >= 2) {
+        guint8 payload_type = map.data[1] & 0x7Fu;
+        if ((gint)payload_type == ctx->video_pt) {
+            drop = FALSE;
+        }
+    }
+
+    gst_buffer_unmap(buffer, &map);
+
+    return drop ? GST_PAD_PROBE_DROP : GST_PAD_PROBE_OK;
+}
+
 static guint64 monotonic_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
@@ -675,12 +717,12 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
     }
 
     gchar *desc = g_strdup_printf(
-        "udpsrc name=udp_source port=%d caps=\"application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000\" ! "
+        "udpsrc name=udp_source port=%d caps=\"application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000, payload=(int)%d\" ! "
         "rtph265depay name=video_depay ! "
         "h265parse name=video_parser config-interval=-1 ! "
         "video/x-h265, stream-format=\"byte-stream\" ! "
         "appsink drop=true name=out_appsink",
-        cfg->udp_port);
+        cfg->udp_port, cfg->vid_pt);
 
     if (desc == NULL) {
         LOGE("Failed to allocate udpsrc pipeline description");
@@ -734,6 +776,44 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         gst_object_unref(parser);
     } else {
         LOGW("udpsrc pipeline missing h265parse element; byte-stream enforcement skipped");
+    }
+
+    GstElement *udpsrc = gst_bin_get_by_name(GST_BIN(pipeline), "udp_source");
+    if (udpsrc == NULL) {
+        LOGE("Failed to find udpsrc element in pipeline");
+        gst_object_unref(appsink);
+        gst_object_unref(pipeline);
+        return FALSE;
+    }
+
+    GstPad *src_pad = gst_element_get_static_pad(udpsrc, "src");
+    if (src_pad == NULL) {
+        LOGE("Failed to get udpsrc src pad for payload filtering");
+        gst_object_unref(udpsrc);
+        gst_object_unref(appsink);
+        gst_object_unref(pipeline);
+        return FALSE;
+    }
+
+    UdpsrcPadFilterCtx *ctx = g_new0(UdpsrcPadFilterCtx, 1);
+    if (ctx == NULL) {
+        LOGE("Failed to allocate udpsrc payload filter context");
+        gst_object_unref(src_pad);
+        gst_object_unref(udpsrc);
+        gst_object_unref(appsink);
+        gst_object_unref(pipeline);
+        return FALSE;
+    }
+
+    ctx->video_pt = cfg->vid_pt;
+    gulong probe_id = gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, udpsrc_pad_filter_probe, ctx, g_free);
+    gst_object_unref(src_pad);
+    gst_object_unref(udpsrc);
+    if (probe_id == 0) {
+        LOGE("Failed to install udpsrc payload filter probe");
+        gst_object_unref(appsink);
+        gst_object_unref(pipeline);
+        return FALSE;
     }
 
     ps->pipeline = pipeline;
