@@ -2463,7 +2463,9 @@ static void osd_render_image_element(OSD *o, int idx, const OsdRenderContext *ct
     }
 
     OSDRect prev_rect = o->elements[idx].rect;
-    if (prev_rect.w > 0 && prev_rect.h > 0) {
+    int repositioned = (prev_rect.x != state->x) || (prev_rect.y != state->y) || (prev_rect.w != state->width) ||
+                       (prev_rect.h != state->height);
+    if (repositioned && prev_rect.w > 0 && prev_rect.h > 0) {
         osd_clear_rect(o, &prev_rect);
     }
 
