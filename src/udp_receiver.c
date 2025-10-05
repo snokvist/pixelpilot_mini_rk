@@ -773,6 +773,8 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         return -1;
     }
 
+    push_stream_reset_events(ur);
+
     g_mutex_lock(&ur->lock);
     ur->stop_requested = FALSE;
     ur->running = TRUE;
