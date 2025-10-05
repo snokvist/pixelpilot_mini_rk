@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <glib.h>
+#include <glib-object.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
@@ -277,16 +278,53 @@ static void clear_stored_pad(GstPad **pad) {
     }
 }
 
+static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick) {
+    if (object == NULL || property == NULL || nick == NULL) {
+        return FALSE;
+    }
+
+    GObjectClass *klass = G_OBJECT_GET_CLASS(object);
+    if (klass == NULL) {
+        return FALSE;
+    }
+
+    GParamSpec *pspec = g_object_class_find_property(klass, property);
+    if (pspec == NULL || !G_IS_PARAM_SPEC_ENUM(pspec)) {
+        return FALSE;
+    }
+
+    GEnumClass *enum_class = G_ENUM_CLASS(g_type_class_ref(pspec->value_type));
+    if (enum_class == NULL) {
+        return FALSE;
+    }
+
+    const GEnumValue *value = g_enum_get_value_by_name(enum_class, nick);
+    if (value == NULL) {
+        value = g_enum_get_value_by_nick(enum_class, nick);
+    }
+
+    if (value == NULL) {
+        g_type_class_unref(enum_class);
+        return FALSE;
+    }
+
+    g_object_set(object, property, value->value, NULL);
+    g_type_class_unref(enum_class);
+    return TRUE;
+}
+
 static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, const AppCfg *cfg) {
     GstElement *queue_pre = gst_element_factory_make("queue", "video_queue_pre");
     GstElement *depay = gst_element_factory_make("rtph265depay", "video_depay");
     GstElement *parser = gst_element_factory_make("h265parse", "video_parser");
+    GstElement *capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
     GstElement *queue_post = gst_element_factory_make("queue", "video_queue_post");
     GstElement *appsink = gst_element_factory_make("appsink", "video_appsink");
 
     CHECK_ELEM(queue_pre, "queue");
     CHECK_ELEM(depay, "rtph265depay");
     CHECK_ELEM(parser, "h265parse");
+    CHECK_ELEM(capsfilter, "capsfilter");
     CHECK_ELEM(queue_post, "queue");
     CHECK_ELEM(appsink, "appsink");
 
@@ -296,13 +334,30 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
+    if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
+        LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
+    }
+    if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
+        LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
+    }
+
+    GstCaps *raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
+                                            "alignment", G_TYPE_STRING, "au", NULL);
+    if (raw_caps == NULL) {
+        LOGE("Failed to allocate caps for video byte-stream enforcement");
+        goto fail;
+    }
+    g_object_set(capsfilter, "caps", raw_caps, NULL);
+    gst_app_sink_set_caps(GST_APP_SINK(appsink), raw_caps);
+    gst_caps_unref(raw_caps);
+
     g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
     gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
-    gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, queue_post, appsink, NULL);
+    gst_bin_add_many(GST_BIN(pipeline), queue_pre, depay, parser, capsfilter, queue_post, appsink, NULL);
 
-    if (!gst_element_link_many(queue_pre, depay, parser, queue_post, appsink, NULL)) {
+    if (!gst_element_link_many(queue_pre, depay, parser, capsfilter, queue_post, appsink, NULL)) {
         LOGE("Failed to link video branch");
         return FALSE;
     }
