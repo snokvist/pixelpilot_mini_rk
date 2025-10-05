@@ -72,8 +72,8 @@ static OsdSurface *osd_active_surface(OSD *o, int idx) {
     return &o->surfaces[idx];
 }
 
-static pixman_image_t *osd_fb_image(OSD *o) {
-    OsdSurface *surface = osd_active_surface(o, o->back_idx);
+static pixman_image_t *osd_surface_image(OSD *o, int idx) {
+    OsdSurface *surface = osd_active_surface(o, idx);
     if (!surface || !surface->fb.map) {
         return NULL;
     }
@@ -82,6 +82,40 @@ static pixman_image_t *osd_fb_image(OSD *o) {
                                                    (uint32_t *)surface->fb.map, surface->fb.pitch);
     }
     return surface->pixman;
+}
+
+static pixman_image_t *osd_fb_image(OSD *o) {
+    return osd_surface_image(o, o->back_idx);
+}
+
+static pixman_image_t *osd_front_image(OSD *o) {
+    return osd_surface_image(o, o->front_idx);
+}
+
+static void osd_copy_rect_from_front(OSD *o, const OSDRect *rect) {
+    if (!o || !rect || rect->w <= 0 || rect->h <= 0) {
+        return;
+    }
+    if (o->surface_count <= 1) {
+        return;
+    }
+    pixman_image_t *src = osd_front_image(o);
+    pixman_image_t *dst = osd_fb_image(o);
+    if (!src || !dst) {
+        return;
+    }
+
+    int x0 = clampi(rect->x, 0, o->w);
+    int y0 = clampi(rect->y, 0, o->h);
+    int x1 = clampi(rect->x + rect->w, 0, o->w);
+    int y1 = clampi(rect->y + rect->h, 0, o->h);
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+
+    int width = x1 - x0;
+    int height = y1 - y0;
+    pixman_image_composite32(PIXMAN_OP_SRC, src, NULL, dst, x0, y0, 0, 0, x0, y0, width, height);
 }
 
 static void osd_destroy_pixman_surface(OSD *o) {
@@ -2131,7 +2165,7 @@ static void osd_line_draw_latest(OSD *o, int idx, uint32_t color) {
     state->prev_y = y;
 }
 
-static void osd_line_draw(OSD *o, int idx) {
+static void osd_line_draw(OSD *o, int idx, const OSDRect *prev_rect) {
     OsdLineState *state = &o->elements[idx].data.line;
     const OsdLineConfig *cfg = &o->layout.elements[idx].data.line;
     if (state->capacity <= 0) {
@@ -2171,6 +2205,10 @@ static void osd_line_draw(OSD *o, int idx) {
     }
 
     uint32_t fg = cfg->fg ? cfg->fg : 0xB0FF4040u;
+
+    if (!need_background && prev_rect && prev_rect->w > 0 && prev_rect->h > 0) {
+        osd_copy_rect_from_front(o, prev_rect);
+    }
 
     if (need_background) {
         osd_line_draw_background(o, idx, new_max);
@@ -2517,7 +2555,7 @@ static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx
         osd_line_push(state, value);
     }
 
-    osd_line_draw(o, idx);
+    osd_line_draw(o, idx, &prev_rect);
     osd_line_draw_label(o, idx, &elem_cfg->data.line);
 
     if (elem_cfg->data.line.show_info_box) {
@@ -2954,13 +2992,7 @@ static void osd_prepare_back_buffer(OSD *o) {
     if (o->surface_count > 1) {
         int next = (o->front_idx + 1) % o->surface_count;
         o->back_idx = next;
-        OsdSurface *front = osd_active_surface(o, o->front_idx);
-        OsdSurface *back = osd_active_surface(o, o->back_idx);
-        if (front && back && front->fb.map && back->fb.map && front->fb.size == back->fb.size) {
-            memcpy(back->fb.map, front->fb.map, front->fb.size);
-        } else if (back && back->fb.map && back->fb.size > 0) {
-            memset(back->fb.map, 0, back->fb.size);
-        }
+        osd_surface_image(o, o->back_idx);
     } else {
         o->back_idx = o->front_idx;
     }
