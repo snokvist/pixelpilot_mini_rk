@@ -19,6 +19,38 @@ Any `line =` entry inside a `[osd.element.*]` section can reference `{token}` pl
 Line plots accept metrics such as `udp.bitrate.latest_mbps`, `udp.jitter.avg_ms`, or counter-style values like
 `udp.lost_packets` and automatically handle scaling and rendering based on the INI-provided geometry.
 
+### INI key reference
+
+The table below summarises every INI option that the loader understands. Values map 1:1 to command-line switches and fall back
+to the defaults listed in `src/config.c` when omitted.
+
+| Section / key | Description |
+| --- | --- |
+| `[drm].card` | DRM card node to open (default `/dev/dri/card0`). |
+| `[drm].connector` | Preferred connector name (e.g. `HDMI-A-1`). Leave blank to auto-pick the first connected head. |
+| `[drm].video-plane-id` | Numeric plane ID used for the decoded video plane. |
+| `[drm].use-udev` | `true` to enable the hotplug listener that reapplies modes when connectors change. |
+| `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
+| `[udp].port` | UDP port that the RTP stream arrives on. |
+| `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
+| `[pipeline].latency-ms` | Network jitter buffer target in milliseconds. This feeds the appsrc `latency` property as well as the OSD token `{pipeline.latency_ms}`. |
+| `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
+| `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
+| `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
+| `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
+| `[restarts].limit` | Maximum automatic restarts allowed within the configured window. |
+| `[restarts].window-ms` | Rolling window (milliseconds) for counting automatic restarts. |
+| `[gst].log` | `true` forces `GST_DEBUG=3` unless already set in the environment. |
+| `[cpu].affinity` | Comma-separated CPU IDs used to pin the main process and helper threads. |
+| `[osd].enable` | Enable the OSD overlay plane. |
+| `[osd].refresh-ms` | Interval between OSD refreshes. |
+| `[osd].plane-id` | Optional override for the OSD plane (mirrors `[drm].osd-plane-id`). |
+| `[osd].elements` | Comma-separated list describing the render order of `[osd.element.NAME]` blocks. |
+| `[osd.element.NAME].type` | Widget style (`text`, `line`, or `bar`). Each type unlocks additional keys listed in the sample file. |
+| `[osd.element.NAME].anchor` / `offset` / `size` / color keys | Control placement and styling for OSD widgets. See inline comments in the sample file for full semantics. |
+| `[osd.element.NAME].line` | For text widgets, each `line =` entry appends a formatted row supporting `{token}` placeholders. |
+| `[osd.element.NAME].metric` | For line/bar widgets, selects the metric token (e.g. `udp.bitrate.latest_mbps`) sampled each refresh. |
+
 ## CPU affinity control
 
 Use `--cpu-list` to provide a comma-separated list of CPU IDs that the process and its busy worker threads should run on. The main process mask is restricted to the specified CPUs and the UDP receiver and GStreamer bus threads are pinned in a round-robin fashion to spread the work across cores.
@@ -48,23 +80,27 @@ The custom receiver keeps a rolling telemetry snapshot that is exposed through t
 namespace. Statistics are computed only while the feature is enabled (for example when the OSD requests them); toggling stats on
 resets the counters and history buffer so each session starts with a clean slate.
 
+Once the RTP payload types have been separated, only the video stream (payload type matching `[udp].video-pt`) feeds the
+aggregate counters. Audio packets still increment `udp.audio_packets` so you can confirm the sender is active, but they no longer
+impact bitrate, jitter, history samples, or frame statistics.
+
 | Counter | Description |
 | --- | --- |
-| `udp.total_packets` | All RTP packets observed, regardless of payload type. |
-| `udp.video_packets` / `udp.audio_packets` | Packets that matched the configured video or audio payload types. Audio packets are still counted even when the audio pipeline is disabled so you can confirm that the sender is transmitting them. |
+| `udp.total_packets` | Video RTP packets forwarded to the decoder (payload type matching `[udp].video-pt`). |
+| `udp.video_packets` / `udp.audio_packets` | Video packets mirror the total; audio counts tick when `[udp].audio-pt` is observed, even if the audio branch is disabled. |
 | `udp.ignored_packets` | Packets whose payload type did not match either configured stream. |
 | `udp.duplicate_packets` | Packets that re-used the most recent sequence number. |
 | `udp.lost_packets` | The cumulative count of missing sequence numbers detected while walking the video stream. |
 | `udp.reordered_packets` | Packets that arrived with a sequence number lower than expected (but not a duplicate). |
-| `udp.total_bytes` / `udp.video_bytes` / `udp.audio_bytes` | Byte counters that mirror the packet counters above. |
-| `udp.bitrate.latest_mbps` | Instantaneous bitrate computed over a sliding 200 ms window. |
-| `udp.bitrate.avg_mbps` | Exponentially weighted moving average of the instantaneous bitrate. |
-| `udp.jitter.latest_ms` | RFC 3550 style inter-arrival jitter, reported in milliseconds. |
-| `udp.jitter.avg_ms` | EWMA of the jitter metric to smooth short-term spikes. |
+| `udp.total_bytes` / `udp.video_bytes` / `udp.audio_bytes` | Video byte counters mirror the packet stats; audio bytes reflect `[udp].audio-pt` traffic only. |
+| `udp.bitrate.latest_mbps` | Instantaneous video bitrate computed over a sliding 200 ms window. |
+| `udp.bitrate.avg_mbps` | Exponentially weighted moving average of the instantaneous video bitrate. |
+| `udp.jitter.latest_ms` | RFC 3550 style inter-arrival jitter derived from the video timestamps. |
+| `udp.jitter.avg_ms` | EWMA of the video jitter metric to smooth short-term spikes. |
 | `udp.frame.count` | Number of completed video frames detected via RTP marker bits. |
-| `udp.frame.incomplete` | Frames that ended with missing packets. |
-| `udp.frame.last_kib` | Size of the most recent completed frame (KiB). |
-| `udp.frame.avg_kib` | EWMA of recent frame sizes (KiB). |
+| `udp.frame.incomplete` | Frames that ended with missing video packets. |
+| `udp.frame.last_kib` | Size of the most recent completed video frame (KiB). |
+| `udp.frame.avg_kib` | EWMA of recent video frame sizes (KiB). |
 | `udp.sequence.expected` | The next video sequence number the receiver is waiting for. |
 | `udp.timestamp.last_video` | RTP timestamp from the most recent video packet. |
 

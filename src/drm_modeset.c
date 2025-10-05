@@ -82,60 +82,6 @@ static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
     return a->clock > b->clock;
 }
 
-static int find_primary_plane_for_crtc(int fd, drmModeRes *res, uint32_t crtc_id) {
-    int crtc_index = -1;
-    for (int i = 0; i < res->count_crtcs; ++i) {
-        if ((uint32_t)res->crtcs[i] == crtc_id) {
-            crtc_index = i;
-            break;
-        }
-    }
-    if (crtc_index < 0) {
-        return -1;
-    }
-
-    drmModePlaneRes *prs = drmModeGetPlaneResources(fd);
-    if (!prs) {
-        return -1;
-    }
-
-    int primary_id = -1;
-    for (uint32_t i = 0; i < prs->count_planes; ++i) {
-        drmModePlane *p = drmModeGetPlane(fd, prs->planes[i]);
-        if (!p) {
-            continue;
-        }
-        if ((p->possible_crtcs & (1U << crtc_index)) == 0) {
-            drmModeFreePlane(p);
-            continue;
-        }
-
-        uint32_t type_prop = 0;
-        if (drm_get_prop_id(fd, p->plane_id, DRM_MODE_OBJECT_PLANE, "type", &type_prop) == 0) {
-            drmModeObjectProperties *props =
-                drmModeObjectGetProperties(fd, p->plane_id, DRM_MODE_OBJECT_PLANE);
-            if (props) {
-                for (uint32_t k = 0; k < props->count_props; ++k) {
-                    if (props->props[k] == type_prop) {
-                        uint64_t val = props->prop_values[k];
-                        if (val == DRM_PLANE_TYPE_PRIMARY) {
-                            primary_id = (int)p->plane_id;
-                        }
-                        break;
-                    }
-                }
-                drmModeFreeObjectProperties(props);
-            }
-        }
-        drmModeFreePlane(p);
-        if (primary_id > 0) {
-            break;
-        }
-    }
-    drmModeFreePlaneResources(prs);
-    return primary_id;
-}
-
 int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResult *out) {
     if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0) {
         LOGW("Failed to enable UNIVERSAL_PLANES");
