@@ -1,4 +1,10 @@
 CC ?= gcc
+
+# Default to using 4 parallel jobs unless the caller already requested a
+# specific level of parallelism (e.g. via `make -j8`).
+ifeq ($(filter -j%,$(MAKEFLAGS)),)
+MAKEFLAGS += -j4
+endif
 PKG_CONFIG ?= pkg-config
 PKG_DRMCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags libdrm libudev)
 PKG_DRMLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs libdrm libudev)
