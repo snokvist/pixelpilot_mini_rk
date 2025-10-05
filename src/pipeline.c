@@ -279,23 +279,74 @@ static void clear_stored_pad(GstPad **pad) {
     }
 }
 
+static gchar *canonicalize_enum_token(const char *input) {
+    if (input == NULL) {
+        return NULL;
+    }
+
+    gsize len = strlen(input);
+    gchar *canonical = g_malloc(len + 1);
+    if (canonical == NULL) {
+        return NULL;
+    }
+
+    gchar *dst = canonical;
+    for (const gchar *src = input; *src != '\0'; ++src) {
+        if (*src == '-' || *src == '_' || *src == ' ') {
+            continue;
+        }
+        *dst++ = g_ascii_toupper(*src);
+    }
+    *dst = '\0';
+    return canonical;
+}
+
 static gboolean enum_matches_string(const char *candidate, const char *target) {
     if (candidate == NULL || target == NULL) {
         return FALSE;
     }
+
     if (g_ascii_strcasecmp(candidate, target) == 0) {
         return TRUE;
     }
 
-    g_autofree gchar *sanitized = g_strdup(target);
-    for (gchar *p = sanitized; p != NULL && *p != '\0'; ++p) {
+    g_autofree gchar *canon_candidate = canonicalize_enum_token(candidate);
+    g_autofree gchar *canon_target = canonicalize_enum_token(target);
+    if (canon_candidate == NULL || canon_target == NULL) {
+        return FALSE;
+    }
+
+    if (g_strcmp0(canon_candidate, canon_target) == 0) {
+        return TRUE;
+    }
+
+    return g_str_has_suffix(canon_candidate, canon_target);
+}
+
+static GParamSpec *find_property_with_aliases(GObjectClass *klass, const char *property) {
+    if (klass == NULL || property == NULL) {
+        return NULL;
+    }
+
+    GParamSpec *pspec = g_object_class_find_property(klass, property);
+    if (pspec != NULL) {
+        return pspec;
+    }
+
+    g_autofree gchar *alternate = g_strdup(property);
+    if (alternate == NULL) {
+        return NULL;
+    }
+
+    for (gchar *p = alternate; *p != '\0'; ++p) {
         if (*p == '-') {
             *p = '_';
-        } else {
-            *p = g_ascii_toupper(*p);
+        } else if (*p == '_') {
+            *p = '-';
         }
     }
-    return g_ascii_strcasecmp(candidate, sanitized) == 0;
+
+    return g_object_class_find_property(klass, alternate);
 }
 
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick) {
@@ -308,7 +359,7 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
         return FALSE;
     }
 
-    GParamSpec *pspec = g_object_class_find_property(klass, property);
+    GParamSpec *pspec = find_property_with_aliases(klass, property);
     if (pspec == NULL) {
         return FALSE;
     }
