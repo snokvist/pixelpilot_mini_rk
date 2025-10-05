@@ -114,10 +114,10 @@ struct UdpReceiver {
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
 static inline void udp_receiver_last_packet_store(struct UdpReceiver *ur, guint64 value) {
-#if GLIB_CHECK_VERSION(2, 30, 0)
-    g_atomic_int64_set((gint64 *)&ur->last_packet_ns, (gint64)value);
-#elif defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+#if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
     __atomic_store_n(&ur->last_packet_ns, value, __ATOMIC_RELAXED);
+#elif GLIB_CHECK_VERSION(2, 30, 0) && defined(G_ATOMIC_LOCK_FREE)
+    g_atomic_int64_set((gint64 *)&ur->last_packet_ns, (gint64)value);
 #else
     g_mutex_lock(&ur->lock);
     ur->last_packet_ns = value;
@@ -126,10 +126,10 @@ static inline void udp_receiver_last_packet_store(struct UdpReceiver *ur, guint6
 }
 
 static inline guint64 udp_receiver_last_packet_load(struct UdpReceiver *ur) {
-#if GLIB_CHECK_VERSION(2, 30, 0)
-    return (guint64)g_atomic_int64_get((gint64 *)&ur->last_packet_ns);
-#elif defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+#if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
     return __atomic_load_n(&ur->last_packet_ns, __ATOMIC_RELAXED);
+#elif GLIB_CHECK_VERSION(2, 30, 0) && defined(G_ATOMIC_LOCK_FREE)
+    return (guint64)g_atomic_int64_get((gint64 *)&ur->last_packet_ns);
 #else
     guint64 value;
     g_mutex_lock(&ur->lock);
