@@ -480,11 +480,6 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
 
     gst_buffer_unmap(gstbuf, map);
 
-    if (drop_packet) {
-        gst_buffer_unref(gstbuf);
-        return TRUE;
-    }
-
     if (switching_from_fallback != NULL && *switching_from_fallback && ur->using_fallback) {
         LOGI("UDP receiver: switching back to primary port %d", ur->udp_port);
         push_stream_reset_events(ur);
@@ -495,6 +490,11 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
         mark_discont = TRUE;
         ur->using_fallback = FALSE;
         *switching_from_fallback = FALSE;
+    }
+
+    if (drop_packet) {
+        gst_buffer_unref(gstbuf);
+        return TRUE;
     }
 
     if (mark_discont) {
