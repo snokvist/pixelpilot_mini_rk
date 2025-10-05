@@ -78,19 +78,28 @@ glyph composite and the creation of a temporary solid fill image for each text d
 consider caching solid-color images per palette entry or pre-compositing frequently reused text lines into their own pixman
 surfaces so updates reuse the prepared image instead of re-issuing individual glyph composites every frame.
 
-## Animated image widgets
+## Image widgets (static or animated)
 
-The pixman-backed renderer now supports `type = image` widgets in the OSD layout. Image elements draw pre-baked ARGB sprites (or
-simple animations) alongside the existing text and plot widgets. Frames are described in the INI via either a comma-separated
-list of file paths or a printf-style pattern paired with `frame-count`. Each frame must be a binary PPM (P6) with 8-bit color
-channels; the loader converts the pixels into premultiplied A8R8G8B8 surfaces that pixman composites directly onto the OSD
-framebuffer.
+The pixman-backed renderer supports `type = image` widgets so overlays can mix sprites with text and plots. Each widget accepts a
+single file path, a comma-separated list of frame paths, or a printf-style pattern combined with `frame-count`. Every frame must
+be provided as a binary PPM (P6) with 8-bit color channels; the loader converts the pixels into premultiplied A8R8G8B8 surfaces
+before compositing them onto the framebuffer.
 
-Each image widget accepts familiar placement keys (`anchor`, `offset`) plus visuals such as `padding`, `background`, and
-`border`. Animation cadence is controlled through `frame-duration-ms` and `loop`. The sample configuration demonstrates an
-overlay anchored at the mid-right edge:
+Image widgets reuse the standard placement keys (`anchor`, `offset`) plus visuals such as `padding`, `background`, and `border`.
+Animations add `frame-duration-ms` and `loop` controls, while single images simply omit those knobs (or set `loop = false`). The
+sample INI demonstrates both styles:
 
 ```ini
+[osd.element.pilot_logo]
+type = image
+anchor = top-right
+offset = -12,12
+source = assets/osd/pixelpilot_logo.ppm
+padding = 4
+background = transparent-grey
+border = transparent-white
+loop = false
+
 [osd.element.pilot_anim]
 type = image
 anchor = mid-right
@@ -104,6 +113,7 @@ border = transparent-white
 loop = true
 ```
 
-Provide the sample frames yourself by dropping numbered 128×128 binary PPM files (for example, `assets/osd/pixelpilot_00.ppm`
-through `assets/osd/pixelpilot_11.ppm`) into `assets/osd`. Adjust the `source` pattern or `frame-count` in the INI if your
-animation uses a different naming scheme or length.
+Provide the sample logo sprite and animation frames yourself. For the static overlay, add a 128×128 binary PPM such as
+`assets/osd/pixelpilot_logo.ppm`. For the animation, drop numbered PPM files (for example,
+`assets/osd/pixelpilot_00.ppm` through `assets/osd/pixelpilot_11.ppm`) into `assets/osd`. Adjust the paths, `frame-count`, and
+durations as needed for your own artwork.
