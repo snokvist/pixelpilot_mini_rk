@@ -655,12 +655,22 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_queue_sink_buffers = atoi(value);
             return 0;
         }
+        if (strcasecmp(key, "custom-sink") == 0) {
+            CustomSinkMode mode;
+            if (cfg_parse_custom_sink_mode(value, &mode) != 0) {
+                LOGE("Invalid custom-sink mode '%s' in INI", value);
+                return -1;
+            }
+            cfg->custom_sink = mode;
+            return 0;
+        }
         if (strcasecmp(key, "use-gst-udpsrc") == 0) {
             int v = 0;
             if (parse_bool(value, &v) != 0) {
                 return -1;
             }
-            cfg->use_gst_udpsrc = v;
+            LOGW("INI key pipeline.use-gst-udpsrc is deprecated; use pipeline.custom-sink instead");
+            cfg->custom_sink = v ? CUSTOM_SINK_UDPSRC : CUSTOM_SINK_RECEIVER;
             return 0;
         }
         if (strcasecmp(key, "max-lateness-ns") == 0) {

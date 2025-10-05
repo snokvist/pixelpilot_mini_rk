@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 static void usage(const char *prog) {
     fprintf(stderr,
@@ -27,8 +28,7 @@ static void usage(const char *prog) {
             "  --video-queue-pre-buffers N  (default: 96)\n"
             "  --video-queue-post-buffers N (default: 8)\n"
             "  --video-queue-sink-buffers N (default: 8)\n"
-            "  --gst-udpsrc                 (use GStreamer's udpsrc instead of appsrc bridge)\n"
-            "  --no-gst-udpsrc              (force legacy appsrc/UEP receiver)\n"
+            "  --custom-sink MODE           (receiver|udpsrc; default: receiver)\n"
             "  --max-lateness NANOSECS      (default: 20000000)\n"
             "  --aud-dev STR                (default: plughw:CARD=rockchiphdmi0,DEV=0)\n"
             "  --no-audio                   (drop audio branch entirely)\n"
@@ -41,6 +41,44 @@ static void usage(const char *prog) {
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
             prog);
+}
+
+typedef struct {
+    const char *name;
+    CustomSinkMode mode;
+} CustomSinkAlias;
+
+static const CustomSinkAlias kCustomSinkAliases[] = {
+    {"receiver", CUSTOM_SINK_RECEIVER},
+    {"udp-receiver", CUSTOM_SINK_RECEIVER},
+    {"appsrc", CUSTOM_SINK_RECEIVER},
+    {"udpsrc", CUSTOM_SINK_UDPSRC},
+    {"gst-udpsrc", CUSTOM_SINK_UDPSRC},
+    {"gst", CUSTOM_SINK_UDPSRC},
+};
+
+int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out) {
+    if (value == NULL || mode_out == NULL) {
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(kCustomSinkAliases) / sizeof(kCustomSinkAliases[0]); ++i) {
+        if (strcasecmp(value, kCustomSinkAliases[i].name) == 0) {
+            *mode_out = kCustomSinkAliases[i].mode;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *cfg_custom_sink_mode_name(CustomSinkMode mode) {
+    switch (mode) {
+    case CUSTOM_SINK_RECEIVER:
+        return "receiver";
+    case CUSTOM_SINK_UDPSRC:
+        return "udpsrc";
+    default:
+        return "unknown";
+    }
 }
 
 void cfg_defaults(AppCfg *c) {
@@ -63,7 +101,7 @@ void cfg_defaults(AppCfg *c) {
     c->video_queue_pre_buffers = 96;
     c->video_queue_post_buffers = 8;
     c->video_queue_sink_buffers = 8;
-    c->use_gst_udpsrc = 0;
+    c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 
     c->no_audio = 0;
@@ -215,10 +253,23 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->video_queue_post_buffers = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--video-queue-sink-buffers") && i + 1 < argc) {
             cfg->video_queue_sink_buffers = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--custom-sink") && i + 1 < argc) {
+            const char *mode_str = argv[++i];
+            CustomSinkMode mode;
+            if (cfg_parse_custom_sink_mode(mode_str, &mode) != 0) {
+                LOGE("Unknown custom sink mode '%s'", mode_str);
+                return -1;
+            }
+            cfg->custom_sink = mode;
+        } else if (!strcmp(argv[i], "--custom-sink")) {
+            LOGE("--custom-sink requires an argument (receiver|udpsrc)");
+            return -1;
         } else if (!strcmp(argv[i], "--gst-udpsrc")) {
-            cfg->use_gst_udpsrc = 1;
+            LOGW("--gst-udpsrc is deprecated; use --custom-sink udpsrc instead");
+            cfg->custom_sink = CUSTOM_SINK_UDPSRC;
         } else if (!strcmp(argv[i], "--no-gst-udpsrc")) {
-            cfg->use_gst_udpsrc = 0;
+            LOGW("--no-gst-udpsrc is deprecated; use --custom-sink receiver instead");
+            cfg->custom_sink = CUSTOM_SINK_RECEIVER;
         } else if (!strcmp(argv[i], "--max-lateness") && i + 1 < argc) {
             cfg->max_lateness_ns = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-dev") && i + 1 < argc) {
