@@ -97,36 +97,6 @@ fail:
     return NULL;
 }
 
-static gboolean object_supports_property(GObject *object, const char *property) {
-    if (object == NULL || property == NULL) {
-        return FALSE;
-    }
-
-    GObjectClass *klass = G_OBJECT_GET_CLASS(object);
-    if (klass == NULL) {
-        return FALSE;
-    }
-
-    if (g_object_class_find_property(klass, property) != NULL) {
-        return TRUE;
-    }
-
-    g_autofree gchar *alternate = g_strdup(property);
-    if (alternate == NULL) {
-        return FALSE;
-    }
-
-    for (gchar *p = alternate; *p != '\0'; ++p) {
-        if (*p == '-') {
-            *p = '_';
-        } else if (*p == '_') {
-            *p = '-';
-        }
-    }
-
-    return g_object_class_find_property(klass, alternate) != NULL;
-}
-
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick);
 
 static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *cfg, int audio_disabled) {
@@ -167,52 +137,32 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
-    if (object_supports_property(G_OBJECT(parser), "config-interval")) {
-        g_object_set(parser, "config-interval", -1, NULL);
+    g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
+    if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
+        LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
     }
-    if (object_supports_property(G_OBJECT(parser), "disable-passthrough")) {
-        g_object_set(parser, "disable-passthrough", TRUE, NULL);
-    }
-
-    gboolean stream_forced = FALSE;
-    gboolean alignment_forced = FALSE;
-
-    if (object_supports_property(G_OBJECT(parser), "stream-format")) {
-        stream_forced = set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream");
-    }
-    if (object_supports_property(G_OBJECT(parser), "alignment")) {
-        alignment_forced = set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au");
+    if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
+        LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
     }
 
-    gboolean enforce_byte_stream = stream_forced && alignment_forced;
-    if (enforce_byte_stream) {
-        capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
-        CHECK_ELEM(capsfilter, "capsfilter");
+    capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
+    CHECK_ELEM(capsfilter, "capsfilter");
 
-        raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
-                                       "alignment", G_TYPE_STRING, "au", NULL);
-        if (raw_caps == NULL) {
-            LOGE("Failed to allocate caps for video byte-stream enforcement");
-            goto fail;
-        }
-        g_object_set(capsfilter, "caps", raw_caps, NULL);
-        gst_app_sink_set_caps(GST_APP_SINK(appsink), raw_caps);
-        gst_caps_unref(raw_caps);
-        raw_caps = NULL;
+    raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
+                                   "alignment", G_TYPE_STRING, "au", NULL);
+    if (raw_caps == NULL) {
+        LOGE("Failed to allocate caps for video byte-stream enforcement");
+        goto fail;
     }
+    g_object_set(capsfilter, "caps", raw_caps, NULL);
+    gst_app_sink_set_caps(GST_APP_SINK(appsink), raw_caps);
+    gst_caps_unref(raw_caps);
+    raw_caps = NULL;
 
-    if (enforce_byte_stream) {
-        gst_bin_add_many(GST_BIN(pipeline), appsrc, depay, parser, capsfilter, appsink, NULL);
-        if (!gst_element_link_many(appsrc, depay, parser, capsfilter, appsink, NULL)) {
-            LOGE("Failed to link UDP receiver passthrough pipeline");
-            goto fail;
-        }
-    } else {
-        gst_bin_add_many(GST_BIN(pipeline), appsrc, depay, parser, appsink, NULL);
-        if (!gst_element_link_many(appsrc, depay, parser, appsink, NULL)) {
-            LOGE("Failed to link UDP receiver passthrough pipeline");
-            goto fail;
-        }
+    gst_bin_add_many(GST_BIN(pipeline), appsrc, depay, parser, capsfilter, appsink, NULL);
+    if (!gst_element_link_many(appsrc, depay, parser, capsfilter, appsink, NULL)) {
+        LOGE("Failed to link UDP receiver passthrough pipeline");
+        goto fail;
     }
 
     gboolean enable_audio = (!cfg->no_audio && cfg->aud_pt >= 0 && !audio_disabled);
@@ -347,7 +297,8 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
     gchar *desc = g_strdup_printf(
         "udpsrc name=udp_source port=%d caps=\"application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000\" ! "
         "rtph265depay name=video_depay ! "
-        "h265parse name=video_parser ! "
+        "h265parse name=video_parser config-interval=-1 ! "
+        "video/x-h265, stream-format=\"byte-stream\" ! "
         "appsink drop=true name=out_appsink",
         cfg->udp_port);
 
@@ -383,41 +334,26 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
     gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
+    GstCaps *caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
+                                        "alignment", G_TYPE_STRING, "au", NULL);
+    if (caps != NULL) {
+        gst_app_sink_set_caps(GST_APP_SINK(appsink), caps);
+        gst_caps_unref(caps);
+    } else {
+        LOGW("Failed to allocate caps for udpsrc appsink");
+    }
+
     GstElement *parser = gst_bin_get_by_name(GST_BIN(pipeline), "video_parser");
-    gboolean enforce_byte_stream = FALSE;
     if (parser != NULL) {
-        if (object_supports_property(G_OBJECT(parser), "config-interval")) {
-            g_object_set(parser, "config-interval", -1, NULL);
+        if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
+            LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
         }
-        if (object_supports_property(G_OBJECT(parser), "disable-passthrough")) {
-            g_object_set(parser, "disable-passthrough", TRUE, NULL);
+        if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
+            LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
         }
-
-        gboolean stream_forced = FALSE;
-        gboolean alignment_forced = FALSE;
-
-        if (object_supports_property(G_OBJECT(parser), "stream-format")) {
-            stream_forced = set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream");
-        }
-        if (object_supports_property(G_OBJECT(parser), "alignment")) {
-            alignment_forced = set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au");
-        }
-
-        enforce_byte_stream = stream_forced && alignment_forced;
         gst_object_unref(parser);
     } else {
         LOGW("udpsrc pipeline missing h265parse element; byte-stream enforcement skipped");
-    }
-
-    if (enforce_byte_stream) {
-        GstCaps *caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
-                                            "alignment", G_TYPE_STRING, "au", NULL);
-        if (caps != NULL) {
-            gst_app_sink_set_caps(GST_APP_SINK(appsink), caps);
-            gst_caps_unref(caps);
-        } else {
-            LOGW("Failed to allocate caps enforcing byte-stream output for udpsrc pipeline");
-        }
     }
 
     ps->pipeline = pipeline;
