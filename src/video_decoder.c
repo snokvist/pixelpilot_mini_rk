@@ -13,6 +13,10 @@
 #include <gst/gst.h>
 #include <rockchip/rk_mpi.h>
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
+
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -88,6 +92,43 @@ static inline guint64 get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (guint64)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
+}
+
+static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size) {
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    /*
+     * Use NEON vector loads/stores to move packets in 64-byte bursts when
+     * running on ARM targets with NEON support. For remaining tail bytes we
+     * fall back to memcpy to avoid reimplementing scalar copies.
+     */
+    if (G_UNLIKELY(size == 0)) {
+        return;
+    }
+
+    size_t offset = 0;
+
+    while (offset + 64 <= size) {
+        vst1q_u8(dst + offset, vld1q_u8(src + offset));
+        vst1q_u8(dst + offset + 16, vld1q_u8(src + offset + 16));
+        vst1q_u8(dst + offset + 32, vld1q_u8(src + offset + 32));
+        vst1q_u8(dst + offset + 48, vld1q_u8(src + offset + 48));
+        offset += 64;
+    }
+
+    while (offset + 16 <= size) {
+        vst1q_u8(dst + offset, vld1q_u8(src + offset));
+        offset += 16;
+    }
+
+    if (offset < size) {
+        memcpy(dst + offset, src + offset, size - offset);
+    }
+#else
+    /* Fallback to memcpy on non-NEON platforms. */
+    if (size > 0) {
+        memcpy(dst, src, size);
+    }
+#endif
 }
 
 static void reset_frame_map(VideoDecoder *vd) {
@@ -561,7 +602,7 @@ int video_decoder_feed(VideoDecoder *vd, const guint8 *data, size_t size) {
         return -1;
     }
 
-    memcpy(vd->packet_buf, data, size);
+    copy_packet_data(vd->packet_buf, data, size);
     mpp_packet_set_length(vd->packet, 0);
     mpp_packet_set_size(vd->packet, vd->packet_buf_size);
     mpp_packet_set_data(vd->packet, vd->packet_buf);
