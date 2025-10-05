@@ -28,6 +28,20 @@
         }                                                                                           \
     } while (0)
 
+static void release_selector_pad(GstElement *selector, GstPad **pad_slot) {
+    if (pad_slot == NULL || *pad_slot == NULL) {
+        return;
+    }
+
+    GstPad *pad = *pad_slot;
+    if (selector != NULL && GST_PAD_IS_REQUEST(pad)) {
+        gst_element_release_request_pad(selector, pad);
+    }
+
+    gst_object_unref(pad);
+    *pad_slot = NULL;
+}
+
 static guint64 monotonic_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
@@ -77,6 +91,7 @@ static gboolean pipeline_prepare_splash(PipelineState *ps,
 
     GstElement *splash_appsrc = NULL;
     GstElement *splash_queue = NULL;
+    GstPad *splash_sink_pad = NULL;
 
     int seq_count = cfg->splash.sequence_count;
     if (seq_count > SPLASH_MAX_SEQUENCES) {
@@ -147,8 +162,18 @@ static gboolean pipeline_prepare_splash(PipelineState *ps,
                  "max-size-time", (guint64)0, NULL);
 
     gst_bin_add_many(GST_BIN(pipeline), splash_appsrc, splash_queue, NULL);
-    if (!gst_element_link_many(splash_appsrc, splash_queue, selector, NULL)) {
-        LOGE("Failed to link splash branch into selector");
+    if (!gst_element_link(splash_appsrc, splash_queue)) {
+        LOGE("Failed to link splash appsrc to queue");
+        gst_bin_remove(GST_BIN(pipeline), splash_queue);
+        gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
+        splash_queue = NULL;
+        splash_appsrc = NULL;
+        goto fail;
+    }
+
+    splash_sink_pad = gst_element_get_request_pad(selector, "sink_%u");
+    if (splash_sink_pad == NULL) {
+        LOGE("Failed to request selector pad for splash branch");
         gst_bin_remove(GST_BIN(pipeline), splash_queue);
         gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
         splash_queue = NULL;
@@ -157,18 +182,30 @@ static gboolean pipeline_prepare_splash(PipelineState *ps,
     }
 
     GstPad *queue_src = gst_element_get_static_pad(splash_queue, "src");
-    if (queue_src != NULL) {
-        ps->selector_splash_pad = gst_pad_get_peer(queue_src);
-        gst_object_unref(queue_src);
-    }
-    if (ps->selector_splash_pad == NULL) {
-        LOGE("Failed to obtain selector pad for splash branch");
+    if (queue_src == NULL) {
+        LOGE("Failed to get splash queue src pad");
+        release_selector_pad(selector, &splash_sink_pad);
         gst_bin_remove(GST_BIN(pipeline), splash_queue);
         gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
         splash_queue = NULL;
         splash_appsrc = NULL;
         goto fail;
     }
+
+    if (gst_pad_link(queue_src, splash_sink_pad) != GST_PAD_LINK_OK) {
+        LOGE("Failed to link splash queue into selector");
+        gst_object_unref(queue_src);
+        release_selector_pad(selector, &splash_sink_pad);
+        gst_bin_remove(GST_BIN(pipeline), splash_queue);
+        gst_bin_remove(GST_BIN(pipeline), splash_appsrc);
+        splash_queue = NULL;
+        splash_appsrc = NULL;
+        goto fail;
+    }
+    gst_object_unref(queue_src);
+
+    ps->selector_splash_pad = splash_sink_pad;
+    splash_sink_pad = NULL;
 
     ps->splash_loop_thread = g_thread_new("splash-loop", splash_loop_thread_func, ps);
     if (ps->splash_loop_thread == NULL) {
@@ -193,10 +230,8 @@ fail_thread:
         ps->splash_loop_thread = NULL;
         ps->splash_loop_running = FALSE;
     }
-    if (ps->selector_splash_pad != NULL) {
-        gst_object_unref(ps->selector_splash_pad);
-        ps->selector_splash_pad = NULL;
-    }
+    release_selector_pad(selector, &ps->selector_splash_pad);
+    release_selector_pad(selector, &splash_sink_pad);
     if (splash_queue != NULL) {
         if (GST_OBJECT_PARENT(splash_queue) == GST_OBJECT(pipeline)) {
             gst_bin_remove(GST_BIN(pipeline), splash_queue);
@@ -214,6 +249,8 @@ fail_thread:
         splash_appsrc = NULL;
     }
 fail:
+    release_selector_pad(selector, &ps->selector_splash_pad);
+    release_selector_pad(selector, &splash_sink_pad);
     if (splash_queue != NULL) {
         if (GST_OBJECT_PARENT(splash_queue) == GST_OBJECT(pipeline)) {
             gst_bin_remove(GST_BIN(pipeline), splash_queue);
@@ -257,14 +294,8 @@ static void pipeline_teardown_splash(PipelineState *ps) {
         ps->splash = NULL;
     }
     ps->splash_loop_running = FALSE;
-    if (ps->selector_udp_pad != NULL) {
-        gst_object_unref(ps->selector_udp_pad);
-        ps->selector_udp_pad = NULL;
-    }
-    if (ps->selector_splash_pad != NULL) {
-        gst_object_unref(ps->selector_splash_pad);
-        ps->selector_splash_pad = NULL;
-    }
+    release_selector_pad(ps->input_selector, &ps->selector_udp_pad);
+    release_selector_pad(ps->input_selector, &ps->selector_splash_pad);
     ps->input_selector = NULL;
     ps->splash_available = FALSE;
     ps->splash_active = FALSE;
@@ -398,6 +429,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     GstElement *capsfilter = NULL;
     GstElement *appsink = NULL;
     GstCaps *raw_caps = NULL;
+    GstPad *udp_sink_pad = NULL;
     UdpReceiver *receiver = NULL;
     GstElement *audio_appsrc = NULL;
     GstElement *audio_queue_start = NULL;
@@ -409,14 +441,8 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     GstElement *audio_sink = NULL;
     GstCaps *audio_caps = NULL;
 
-    if (ps->selector_udp_pad != NULL) {
-        gst_object_unref(ps->selector_udp_pad);
-        ps->selector_udp_pad = NULL;
-    }
-    if (ps->selector_splash_pad != NULL) {
-        gst_object_unref(ps->selector_splash_pad);
-        ps->selector_splash_pad = NULL;
-    }
+    release_selector_pad(ps->input_selector, &ps->selector_udp_pad);
+    release_selector_pad(ps->input_selector, &ps->selector_splash_pad);
     ps->input_selector = NULL;
     ps->splash_active = FALSE;
     ps->splash_available = FALSE;
@@ -474,24 +500,30 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         LOGE("Failed to link UDP receiver passthrough source chain");
         goto fail;
     }
-    if (!gst_element_link(udp_queue, selector)) {
-        LOGE("Failed to link UDP queue into selector");
+    udp_sink_pad = gst_element_get_request_pad(selector, "sink_%u");
+    if (udp_sink_pad == NULL) {
+        LOGE("Failed to request selector pad for UDP branch");
         goto fail;
     }
+
+    GstPad *udp_src_pad = gst_element_get_static_pad(udp_queue, "src");
+    if (udp_src_pad == NULL) {
+        LOGE("Failed to get UDP queue src pad");
+        goto fail;
+    }
+    if (gst_pad_link(udp_src_pad, udp_sink_pad) != GST_PAD_LINK_OK) {
+        LOGE("Failed to link UDP queue into selector");
+        gst_object_unref(udp_src_pad);
+        goto fail;
+    }
+    gst_object_unref(udp_src_pad);
     if (!gst_element_link_many(selector, parser, capsfilter, appsink, NULL)) {
         LOGE("Failed to link UDP receiver passthrough pipeline");
         goto fail;
     }
 
-    GstPad *udp_src_pad = gst_element_get_static_pad(udp_queue, "src");
-    if (udp_src_pad != NULL) {
-        ps->selector_udp_pad = gst_pad_get_peer(udp_src_pad);
-        gst_object_unref(udp_src_pad);
-    }
-    if (ps->selector_udp_pad == NULL) {
-        LOGE("Failed to obtain selector pad for UDP branch");
-        goto fail;
-    }
+    ps->selector_udp_pad = udp_sink_pad;
+    udp_sink_pad = NULL;
 
     if (!pipeline_prepare_splash(ps, cfg, pipeline, selector)) {
         goto fail;
@@ -628,14 +660,9 @@ fail:
     ps->video_sink = NULL;
     ps->udp_receiver = NULL;
     ps->input_selector = NULL;
-    if (ps->selector_udp_pad != NULL) {
-        gst_object_unref(ps->selector_udp_pad);
-        ps->selector_udp_pad = NULL;
-    }
-    if (ps->selector_splash_pad != NULL) {
-        gst_object_unref(ps->selector_splash_pad);
-        ps->selector_splash_pad = NULL;
-    }
+    release_selector_pad(selector, &ps->selector_splash_pad);
+    release_selector_pad(selector, &ps->selector_udp_pad);
+    release_selector_pad(selector, &udp_sink_pad);
     ps->splash_available = FALSE;
     ps->splash_active = FALSE;
     return FALSE;

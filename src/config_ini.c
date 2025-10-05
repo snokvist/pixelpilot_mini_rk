@@ -12,15 +12,23 @@
 #define MAX_INI_LINE 512
 
 static void ini_copy_string(char *dst, size_t dst_sz, const char *src) {
-    if (!dst || dst_sz == 0) {
+    if (dst == NULL || dst_sz == 0) {
         return;
     }
-    if (!src) {
+    if (src == NULL) {
         dst[0] = '\0';
         return;
     }
-    strncpy(dst, src, dst_sz - 1);
-    dst[dst_sz - 1] = '\0';
+
+    size_t copy_len = strlen(src);
+    if (copy_len >= dst_sz) {
+        copy_len = dst_sz - 1;
+    }
+
+    if (copy_len > 0) {
+        memcpy(dst, src, copy_len);
+    }
+    dst[copy_len] = '\0';
 }
 
 typedef struct {
