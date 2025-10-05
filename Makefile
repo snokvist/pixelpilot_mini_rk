@@ -14,25 +14,38 @@ CFLAGS += -Iinclude
 # supported ARM toolchains. Users can override by invoking `make ENABLE_NEON=0`
 # or `make ENABLE_NEON=1`.
 ENABLE_NEON ?= auto
-CC_MACHINE := $(shell $(CC) -dumpmachine 2>/dev/null)
+CC_MACHINE := $(strip $(shell $(CC) -dumpmachine 2>/dev/null))
+ifeq ($(CC_MACHINE),)
+CC_MACHINE := $(strip $(shell uname -m 2>/dev/null))
+endif
 
-ifeq ($(ENABLE_NEON),1)
-NEON_CFLAGS := -mfpu=neon -DPIXELPILOT_HAS_NEON
+NEON_CFLAGS :=
+NEON_DISABLE_DEFINE :=
+NEON_ENABLED := 0
+
+ifeq ($(ENABLE_NEON),0)
+NEON_DISABLE_DEFINE := -DPIXELPILOT_DISABLE_NEON
 else
-  ifeq ($(ENABLE_NEON),auto)
+  ifeq ($(ENABLE_NEON),1)
+NEON_CFLAGS := -mfpu=neon -DPIXELPILOT_HAS_NEON
+NEON_ENABLED := 1
+  else ifeq ($(ENABLE_NEON),auto)
     ifneq (,$(findstring aarch64,$(CC_MACHINE)))
 NEON_CFLAGS := -DPIXELPILOT_HAS_NEON
+NEON_ENABLED := 1
     endif
     ifneq (,$(findstring arm64,$(CC_MACHINE)))
 NEON_CFLAGS := -DPIXELPILOT_HAS_NEON
+NEON_ENABLED := 1
     endif
     ifneq (,$(findstring armv7,$(CC_MACHINE)))
 NEON_CFLAGS := -mfpu=neon -DPIXELPILOT_HAS_NEON
+NEON_ENABLED := 1
     endif
   endif
 endif
 
-CFLAGS += $(NEON_CFLAGS)
+CFLAGS += $(NEON_CFLAGS) $(NEON_DISABLE_DEFINE)
 ifeq ($(strip $(PKG_DRMCFLAGS)),)
 CFLAGS += -I/usr/include/libdrm
 else

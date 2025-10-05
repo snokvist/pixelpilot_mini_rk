@@ -18,6 +18,18 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#if defined(PIXELPILOT_DISABLE_NEON)
+#define PIXELPILOT_NEON_AVAILABLE 0
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(PIXELPILOT_HAS_NEON)
+#define PIXELPILOT_NEON_AVAILABLE 1
+#else
+#define PIXELPILOT_NEON_AVAILABLE 0
+#endif
+
+#if PIXELPILOT_NEON_AVAILABLE
+#include <arm_neon.h>
+#endif
+
 #ifndef GST_USE_UNSTABLE_API
 #define GST_USE_UNSTABLE_API
 #endif
@@ -163,8 +175,50 @@ static inline guint64 get_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+static inline void neon_copy_bytes(guint8 *dst, const guint8 *src, size_t size) {
+#if PIXELPILOT_NEON_AVAILABLE
+    if (G_UNLIKELY(size == 0)) {
+        return;
+    }
+
+    size_t offset = 0;
+    while (offset + 64 <= size) {
+        vst1q_u8(dst + offset, vld1q_u8(src + offset));
+        vst1q_u8(dst + offset + 16, vld1q_u8(src + offset + 16));
+        vst1q_u8(dst + offset + 32, vld1q_u8(src + offset + 32));
+        vst1q_u8(dst + offset + 48, vld1q_u8(src + offset + 48));
+        offset += 64;
+    }
+    while (offset + 16 <= size) {
+        vst1q_u8(dst + offset, vld1q_u8(src + offset));
+        offset += 16;
+    }
+    if (offset + 8 <= size) {
+        vst1_u8(dst + offset, vld1_u8(src + offset));
+        offset += 8;
+    }
+    if (offset < size) {
+        memcpy(dst + offset, src + offset, size - offset);
+    }
+#else
+    if (size > 0) {
+        memcpy(dst, src, size);
+    }
+#endif
+}
+
+static inline void copy_sample(UdpReceiverPacketSample *dst, const UdpReceiverPacketSample *src) {
+    neon_copy_bytes((guint8 *)dst, (const guint8 *)src, sizeof(*dst));
+}
+
+static inline void copy_history(UdpReceiverPacketSample *dst,
+                                const UdpReceiverPacketSample *src,
+                                size_t count) {
+    neon_copy_bytes((guint8 *)dst, (const guint8 *)src, count * sizeof(*dst));
+}
+
 static void history_push(struct UdpReceiver *ur, const UdpReceiverPacketSample *sample) {
-    ur->history[ur->stats.history_head] = *sample;
+    copy_sample(&ur->history[ur->stats.history_head], sample);
     ur->stats.history_head = (ur->stats.history_head + 1u) % UDP_RECEIVER_HISTORY;
     if (ur->stats.history_count < UDP_RECEIVER_HISTORY) {
         ur->stats.history_count++;
@@ -186,6 +240,20 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->bitrate_window_bytes = 0;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
+}
+
+static void log_udp_neon_status_once(void) {
+    static gsize once_init = 0;
+    if (g_once_init_enter(&once_init)) {
+#if defined(PIXELPILOT_DISABLE_NEON)
+        LOGI("UDP receiver: NEON history acceleration disabled by build flag");
+#elif PIXELPILOT_NEON_AVAILABLE
+        LOGI("UDP receiver: NEON history acceleration enabled");
+#else
+        LOGI("UDP receiver: NEON history acceleration unavailable on this build");
+#endif
+        g_once_init_leave(&once_init, 1);
+    }
 }
 
 static void push_stream_reset_events(struct UdpReceiver *ur) {
@@ -811,8 +879,8 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
         return;
     }
     g_mutex_lock(&ur->lock);
-    *stats = ur->stats;
-    memcpy(stats->history, ur->history, sizeof(ur->history));
+    neon_copy_bytes((guint8 *)stats, (const guint8 *)&ur->stats, sizeof(*stats));
+    copy_history(stats->history, ur->history, UDP_RECEIVER_HISTORY);
     g_mutex_unlock(&ur->lock);
 }
 
@@ -826,6 +894,7 @@ void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
     gboolean changed = (ur->stats_enabled != new_state);
     ur->stats_enabled = new_state;
     if (changed && new_state) {
+        log_udp_neon_status_once();
         reset_stats_locked(ur);
     }
     g_mutex_unlock(&ur->lock);

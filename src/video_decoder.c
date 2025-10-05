@@ -13,7 +13,15 @@
 #include <gst/gst.h>
 #include <rockchip/rk_mpi.h>
 
-#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(PIXELPILOT_HAS_NEON)
+#if defined(PIXELPILOT_DISABLE_NEON)
+#define PIXELPILOT_NEON_AVAILABLE 0
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(PIXELPILOT_HAS_NEON)
+#define PIXELPILOT_NEON_AVAILABLE 1
+#else
+#define PIXELPILOT_NEON_AVAILABLE 0
+#endif
+
+#if PIXELPILOT_NEON_AVAILABLE
 #include <arm_neon.h>
 #endif
 
@@ -95,7 +103,7 @@ static inline guint64 get_time_ms(void) {
 }
 
 static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size) {
-#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(PIXELPILOT_HAS_NEON)
+#if PIXELPILOT_NEON_AVAILABLE
     /*
      * Use NEON vector loads/stores to move packets in 64-byte bursts when
      * running on ARM targets with NEON support. For remaining tail bytes we
@@ -129,6 +137,20 @@ static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size)
         memcpy(dst, src, size);
     }
 #endif
+}
+
+static void log_decoder_neon_status_once(void) {
+    static gsize once_init = 0;
+    if (g_once_init_enter(&once_init)) {
+#if defined(PIXELPILOT_DISABLE_NEON)
+        LOGI("Video decoder: NEON packet acceleration disabled by build flag");
+#elif PIXELPILOT_NEON_AVAILABLE
+        LOGI("Video decoder: NEON packet acceleration enabled");
+#else
+        LOGI("Video decoder: NEON packet acceleration unavailable on this build");
+#endif
+        g_once_init_leave(&once_init, 1);
+    }
 }
 
 static void reset_frame_map(VideoDecoder *vd) {
@@ -422,6 +444,8 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     if (vd == NULL || cfg == NULL || ms == NULL) {
         return -1;
     }
+
+    log_decoder_neon_status_once();
 
     memset(vd, 0, sizeof(*vd));
     vd->drm_fd = -1;
