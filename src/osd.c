@@ -3,13 +3,17 @@
 #include "drm_props.h"
 #include "logging.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <float.h>
 #include <ctype.h>
+#include <pixman.h>
 
 #if defined(__has_include)
 #if __has_include(<libdrm/drm_fourcc.h>)
@@ -47,15 +51,295 @@ static int clampi(int v, int min_v, int max_v) {
     return v;
 }
 
-static void osd_clear(OSD *o, uint32_t argb) {
-    if (!o->fb.map) {
+static inline uint16_t osd_expand_channel(uint8_t v) {
+    return (uint16_t)v * 257u;
+}
+
+static pixman_color_t osd_argb_to_pixman_color(uint32_t argb) {
+    pixman_color_t color = {
+        .alpha = osd_expand_channel((uint8_t)(argb >> 24)),
+        .red = osd_expand_channel((uint8_t)(argb >> 16)),
+        .green = osd_expand_channel((uint8_t)(argb >> 8)),
+        .blue = osd_expand_channel((uint8_t)(argb >> 0)),
+    };
+    return color;
+}
+
+static pixman_image_t *osd_fb_image(OSD *o) {
+    if (!o || !o->fb.map) {
+        return NULL;
+    }
+    if (!o->pixman_fb) {
+        o->pixman_fb = pixman_image_create_bits(PIXMAN_a8r8g8b8, o->fb.w, o->fb.h,
+                                                (uint32_t *)o->fb.map, o->fb.pitch);
+    }
+    return o->pixman_fb;
+}
+
+static void osd_destroy_pixman_surface(OSD *o) {
+    if (!o) {
         return;
     }
-    uint32_t *px = (uint32_t *)o->fb.map;
-    size_t count = o->fb.size / 4;
-    for (size_t i = 0; i < count; ++i) {
-        px[i] = argb;
+    if (o->pixman_fb) {
+        pixman_image_unref(o->pixman_fb);
+        o->pixman_fb = NULL;
     }
+}
+
+#define OSD_IMAGE_MAX_PATH 512
+
+static uint64_t osd_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+
+static void osd_trim_inplace(char *s) {
+    if (!s) {
+        return;
+    }
+    char *p = s;
+    while (*p && isspace((unsigned char)*p)) {
+        ++p;
+    }
+    if (p != s) {
+        memmove(s, p, strlen(p) + 1);
+    }
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) {
+        s[--len] = '\0';
+    }
+}
+
+static void osd_image_state_clear(OsdImageState *state) {
+    if (!state) {
+        return;
+    }
+    if (state->frames) {
+        for (int i = 0; i < state->frame_capacity; ++i) {
+            if (state->frames[i]) {
+                pixman_image_unref(state->frames[i]);
+                state->frames[i] = NULL;
+            }
+        }
+        free(state->frames);
+    }
+    memset(state, 0, sizeof(*state));
+}
+
+static void osd_destroy_image_cache(OSD *o) {
+    if (!o) {
+        return;
+    }
+    for (int i = 0; i < OSD_MAX_ELEMENTS; ++i) {
+        if (o->elements[i].type == OSD_WIDGET_IMAGE) {
+            osd_image_state_clear(&o->elements[i].data.image);
+        }
+    }
+}
+
+static int osd_ppm_next_token(FILE *fp, char *buf, size_t buf_sz) {
+    if (!fp || !buf || buf_sz == 0) {
+        return -1;
+    }
+    int c = 0;
+    size_t pos = 0;
+    while ((c = fgetc(fp)) != EOF) {
+        if (isspace(c)) {
+            continue;
+        }
+        if (c == '#') {
+            while ((c = fgetc(fp)) != EOF && c != '\n') {
+            }
+            continue;
+        }
+        break;
+    }
+    if (c == EOF) {
+        return -1;
+    }
+    buf[pos++] = (char)c;
+    while (pos + 1 < buf_sz) {
+        c = fgetc(fp);
+        if (c == EOF || isspace(c)) {
+            break;
+        }
+        if (c == '#') {
+            ungetc(c, fp);
+            break;
+        }
+        buf[pos++] = (char)c;
+    }
+    buf[pos] = '\0';
+    if (c == '#') {
+        while ((c = fgetc(fp)) != EOF && c != '\n') {
+        }
+    }
+    return pos > 0 ? 0 : -1;
+}
+
+static pixman_image_t *osd_load_ppm_frame(const char *path, int *out_w, int *out_h) {
+    if (!path || !*path) {
+        return NULL;
+    }
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        LOGE("OSD: failed to open image frame %s: %s", path, strerror(errno));
+        return NULL;
+    }
+
+    char token[64];
+    if (osd_ppm_next_token(fp, token, sizeof(token)) != 0 || strcmp(token, "P6") != 0) {
+        LOGE("OSD: %s is not a binary PPM (expected P6)", path);
+        fclose(fp);
+        return NULL;
+    }
+    if (osd_ppm_next_token(fp, token, sizeof(token)) != 0) {
+        LOGE("OSD: %s missing width", path);
+        fclose(fp);
+        return NULL;
+    }
+    int width = atoi(token);
+    if (osd_ppm_next_token(fp, token, sizeof(token)) != 0) {
+        LOGE("OSD: %s missing height", path);
+        fclose(fp);
+        return NULL;
+    }
+    int height = atoi(token);
+    if (osd_ppm_next_token(fp, token, sizeof(token)) != 0) {
+        LOGE("OSD: %s missing max value", path);
+        fclose(fp);
+        return NULL;
+    }
+    int max_val = atoi(token);
+    if (width <= 0 || height <= 0 || max_val <= 0 || max_val > 255) {
+        LOGE("OSD: %s has unsupported dimensions (%dx%d max=%d)", path, width, height, max_val);
+        fclose(fp);
+        return NULL;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    size_t byte_count = pixel_count * 3u;
+    uint8_t *rgb = (uint8_t *)malloc(byte_count);
+    if (!rgb) {
+        LOGE("OSD: failed to allocate %zu bytes for %s", byte_count, path);
+        fclose(fp);
+        return NULL;
+    }
+    size_t read_bytes = fread(rgb, 1, byte_count, fp);
+    fclose(fp);
+    if (read_bytes != byte_count) {
+        LOGE("OSD: short read for %s (expected %zu got %zu)", path, byte_count, read_bytes);
+        free(rgb);
+        return NULL;
+    }
+
+    pixman_image_t *img = pixman_image_create_bits(PIXMAN_a8r8g8b8, width, height, NULL, 0);
+    if (!img) {
+        LOGE("OSD: pixman allocation failed for %s", path);
+        free(rgb);
+        return NULL;
+    }
+    uint8_t *dst_base = (uint8_t *)pixman_image_get_data(img);
+    int stride = pixman_image_get_stride(img);
+    const uint8_t *src = rgb;
+    for (int y = 0; y < height; ++y) {
+        uint32_t *dst = (uint32_t *)(dst_base + y * stride);
+        for (int x = 0; x < width; ++x) {
+            uint8_t r = src[0];
+            uint8_t g = src[1];
+            uint8_t b = src[2];
+            src += 3;
+            dst[x] = (0xFFu << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        }
+    }
+    free(rgb);
+    if (out_w) {
+        *out_w = width;
+    }
+    if (out_h) {
+        *out_h = height;
+    }
+    return img;
+}
+
+static int osd_image_collect_paths(const OsdImageConfig *cfg, char paths[][OSD_IMAGE_MAX_PATH], int max_paths) {
+    if (!cfg || !paths || max_paths <= 0) {
+        return 0;
+    }
+    if (!cfg->source[0]) {
+        return 0;
+    }
+    int count = 0;
+    char buffer[sizeof(cfg->source)];
+    if (strchr(cfg->source, ',')) {
+        strncpy(buffer, cfg->source, sizeof(buffer) - 1);
+        buffer[sizeof(buffer) - 1] = '\0';
+        char *token = strtok(buffer, ",");
+        while (token && count < max_paths) {
+            osd_trim_inplace(token);
+            if (*token) {
+                strncpy(paths[count], token, OSD_IMAGE_MAX_PATH - 1);
+                paths[count][OSD_IMAGE_MAX_PATH - 1] = '\0';
+                ++count;
+            }
+            token = strtok(NULL, ",");
+        }
+        return count;
+    }
+
+    if (cfg->frame_count > 1 && strstr(cfg->source, "%")) {
+        int frames = cfg->frame_count;
+        if (frames > max_paths) {
+            frames = max_paths;
+        }
+        for (int i = 0; i < frames; ++i) {
+            int written = snprintf(paths[count], OSD_IMAGE_MAX_PATH, cfg->source, i);
+            if (written < 0 || written >= OSD_IMAGE_MAX_PATH) {
+                LOGW("OSD: image frame path truncated for pattern '%s'", cfg->source);
+                paths[count][OSD_IMAGE_MAX_PATH - 1] = '\0';
+            }
+            ++count;
+        }
+        return count;
+    }
+
+    strncpy(paths[0], cfg->source, OSD_IMAGE_MAX_PATH - 1);
+    paths[0][OSD_IMAGE_MAX_PATH - 1] = '\0';
+    return 1;
+}
+
+static void osd_reset_glyph_cache_entry(OsdGlyphCacheEntry *entry) {
+    if (!entry) {
+        return;
+    }
+    for (size_t i = 0; i < sizeof(entry->glyphs) / sizeof(entry->glyphs[0]); ++i) {
+        if (entry->glyphs[i]) {
+            pixman_image_unref(entry->glyphs[i]);
+            entry->glyphs[i] = NULL;
+        }
+    }
+    entry->scale = 0;
+}
+
+static void osd_reset_glyph_cache(OSD *o) {
+    if (!o) {
+        return;
+    }
+    for (int i = 0; i < OSD_MAX_GLYPH_SCALES; ++i) {
+        osd_reset_glyph_cache_entry(&o->glyph_cache[i]);
+    }
+    o->glyph_cache_count = 0;
+}
+
+static void osd_clear(OSD *o, uint32_t argb) {
+    pixman_image_t *dest = osd_fb_image(o);
+    if (!dest) {
+        return;
+    }
+    pixman_color_t color = osd_argb_to_pixman_color(argb);
+    pixman_rectangle16_t rect = {0, 0, (uint16_t)o->fb.w, (uint16_t)o->fb.h};
+    pixman_image_fill_rectangles(PIXMAN_OP_SRC, dest, &color, 1, &rect);
 }
 
 // Font data derived from the public domain VGA 8x8 font by Marcel Sondaar,
@@ -129,16 +413,21 @@ static const uint8_t font8x8_basic[128][8] = {
     {0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 };
 
-static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale) {
-    if ((unsigned char)c >= 128) {
-        return;
+static pixman_image_t *osd_create_glyph_image(int scale, unsigned char c) {
+    if (scale <= 0) {
+        scale = 1;
     }
-    if (c >= 'a' && c <= 'z') {
-        c = (char)(c - 'a' + 'A');
+    pixman_image_t *mask = pixman_image_create_bits(PIXMAN_a8, 8 * scale, 8 * scale, NULL, 0);
+    if (!mask) {
+        return NULL;
     }
-    const uint8_t *glyph = font8x8_basic[(unsigned char)c];
-    uint32_t *fb = (uint32_t *)o->fb.map;
-    int pitch = o->fb.pitch / 4;
+
+    uint8_t *data = (uint8_t *)pixman_image_get_data(mask);
+    int stride = pixman_image_get_stride(mask);
+    int height = pixman_image_get_height(mask);
+    memset(data, 0, stride * height);
+
+    const uint8_t *glyph = font8x8_basic[c];
     for (int row = 0; row < 8; ++row) {
         uint8_t bits = glyph[row];
         if (!bits) {
@@ -149,23 +438,104 @@ static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale
                 continue;
             }
             for (int sy = 0; sy < scale; ++sy) {
-                int py = y + row * scale + sy;
-                if (py < 0 || py >= o->h) {
-                    continue;
-                }
-                uint32_t *row_px = fb + py * pitch;
+                int py = row * scale + sy;
+                uint8_t *row_data = data + py * stride;
                 for (int sx = 0; sx < scale; ++sx) {
-                    int px = x + col * scale + sx;
-                    if (px >= 0 && px < o->w) {
-                        row_px[px] = argb;
-                    }
+                    int px = col * scale + sx;
+                    row_data[px] = 0xFF;
                 }
             }
         }
     }
+    return mask;
+}
+
+static OsdGlyphCacheEntry *osd_glyph_cache_for_scale(OSD *o, int scale) {
+    if (!o) {
+        return NULL;
+    }
+    if (scale <= 0) {
+        scale = 1;
+    }
+
+    for (int i = 0; i < o->glyph_cache_count; ++i) {
+        if (o->glyph_cache[i].scale == scale) {
+            return &o->glyph_cache[i];
+        }
+    }
+
+    for (int i = 0; i < OSD_MAX_GLYPH_SCALES; ++i) {
+        if (o->glyph_cache[i].scale == 0) {
+            o->glyph_cache[i].scale = scale;
+            memset(o->glyph_cache[i].glyphs, 0, sizeof(o->glyph_cache[i].glyphs));
+            if (i >= o->glyph_cache_count) {
+                o->glyph_cache_count = i + 1;
+            }
+            return &o->glyph_cache[i];
+        }
+    }
+
+    OsdGlyphCacheEntry *entry = &o->glyph_cache[0];
+    osd_reset_glyph_cache_entry(entry);
+    entry->scale = scale;
+    return entry;
+}
+
+static pixman_image_t *osd_lookup_glyph(OSD *o, int scale, unsigned char c) {
+    OsdGlyphCacheEntry *entry = osd_glyph_cache_for_scale(o, scale);
+    if (!entry) {
+        return NULL;
+    }
+    if (!entry->glyphs[c]) {
+        entry->glyphs[c] = osd_create_glyph_image(scale, c);
+    }
+    return entry->glyphs[c];
+}
+
+static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    pixman_image_t *dest = osd_fb_image(o);
+    if (!dest) {
+        return;
+    }
+    int x0 = clampi(x, 0, o->w);
+    int y0 = clampi(y, 0, o->h);
+    int x1 = clampi(x + w, 0, o->w);
+    int y1 = clampi(y + h, 0, o->h);
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+
+    pixman_color_t color = osd_argb_to_pixman_color(argb);
+    pixman_rectangle16_t rect = {
+        .x = (int16_t)x0,
+        .y = (int16_t)y0,
+        .width = (uint16_t)(x1 - x0),
+        .height = (uint16_t)(y1 - y0),
+    };
+    pixman_image_fill_rectangles(PIXMAN_OP_SRC, dest, &color, 1, &rect);
 }
 
 static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, int scale) {
+    if (!s || !*s) {
+        return;
+    }
+    pixman_image_t *dest = osd_fb_image(o);
+    if (!dest) {
+        return;
+    }
+    if (scale <= 0) {
+        scale = 1;
+    }
+
+    pixman_color_t color = osd_argb_to_pixman_color(argb);
+    pixman_image_t *solid = pixman_image_create_solid_fill(&color);
+    if (!solid) {
+        return;
+    }
+
     const int advance = (8 + 1) * scale;
     const int line_advance = (8 + 1) * scale;
     int pen_x = x;
@@ -176,30 +546,85 @@ static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, in
             pen_x = x;
             continue;
         }
-        osd_draw_char(o, pen_x, pen_y, *p, argb, scale);
+        unsigned char glyph_c = (unsigned char)*p;
+        if (glyph_c >= 128) {
+            pen_x += advance;
+            continue;
+        }
+        if (glyph_c >= 'a' && glyph_c <= 'z') {
+            glyph_c = (unsigned char)(glyph_c - 'a' + 'A');
+        }
+        pixman_image_t *glyph = osd_lookup_glyph(o, scale, glyph_c);
+        if (!glyph) {
+            pen_x += advance;
+            continue;
+        }
+        int glyph_w = pixman_image_get_width(glyph);
+        int glyph_h = pixman_image_get_height(glyph);
+        pixman_image_composite32(PIXMAN_OP_OVER, solid, glyph, dest, 0, 0, 0, 0, pen_x, pen_y, glyph_w, glyph_h);
         pen_x += advance;
     }
+
+    pixman_image_unref(solid);
 }
 
-static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
-    if (!o->fb.map || w <= 0 || h <= 0) {
+static void osd_draw_image_frame(OSD *o, pixman_image_t *frame, int x, int y) {
+    if (!o || !frame) {
         return;
     }
-    int x0 = clampi(x, 0, o->w);
-    int y0 = clampi(y, 0, o->h);
-    int x1 = clampi(x + w, 0, o->w);
-    int y1 = clampi(y + h, 0, o->h);
-    if (x0 >= x1 || y0 >= y1) {
+    pixman_image_t *dest = osd_fb_image(o);
+    if (!dest) {
         return;
     }
-    uint32_t *fb = (uint32_t *)o->fb.map;
-    int pitch = o->fb.pitch / 4;
-    for (int py = y0; py < y1; ++py) {
-        uint32_t *row = fb + py * pitch;
-        for (int px = x0; px < x1; ++px) {
-            row[px] = argb;
+    int width = pixman_image_get_width(frame);
+    int height = pixman_image_get_height(frame);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    pixman_image_composite32(PIXMAN_OP_OVER, frame, NULL, dest, 0, 0, 0, 0, x, y, width, height);
+}
+
+static pixman_image_t *osd_image_current_frame(OsdImageState *state) {
+    if (!state || !state->frames || state->frame_count <= 0) {
+        return NULL;
+    }
+    if (state->frame_count == 1) {
+        state->current_frame = 0;
+        return state->frames[0];
+    }
+    if (state->frame_duration_ms <= 0) {
+        state->frame_duration_ms = 200;
+    }
+    uint64_t now = osd_now_ms();
+    if (state->next_frame_ms == 0) {
+        state->next_frame_ms = now + (uint64_t)state->frame_duration_ms;
+        if (state->current_frame < 0 || state->current_frame >= state->frame_count) {
+            state->current_frame = 0;
         }
+        return state->frames[state->current_frame];
     }
+    if (now >= state->next_frame_ms) {
+        uint64_t delta = now - state->next_frame_ms;
+        int steps = (int)(delta / (uint64_t)state->frame_duration_ms) + 1;
+        if (steps < 1) {
+            steps = 1;
+        }
+        for (int s = 0; s < steps; ++s) {
+            if (state->current_frame + 1 < state->frame_count) {
+                state->current_frame++;
+            } else if (state->loop) {
+                state->current_frame = 0;
+            } else {
+                state->current_frame = state->frame_count - 1;
+                break;
+            }
+        }
+        state->next_frame_ms = now + (uint64_t)state->frame_duration_ms;
+    }
+    if (state->current_frame < 0 || state->current_frame >= state->frame_count) {
+        state->current_frame = 0;
+    }
+    return state->frames[state->current_frame];
 }
 
 static void osd_store_rect(OSDRect *r, int x, int y, int w, int h) {
@@ -647,7 +1072,7 @@ static void osd_draw_vline(OSD *o, int x, int y, int h, uint32_t argb) {
 }
 
 static void osd_draw_line(OSD *o, int x0, int y0, int x1, int y1, uint32_t argb) {
-    if (!o->fb.map) {
+    if (!osd_fb_image(o)) {
         return;
     }
     int dx = x1 > x0 ? (x1 - x0) : (x0 - x1);
@@ -783,6 +1208,101 @@ static void osd_compute_placement(const OSD *o, int rect_w, int rect_h, const Os
 
     *out_x = x;
     *out_y = y;
+}
+
+static void osd_image_reset(OSD *o, int idx) {
+    if (!o || idx < 0 || idx >= o->layout.element_count) {
+        return;
+    }
+    OsdElementConfig *elem_cfg = &o->layout.elements[idx];
+    if (elem_cfg->type != OSD_WIDGET_IMAGE) {
+        return;
+    }
+
+    OsdImageState *state = &o->elements[idx].data.image;
+    o->elements[idx].type = OSD_WIDGET_IMAGE;
+    osd_image_state_clear(state);
+    state->load_attempted = 1;
+
+    int scale = o->scale > 0 ? o->scale : 1;
+    int padding = elem_cfg->data.image.padding;
+    if (padding < 0) {
+        padding = 0;
+    }
+    state->padding = padding * scale;
+    state->bg = elem_cfg->data.image.bg;
+    state->border = elem_cfg->data.image.border;
+    state->border_thickness = state->border ? scale : 0;
+    state->loop = elem_cfg->data.image.loop ? 1 : 0;
+    int duration = elem_cfg->data.image.frame_duration_ms;
+    if (duration <= 0) {
+        duration = (o->refresh_ms > 0) ? o->refresh_ms : 200;
+    }
+    state->frame_duration_ms = duration;
+
+    char paths[OSD_IMAGE_MAX_FRAMES][OSD_IMAGE_MAX_PATH];
+    int requested = osd_image_collect_paths(&elem_cfg->data.image, paths, OSD_IMAGE_MAX_FRAMES);
+    if (requested <= 0) {
+        LOGW("OSD: image element '%s' has no frames configured", elem_cfg->name);
+        return;
+    }
+
+    state->frames = (pixman_image_t **)calloc((size_t)requested, sizeof(pixman_image_t *));
+    if (!state->frames) {
+        LOGE("OSD: failed to allocate frame table for image '%s'", elem_cfg->name);
+        return;
+    }
+    state->frame_capacity = requested;
+
+    int frame_w = 0;
+    int frame_h = 0;
+    for (int i = 0; i < requested; ++i) {
+        int w = 0;
+        int h = 0;
+        pixman_image_t *frame = osd_load_ppm_frame(paths[i], &w, &h);
+        if (!frame) {
+            continue;
+        }
+        if (frame_w == 0 && frame_h == 0) {
+            frame_w = w;
+            frame_h = h;
+        } else if (w != frame_w || h != frame_h) {
+            LOGW("OSD: image frame %s has mismatched dimensions %dx%d (expected %dx%d)", paths[i], w, h, frame_w,
+                 frame_h);
+            pixman_image_unref(frame);
+            continue;
+        }
+        state->frames[state->frame_count++] = frame;
+    }
+
+    if (state->frame_count <= 0) {
+        LOGW("OSD: image element '%s' failed to load any frames", elem_cfg->name);
+        osd_image_state_clear(state);
+        return;
+    }
+
+    state->content_w = frame_w;
+    state->content_h = frame_h;
+    int box_w = frame_w + 2 * state->padding;
+    int box_h = frame_h + 2 * state->padding;
+    if (box_w <= 0) {
+        box_w = frame_w;
+    }
+    if (box_h <= 0) {
+        box_h = frame_h;
+    }
+
+    osd_compute_placement(o, box_w, box_h, &elem_cfg->placement, &state->x, &state->y);
+    state->width = box_w;
+    state->height = box_h;
+    state->inner_x = state->x + state->padding;
+    state->inner_y = state->y + state->padding;
+    o->elements[idx].rect.x = 0;
+    o->elements[idx].rect.y = 0;
+    o->elements[idx].rect.w = 0;
+    o->elements[idx].rect.h = 0;
+    state->current_frame = 0;
+    state->next_frame_ms = 0;
 }
 
 static void osd_line_reset(OSD *o, const AppCfg *cfg, int idx) {
@@ -1919,6 +2439,50 @@ static void osd_bar_draw(OSD *o, int idx) {
     osd_bar_draw_all(o, idx, fg);
 }
 
+static void osd_render_image_element(OSD *o, int idx, const OsdRenderContext *ctx) {
+    (void)ctx;
+    if (!o || idx < 0 || idx >= o->layout.element_count) {
+        return;
+    }
+    OsdElementConfig *elem_cfg = &o->layout.elements[idx];
+    if (elem_cfg->type != OSD_WIDGET_IMAGE) {
+        osd_clear_rect(o, &o->elements[idx].rect);
+        osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
+        return;
+    }
+
+    OsdImageState *state = &o->elements[idx].data.image;
+    if ((!state->frames || state->frame_count <= 0) && !state->load_attempted) {
+        osd_image_reset(o, idx);
+        state = &o->elements[idx].data.image;
+    }
+    if (!state->frames || state->frame_count <= 0) {
+        osd_clear_rect(o, &o->elements[idx].rect);
+        osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
+        return;
+    }
+
+    OSDRect prev_rect = o->elements[idx].rect;
+    if (prev_rect.w > 0 && prev_rect.h > 0) {
+        osd_clear_rect(o, &prev_rect);
+    }
+
+    pixman_image_t *frame = osd_image_current_frame(state);
+    if (!frame) {
+        osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
+        return;
+    }
+
+    if (state->bg) {
+        osd_fill_rect(o, state->x, state->y, state->width, state->height, state->bg);
+    }
+    if (state->border && state->border_thickness > 0) {
+        osd_draw_rect(o, state->x, state->y, state->width, state->height, state->border);
+    }
+    osd_draw_image_frame(o, frame, state->inner_x, state->inner_y);
+    osd_store_rect(&o->elements[idx].rect, state->x, state->y, state->width, state->height);
+}
+
 static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx) {
     OsdElementConfig *elem_cfg = &o->layout.elements[idx];
     OsdLineState *state = &o->elements[idx].data.line;
@@ -2348,8 +2912,10 @@ static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
 }
 
 static void osd_destroy_fb(int fd, OSD *o) {
+    osd_destroy_pixman_surface(o);
+    osd_reset_glyph_cache(o);
+    osd_destroy_image_cache(o);
     destroy_dumb_fb(fd, &o->fb);
-    o->fb.map = NULL;
 }
 
 int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plane_id, OSD *o) {
@@ -2397,6 +2963,13 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
         return -1;
     }
 
+    if (!osd_fb_image(o)) {
+        LOGW("OSD: pixman surface init failed. Disabling OSD.");
+        osd_destroy_fb(fd, o);
+        o->enabled = 0;
+        return -1;
+    }
+
     o->layout = cfg->osd_layout;
     if (o->layout.element_count > OSD_MAX_ELEMENTS) {
         o->layout.element_count = OSD_MAX_ELEMENTS;
@@ -2411,6 +2984,8 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
             osd_bar_reset(o, cfg, i);
         } else if (o->elements[i].type == OSD_WIDGET_TEXT) {
             o->elements[i].data.text.last_line_count = 0;
+        } else if (o->elements[i].type == OSD_WIDGET_IMAGE) {
+            osd_image_reset(o, i);
         }
     }
 
@@ -2456,6 +3031,9 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
             break;
         case OSD_WIDGET_BAR:
             osd_render_bar_element(o, i, &ctx);
+            break;
+        case OSD_WIDGET_IMAGE:
+            osd_render_image_element(o, i, &ctx);
             break;
         default:
             osd_clear_rect(o, &o->elements[i].rect);

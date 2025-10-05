@@ -56,3 +56,54 @@ will then create a bare `udpsrc` element and UEP/receiver statistics are disable
 Use this mode when integrating with external tooling or experimenting with alternative buffering strategies where the
 application-level receiver is unnecessary. Revert with `--custom-sink receiver` (or remove the INI override) to restore the
 default behaviour and regain access to the telemetry counters.
+
+## OSD rendering with pixman
+
+The on-screen display now renders through libpixman so drawing code can lean on the library's optimized compositing routines
+instead of per-pixel loops. Each frame buffer is wrapped in a cached `pixman_image_t`, rectangles are filled through
+`pixman_image_fill_rectangles`, and glyph alpha masks are cached per scale so repeated text draws only composite the stored
+mask back into the frame buffer. This approach provides a few benefits even if it costs a small amount of CPU time compared
+with the previous handcrafted routines:
+
+* **Maintenance & flexibility** – Using pixman consolidates color conversion, clipping, and blending logic into a proven
+  library. That unlocks easier future enhancements such as anti-aliased fonts or rotated widgets without rewriting the whole
+  renderer.
+* **Correct alpha handling** – The compositor helpers apply premultiplied-alpha rules for every draw call, eliminating the
+  rounding bugs and translucent artifacts that were difficult to avoid in the manual loops.
+* **Glyph reuse** – The glyph cache means we only rasterize each character once per scale, so dynamic overlays avoid the worst
+  case cost of re-building glyph masks every frame.
+
+If CPU usage increases slightly, the most likely causes are the general-purpose blending steps that pixman performs for every
+glyph composite and the creation of a temporary solid fill image for each text draw. When profiling shows these costs matter,
+consider caching solid-color images per palette entry or pre-compositing frequently reused text lines into their own pixman
+surfaces so updates reuse the prepared image instead of re-issuing individual glyph composites every frame.
+
+## Animated image widgets
+
+The pixman-backed renderer now supports `type = image` widgets in the OSD layout. Image elements draw pre-baked ARGB sprites (or
+simple animations) alongside the existing text and plot widgets. Frames are described in the INI via either a comma-separated
+list of file paths or a printf-style pattern paired with `frame-count`. Each frame must be a binary PPM (P6) with 8-bit color
+channels; the loader converts the pixels into premultiplied A8R8G8B8 surfaces that pixman composites directly onto the OSD
+framebuffer.
+
+Each image widget accepts familiar placement keys (`anchor`, `offset`) plus visuals such as `padding`, `background`, and
+`border`. Animation cadence is controlled through `frame-duration-ms` and `loop`. The sample configuration demonstrates an
+overlay anchored at the mid-right edge:
+
+```ini
+[osd.element.pilot_anim]
+type = image
+anchor = mid-right
+offset = -160,-64
+source = assets/osd/pixelpilot_%02d.ppm
+frame-count = 12
+frame-duration-ms = 120
+padding = 6
+background = transparent-grey
+border = transparent-white
+loop = true
+```
+
+Provide the sample frames yourself by dropping numbered 128×128 binary PPM files (for example, `assets/osd/pixelpilot_00.ppm`
+through `assets/osd/pixelpilot_11.ppm`) into `assets/osd`. Adjust the `source` pattern or `frame-count` in the INI if your
+animation uses a different naming scheme or length.

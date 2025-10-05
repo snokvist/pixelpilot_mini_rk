@@ -9,7 +9,11 @@
 #include "osd_layout.h"
 #include "pipeline.h"
 
+#include <pixman.h>
+
 #define OSD_PLOT_MAX_SAMPLES 1024
+#define OSD_MAX_GLYPH_SCALES 8
+#define OSD_IMAGE_MAX_FRAMES 64
 
 typedef struct {
     int x;
@@ -78,12 +82,41 @@ typedef struct {
     OSDRect footer_rect;
 } OsdBarState;
 
+typedef struct {
+    int scale;
+    pixman_image_t *glyphs[128];
+} OsdGlyphCacheEntry;
+
+typedef struct {
+    pixman_image_t **frames;
+    int frame_count;
+    int frame_capacity;
+    int frame_duration_ms;
+    int loop;
+    int current_frame;
+    uint64_t next_frame_ms;
+    int padding;
+    int x;
+    int y;
+    int width;
+    int height;
+    int inner_x;
+    int inner_y;
+    int content_w;
+    int content_h;
+    uint32_t bg;
+    uint32_t border;
+    int border_thickness;
+    int load_attempted;
+} OsdImageState;
+
 typedef struct OSD {
     int enabled;
     int active;
     uint32_t requested_plane_id;
     uint32_t plane_id;
     struct DumbFB fb;
+    pixman_image_t *pixman_fb;
     int w;
     int h;
     int scale;
@@ -113,8 +146,12 @@ typedef struct OSD {
             OsdTextState text;
             OsdLineState line;
             OsdBarState bar;
+            OsdImageState image;
         } data;
     } elements[OSD_MAX_ELEMENTS];
+
+    OsdGlyphCacheEntry glyph_cache[OSD_MAX_GLYPH_SCALES];
+    int glyph_cache_count;
 } OSD;
 
 void osd_init(OSD *osd);

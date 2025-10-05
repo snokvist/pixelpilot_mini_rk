@@ -122,6 +122,17 @@ static void builder_reset_bar(OsdElementConfig *elem) {
     elem->data.bar.bg = 0x20000000u;
 }
 
+static void builder_reset_image(OsdElementConfig *elem) {
+    elem->type = OSD_WIDGET_IMAGE;
+    elem->data.image.source[0] = '\0';
+    elem->data.image.frame_count = 1;
+    elem->data.image.frame_duration_ms = 200;
+    elem->data.image.loop = 1;
+    elem->data.image.padding = 0;
+    elem->data.image.bg = 0x00000000u;
+    elem->data.image.border = 0x00000000u;
+}
+
 static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
     if (!out_layout) {
         return -1;
@@ -183,6 +194,16 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
             }
             if (elem->data.bar.bar_width_px <= 0) {
                 elem->data.bar.bar_width_px = 8;
+            }
+        } else if (elem->type == OSD_WIDGET_IMAGE) {
+            if (elem->data.image.frame_count <= 0) {
+                elem->data.image.frame_count = 1;
+            }
+            if (elem->data.image.frame_duration_ms <= 0) {
+                elem->data.image.frame_duration_ms = 200;
+            }
+            if (elem->data.image.padding < 0) {
+                elem->data.image.padding = 0;
             }
         } else {
             LOGE("config: osd element '%s' has unsupported type", elem->name);
@@ -518,6 +539,51 @@ static int parse_osd_element_bar(OsdElementConfig *elem, const char *key, const 
     return -1;
 }
 
+static int parse_osd_element_image(OsdElementConfig *elem, const char *key, const char *value) {
+    if (strcasecmp(key, "source") == 0 || strcasecmp(key, "frames") == 0) {
+        ini_copy_string(elem->data.image.source, sizeof(elem->data.image.source), value);
+        return 0;
+    }
+    if (strcasecmp(key, "frame-count") == 0 || strcasecmp(key, "frame_count") == 0) {
+        elem->data.image.frame_count = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "frame-duration-ms") == 0 || strcasecmp(key, "frame_duration_ms") == 0 ||
+        strcasecmp(key, "frame-duration") == 0) {
+        elem->data.image.frame_duration_ms = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "loop") == 0) {
+        int v = 0;
+        if (parse_bool(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.image.loop = v;
+        return 0;
+    }
+    if (strcasecmp(key, "padding") == 0) {
+        elem->data.image.padding = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "background") == 0) {
+        uint32_t color = 0;
+        if (parse_color(value, &color) != 0) {
+            return -1;
+        }
+        elem->data.image.bg = color;
+        return 0;
+    }
+    if (strcasecmp(key, "border") == 0) {
+        uint32_t color = 0;
+        if (parse_color(value, &color) != 0) {
+            return -1;
+        }
+        elem->data.image.border = color;
+        return 0;
+    }
+    return -1;
+}
+
 static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name, const char *key, const char *value) {
     const char *prefix = "osd.element.";
     size_t prefix_len = strlen(prefix);
@@ -544,6 +610,11 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
         }
         if (strcasecmp(value, "bar") == 0) {
             builder_reset_bar(elem);
+            builder->type_set[idx] = 1;
+            return 0;
+        }
+        if (strcasecmp(value, "image") == 0) {
+            builder_reset_image(elem);
             builder->type_set[idx] = 1;
             return 0;
         }
@@ -575,6 +646,9 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
     }
     if (elem->type == OSD_WIDGET_BAR) {
         return parse_osd_element_bar(elem, key, value);
+    }
+    if (elem->type == OSD_WIDGET_IMAGE) {
+        return parse_osd_element_image(elem, key, value);
     }
     return -1;
 }

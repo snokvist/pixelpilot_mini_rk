@@ -11,7 +11,8 @@ extern "C" {
 typedef enum {
     OSD_WIDGET_TEXT = 0,
     OSD_WIDGET_LINE,
-    OSD_WIDGET_BAR
+    OSD_WIDGET_BAR,
+    OSD_WIDGET_IMAGE
 } OsdElementType;
 
 typedef enum {
@@ -50,6 +51,16 @@ typedef struct {
 } OsdTextConfig;
 
 typedef struct {
+    char source[512];
+    int frame_count;
+    int frame_duration_ms;
+    int loop;
+    int padding;
+    uint32_t bg;
+    uint32_t border;
+} OsdImageConfig;
+
+typedef struct {
     int width;
     int height;
     int sample_stride_px;
@@ -82,6 +93,7 @@ typedef struct {
         OsdTextConfig text;
         OsdLineConfig line;
         OsdBarConfig bar;
+        OsdImageConfig image;
     } data;
 } OsdElementConfig;
 
