@@ -13,6 +13,7 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
 #include <gst/gst.h>
+#include <gst/gstutils.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdlib.h>
@@ -278,6 +279,25 @@ static void clear_stored_pad(GstPad **pad) {
     }
 }
 
+static gboolean enum_matches_string(const char *candidate, const char *target) {
+    if (candidate == NULL || target == NULL) {
+        return FALSE;
+    }
+    if (g_ascii_strcasecmp(candidate, target) == 0) {
+        return TRUE;
+    }
+
+    g_autofree gchar *sanitized = g_strdup(target);
+    for (gchar *p = sanitized; p != NULL && *p != '\0'; ++p) {
+        if (*p == '-') {
+            *p = '_';
+        } else {
+            *p = g_ascii_toupper(*p);
+        }
+    }
+    return g_ascii_strcasecmp(candidate, sanitized) == 0;
+}
+
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick) {
     if (object == NULL || property == NULL || nick == NULL) {
         return FALSE;
@@ -289,8 +309,13 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
     }
 
     GParamSpec *pspec = g_object_class_find_property(klass, property);
-    if (pspec == NULL || !G_IS_PARAM_SPEC_ENUM(pspec)) {
+    if (pspec == NULL) {
         return FALSE;
+    }
+
+    if (!G_IS_PARAM_SPEC_ENUM(pspec)) {
+        gst_util_set_object_arg(object, property, nick);
+        return TRUE;
     }
 
     GEnumClass *enum_class = G_ENUM_CLASS(g_type_class_ref(pspec->value_type));
@@ -298,18 +323,25 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
         return FALSE;
     }
 
-    const GEnumValue *value = g_enum_get_value_by_name(enum_class, nick);
-    if (value == NULL) {
-        value = g_enum_get_value_by_nick(enum_class, nick);
+    gboolean success = FALSE;
+    for (gint i = 0; i < enum_class->n_values; ++i) {
+        const GEnumValue *value = &enum_class->values[i];
+        if (value->value_name != NULL && enum_matches_string(value->value_name, nick)) {
+            g_object_set(object, property, value->value, NULL);
+            success = TRUE;
+            break;
+        }
+        if (value->value_nick != NULL && enum_matches_string(value->value_nick, nick)) {
+            g_object_set(object, property, value->value, NULL);
+            success = TRUE;
+            break;
+        }
     }
 
-    if (value == NULL) {
-        g_type_class_unref(enum_class);
-        return FALSE;
-    }
-
-    g_object_set(object, property, value->value, NULL);
     g_type_class_unref(enum_class);
+    if (!success) {
+        gst_util_set_object_arg(object, property, nick);
+    }
     return TRUE;
 }
 

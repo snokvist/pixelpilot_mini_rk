@@ -189,6 +189,9 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_h, (uint64_t)src_h << 16);
 
     int ret = drmModeAtomicCommit(vd->drm_fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
+    if (ret != 0 && errno == EBUSY) {
+        ret = drmModeAtomicCommit(vd->drm_fd, req, 0, NULL);
+    }
     if (ret != 0) {
         LOGW("Atomic commit failed: %s", g_strerror(errno));
     }
@@ -249,7 +252,7 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
         MppBufferInfo info;
         memset(&info, 0, sizeof(info));
         info.type = MPP_BUFFER_TYPE_DRM;
-        info.size = dmcd.width * dmcd.height;
+        info.size = dmcd.size;
         info.fd = dph.fd;
         ret = mpp_buffer_commit(vd->frm_grp, &info);
         if (ret != MPP_OK) {
@@ -267,10 +270,10 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
         uint32_t offsets[4] = {0};
         handles[0] = vd->frame_map[i].handle;
         handles[1] = vd->frame_map[i].handle;
-        pitches[0] = hor_stride;
-        pitches[1] = hor_stride;
+        pitches[0] = dmcd.pitch;
+        pitches[1] = dmcd.pitch;
         offsets[0] = 0;
-        offsets[1] = pitches[0] * ver_stride;
+        offsets[1] = dmcd.pitch * ver_stride;
 
         ret = drmModeAddFB2(vd->drm_fd, width, height, DRM_FORMAT_NV12, handles, pitches, offsets,
                             &vd->frame_map[i].fb_id, 0);
