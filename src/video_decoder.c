@@ -13,7 +13,7 @@
 #include <gst/gst.h>
 #include <rockchip/rk_mpi.h>
 
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(PIXELPILOT_HAS_NEON)
 #include <arm_neon.h>
 #endif
 
@@ -95,7 +95,7 @@ static inline guint64 get_time_ms(void) {
 }
 
 static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size) {
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(PIXELPILOT_HAS_NEON)
     /*
      * Use NEON vector loads/stores to move packets in 64-byte bursts when
      * running on ARM targets with NEON support. For remaining tail bytes we

@@ -9,6 +9,30 @@ PKG_MPPLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs rockchip-mpp)
 
 CFLAGS ?= -O2 -Wall
 CFLAGS += -Iinclude
+
+# Allow opt-in control over NEON usage while auto-detecting safe defaults for
+# supported ARM toolchains. Users can override by invoking `make ENABLE_NEON=0`
+# or `make ENABLE_NEON=1`.
+ENABLE_NEON ?= auto
+CC_MACHINE := $(shell $(CC) -dumpmachine 2>/dev/null)
+
+ifeq ($(ENABLE_NEON),1)
+NEON_CFLAGS := -mfpu=neon -DPIXELPILOT_HAS_NEON
+else
+  ifeq ($(ENABLE_NEON),auto)
+    ifneq (,$(findstring aarch64,$(CC_MACHINE)))
+NEON_CFLAGS := -DPIXELPILOT_HAS_NEON
+    endif
+    ifneq (,$(findstring arm64,$(CC_MACHINE)))
+NEON_CFLAGS := -DPIXELPILOT_HAS_NEON
+    endif
+    ifneq (,$(findstring armv7,$(CC_MACHINE)))
+NEON_CFLAGS := -mfpu=neon -DPIXELPILOT_HAS_NEON
+    endif
+  endif
+endif
+
+CFLAGS += $(NEON_CFLAGS)
 ifeq ($(strip $(PKG_DRMCFLAGS)),)
 CFLAGS += -I/usr/include/libdrm
 else
