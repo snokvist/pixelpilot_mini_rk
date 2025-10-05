@@ -334,19 +334,39 @@ static GParamSpec *find_property_with_aliases(GObjectClass *klass, const char *p
     }
 
     g_autofree gchar *alternate = g_strdup(property);
-    if (alternate == NULL) {
-        return NULL;
-    }
+    if (alternate != NULL) {
+        for (gchar *p = alternate; *p != '\0'; ++p) {
+            if (*p == '-') {
+                *p = '_';
+            } else if (*p == '_') {
+                *p = '-';
+            }
+        }
 
-    for (gchar *p = alternate; *p != '\0'; ++p) {
-        if (*p == '-') {
-            *p = '_';
-        } else if (*p == '_') {
-            *p = '-';
+        pspec = g_object_class_find_property(klass, alternate);
+        if (pspec != NULL) {
+            return pspec;
         }
     }
 
-    return g_object_class_find_property(klass, alternate);
+    guint n_props = 0;
+    GParamSpec **props = g_object_class_list_properties(klass, &n_props);
+    if (props == NULL) {
+        return NULL;
+    }
+
+    for (guint i = 0; i < n_props; ++i) {
+        const char *name = props[i]->name;
+        const char *nick = props[i]->nick;
+        if ((name != NULL && (enum_matches_string(name, property) || enum_matches_string(property, name))) ||
+            (nick != NULL && (enum_matches_string(nick, property) || enum_matches_string(property, nick)))) {
+            pspec = props[i];
+            break;
+        }
+    }
+
+    g_free(props);
+    return pspec;
 }
 
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick) {
@@ -364,8 +384,10 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
         return FALSE;
     }
 
+    const char *canon_property = pspec->name != NULL ? pspec->name : property;
+
     if (!G_IS_PARAM_SPEC_ENUM(pspec)) {
-        gst_util_set_object_arg(object, property, nick);
+        gst_util_set_object_arg(object, canon_property, nick);
         return TRUE;
     }
 
@@ -375,25 +397,38 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
     }
 
     gboolean success = FALSE;
+    const GEnumValue *target_value = NULL;
     for (gint i = 0; i < enum_class->n_values; ++i) {
         const GEnumValue *value = &enum_class->values[i];
-        if (value->value_name != NULL && enum_matches_string(value->value_name, nick)) {
-            g_object_set(object, property, value->value, NULL);
-            success = TRUE;
-            break;
-        }
-        if (value->value_nick != NULL && enum_matches_string(value->value_nick, nick)) {
-            g_object_set(object, property, value->value, NULL);
+        if ((value->value_name != NULL && enum_matches_string(value->value_name, nick)) ||
+            (value->value_nick != NULL && enum_matches_string(value->value_nick, nick))) {
+            g_object_set(object, canon_property, value->value, NULL);
+            target_value = value;
             success = TRUE;
             break;
         }
     }
 
-    g_type_class_unref(enum_class);
     if (!success) {
-        gst_util_set_object_arg(object, property, nick);
+        gst_util_set_object_arg(object, canon_property, nick);
     }
-    return TRUE;
+
+    gint current_value = target_value != NULL ? target_value->value : 0;
+    g_object_get(object, canon_property, &current_value, NULL);
+
+    const GEnumValue *current = g_enum_get_value(enum_class, current_value);
+    gboolean matches_target = FALSE;
+    if (current != NULL) {
+        if (target_value != NULL && current->value == target_value->value) {
+            matches_target = TRUE;
+        } else if ((current->value_name != NULL && enum_matches_string(current->value_name, nick)) ||
+                   (current->value_nick != NULL && enum_matches_string(current->value_nick, nick))) {
+            matches_target = TRUE;
+        }
+    }
+
+    g_type_class_unref(enum_class);
+    return matches_target;
 }
 
 static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, const AppCfg *cfg) {
