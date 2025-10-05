@@ -34,7 +34,7 @@ static void release_selector_pad(GstElement *selector, GstPad **pad_slot) {
     }
 
     GstPad *pad = *pad_slot;
-    if (selector != NULL && GST_PAD_IS_REQUEST(pad)) {
+    if (selector != NULL) {
         gst_element_release_request_pad(selector, pad);
     }
 
