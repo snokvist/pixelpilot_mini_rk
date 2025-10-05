@@ -12,6 +12,7 @@
 
 #include <gst/gst.h>
 #include <rockchip/rk_mpi.h>
+#include <rockchip/rk_mpi_cmd.h>
 
 #if defined(PIXELPILOT_DISABLE_NEON)
 #define PIXELPILOT_NEON_AVAILABLE 0
@@ -505,8 +506,15 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
 
     set_mpp_decoding_parameters(vd);
 
+    RK_S64 timeout = -1;
+#if defined(MPP_SET_OUTPUT_TIMEOUT)
+    vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_TIMEOUT, &timeout);
+#elif defined(MPP_SET_OUTPUT_BLOCK)
     int block = MPP_POLL_BLOCK;
     vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_BLOCK, &block);
+#else
+    (void)timeout;
+#endif
 
     g_mutex_init(&vd->lock);
     g_cond_init(&vd->cond);

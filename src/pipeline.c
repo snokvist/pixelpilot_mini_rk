@@ -134,7 +134,9 @@ static GstElement *create_udp_source(const AppCfg *cfg, gboolean video_only, Udp
     return create_udp_app_source(cfg, video_only, receiver_out);
 }
 
+static GParamSpec *find_property_with_aliases(GObjectClass *klass, const char *property);
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick);
+static void configure_h265_parser_caps(GstElement *parser);
 
 static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *cfg) {
     GstElement *pipeline = NULL;
@@ -168,12 +170,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
-        LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
-    }
-    if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
-        LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
-    }
+    configure_h265_parser_caps(parser);
 
     raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
                                    "alignment", G_TYPE_STRING, "au", NULL);
@@ -288,12 +285,7 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
 
     GstElement *parser = gst_bin_get_by_name(GST_BIN(pipeline), "video_parser");
     if (parser != NULL) {
-        if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
-            LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
-        }
-        if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
-            LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
-        }
+        configure_h265_parser_caps(parser);
         gst_object_unref(parser);
     } else {
         LOGW("udpsrc pipeline missing h265parse element; byte-stream enforcement skipped");
@@ -547,6 +539,19 @@ static GParamSpec *find_property_with_aliases(GObjectClass *klass, const char *p
     return pspec;
 }
 
+static gboolean element_supports_property(GObject *object, const char *property) {
+    if (object == NULL || property == NULL) {
+        return FALSE;
+    }
+
+    GObjectClass *klass = G_OBJECT_GET_CLASS(object);
+    if (klass == NULL) {
+        return FALSE;
+    }
+
+    return find_property_with_aliases(klass, property) != NULL;
+}
+
 static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick) {
     if (object == NULL || property == NULL || nick == NULL) {
         return FALSE;
@@ -594,6 +599,66 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
     return success;
 }
 
+typedef enum {
+    FORCE_PROP_RESULT_SUCCESS,
+    FORCE_PROP_RESULT_UNSUPPORTED,
+    FORCE_PROP_RESULT_FAILED,
+} ForcePropResult;
+
+static ForcePropResult try_set_enum_property(GObject *object, const char *property, const char *nick) {
+    if (!element_supports_property(object, property)) {
+        return FORCE_PROP_RESULT_UNSUPPORTED;
+    }
+
+    if (set_enum_property_by_nick(object, property, nick)) {
+        return FORCE_PROP_RESULT_SUCCESS;
+    }
+
+    return FORCE_PROP_RESULT_FAILED;
+}
+
+static void configure_h265_parser_caps(GstElement *parser) {
+    static gsize missing_stream_format_once = 0;
+    static gsize missing_alignment_once = 0;
+
+    if (parser == NULL) {
+        return;
+    }
+
+    const char *name = GST_ELEMENT_NAME(parser);
+    if (name == NULL) {
+        name = G_OBJECT_TYPE_NAME(parser);
+    }
+
+    switch (try_set_enum_property(G_OBJECT(parser), "stream-format", "byte-stream")) {
+    case FORCE_PROP_RESULT_SUCCESS:
+        break;
+    case FORCE_PROP_RESULT_UNSUPPORTED:
+        if (g_once_init_enter(&missing_stream_format_once)) {
+            LOGI("GStreamer %s element does not expose a 'stream-format' property; using plugin default", name);
+            g_once_init_leave(&missing_stream_format_once, 1);
+        }
+        break;
+    case FORCE_PROP_RESULT_FAILED:
+        LOGW("Failed to force %s stream-format=byte-stream; downstream decoder may misbehave", name);
+        break;
+    }
+
+    switch (try_set_enum_property(G_OBJECT(parser), "alignment", "au")) {
+    case FORCE_PROP_RESULT_SUCCESS:
+        break;
+    case FORCE_PROP_RESULT_UNSUPPORTED:
+        if (g_once_init_enter(&missing_alignment_once)) {
+            LOGI("GStreamer %s element does not expose an 'alignment' property; using plugin default", name);
+            g_once_init_leave(&missing_alignment_once, 1);
+        }
+        break;
+    case FORCE_PROP_RESULT_FAILED:
+        LOGW("Failed to force %s alignment=au; downstream decoder may misbehave", name);
+        break;
+    }
+}
+
 static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, const AppCfg *cfg) {
     GstElement *queue_pre = gst_element_factory_make("queue", "video_queue_pre");
     GstElement *depay = gst_element_factory_make("rtph265depay", "video_depay");
@@ -615,12 +680,7 @@ static gboolean build_video_branch(PipelineState *ps, GstElement *pipeline, cons
                  "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
-        LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
-    }
-    if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
-        LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
-    }
+    configure_h265_parser_caps(parser);
 
     GstCaps *raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
                                             "alignment", G_TYPE_STRING, "au", NULL);
