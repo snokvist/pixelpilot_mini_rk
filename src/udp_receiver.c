@@ -48,10 +48,12 @@
 #define BITRATE_EWMA_ALPHA 0.1
 #define UDP_RECEIVER_MAX_PACKET 4096
 #define UDP_RECEIVER_BATCH 8
+#define UDP_AUDIO_SEQ_MAX_ADVANCE 8192
 
 typedef struct {
     guint16 sequence;
     guint32 timestamp;
+    guint32 ssrc;
     guint8 payload_type;
     guint8 marker;
     guint8 has_padding;
@@ -63,7 +65,8 @@ typedef struct {
 } RtpParseResult;
 
 struct UdpReceiver {
-    GstAppSrc *appsrc;
+    GstAppSrc *video_appsrc;
+    GstAppSrc *audio_appsrc;
     GThread *thread;
     GMutex lock;
     gboolean running;
@@ -74,7 +77,8 @@ struct UdpReceiver {
     int vid_pt;
     int aud_pt;
     int sockfd;
-    gboolean discont_pending;
+    gboolean video_discont_pending;
+    gboolean audio_discont_pending;
 
     GstBufferPool *pool;
     gsize buffer_size;
@@ -100,6 +104,9 @@ struct UdpReceiver {
 
     const AppCfg *cfg;
     int cpu_slot;
+
+    guint32 video_ssrc;
+    gboolean have_video_ssrc;
 };
 
 static gboolean parse_rtp(const guint8 *data, gsize len, RtpParseResult *out) {
@@ -149,6 +156,7 @@ static gboolean parse_rtp(const guint8 *data, gsize len, RtpParseResult *out) {
 
     out->sequence = ((guint16)data[2] << 8) | data[3];
     out->timestamp = ((guint32)data[4] << 24) | ((guint32)data[5] << 16) | ((guint32)data[6] << 8) | data[7];
+    out->ssrc = ((guint32)data[8] << 24) | ((guint32)data[9] << 16) | ((guint32)data[10] << 8) | data[11];
     out->payload_type = payload_type;
     out->marker = marker ? 1 : 0;
     out->has_padding = padding ? 1 : 0;
@@ -170,6 +178,32 @@ static inline gint16 seq_delta(guint16 a, guint16 b) {
 
 static inline guint64 get_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
+}
+
+static inline void advance_expected_sequence(struct UdpReceiver *ur, const RtpParseResult *parsed) {
+    if (!ur->have_video_ssrc || parsed == NULL) {
+        return;
+    }
+
+    if (parsed->ssrc != ur->video_ssrc) {
+        return;
+    }
+
+    guint16 sequence = parsed->sequence;
+    if (!ur->seq_initialized) {
+        ur->seq_initialized = TRUE;
+        ur->expected_seq = seq_next(sequence);
+        ur->stats.expected_sequence = ur->expected_seq;
+        return;
+    }
+
+    gint16 delta = seq_delta(sequence, ur->expected_seq);
+    if (delta < 0 || delta > UDP_AUDIO_SEQ_MAX_ADVANCE) {
+        return;
+    }
+
+    ur->expected_seq = seq_next(sequence);
+    ur->stats.expected_sequence = ur->expected_seq;
 }
 
 static inline void neon_copy_bytes(guint8 *dst, const guint8 *src, size_t size) {
@@ -235,6 +269,8 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->last_transit = 0.0;
     ur->bitrate_window_start_ns = 0;
     ur->bitrate_window_bytes = 0;
+    ur->video_ssrc = 0;
+    ur->have_video_ssrc = FALSE;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
 }
@@ -310,6 +346,34 @@ static void process_rtp(struct UdpReceiver *ur,
 
     gboolean is_video = (parsed->payload_type == ur->vid_pt);
     gboolean is_audio = (parsed->payload_type == ur->aud_pt);
+    if (is_audio) {
+        ur->stats.audio_packets++;
+        ur->stats.audio_bytes += len;
+        advance_expected_sequence(ur, parsed);
+        return;
+    }
+
+    if (!is_video) {
+        ur->stats.ignored_packets++;
+        return;
+    }
+
+    if (!ur->have_video_ssrc || ur->video_ssrc != parsed->ssrc) {
+        ur->video_ssrc = parsed->ssrc;
+        ur->have_video_ssrc = TRUE;
+        ur->seq_initialized = FALSE;
+        ur->have_last_seq = FALSE;
+        ur->frame_active = FALSE;
+        ur->frame_bytes = 0;
+        ur->frame_missing = FALSE;
+        ur->transit_initialized = FALSE;
+    }
+
+    ur->stats.total_packets++;
+    ur->stats.total_bytes += len;
+    ur->stats.video_packets++;
+    ur->stats.video_bytes += len;
+    ur->stats.last_video_timestamp = parsed->timestamp;
 
     UdpReceiverPacketSample sample = {0};
     sample.sequence = parsed->sequence;
@@ -319,78 +383,64 @@ static void process_rtp(struct UdpReceiver *ur,
     sample.size = (guint32)len;
     sample.arrival_ns = arrival_ns;
 
-    ur->stats.total_packets++;
-    ur->stats.total_bytes += len;
-
-    if (is_video) {
-        ur->stats.video_packets++;
-        ur->stats.video_bytes += len;
-        ur->stats.last_video_timestamp = parsed->timestamp;
-
-        if (!ur->frame_active || ur->frame_timestamp != parsed->timestamp) {
-            if (ur->frame_active) {
-                finalize_frame(ur);
-            }
-            ur->frame_active = TRUE;
-            ur->frame_timestamp = parsed->timestamp;
-            ur->frame_bytes = len;
-            ur->frame_missing = FALSE;
-        } else {
-            ur->frame_bytes += len;
+    if (!ur->frame_active || ur->frame_timestamp != parsed->timestamp) {
+        if (ur->frame_active) {
+            finalize_frame(ur);
         }
-
-        if (!ur->seq_initialized) {
-            ur->seq_initialized = TRUE;
-            ur->expected_seq = seq_next(parsed->sequence);
-            ur->stats.expected_sequence = ur->expected_seq;
-        } else {
-            gint16 delta = seq_delta(parsed->sequence, ur->expected_seq);
-            if (delta == 0) {
-                ur->expected_seq = seq_next(parsed->sequence);
-            } else if (delta > 0) {
-                ur->stats.lost_packets += delta;
-                ur->expected_seq = seq_next(parsed->sequence);
-                ur->frame_missing = TRUE;
-                sample.flags |= UDP_SAMPLE_FLAG_LOSS;
-            } else { // delta < 0
-                ur->stats.reordered_packets++;
-                sample.flags |= UDP_SAMPLE_FLAG_REORDER;
-            }
-            ur->stats.expected_sequence = ur->expected_seq;
-        }
-
-        if (ur->have_last_seq && parsed->sequence == ur->last_seq) {
-            ur->stats.duplicate_packets++;
-            sample.flags |= UDP_SAMPLE_FLAG_DUPLICATE;
-        }
-        ur->last_seq = parsed->sequence;
-        ur->have_last_seq = TRUE;
-
-        double arrival_rtp = (double)arrival_ns / 1e9 * 90000.0;
-        double transit = arrival_rtp - (double)parsed->timestamp;
-        if (!ur->transit_initialized) {
-            ur->transit_initialized = TRUE;
-            ur->last_transit = transit;
-            ur->stats.jitter = 0.0;
-            ur->stats.jitter_avg = 0.0;
-        } else {
-            double d = transit - ur->last_transit;
-            ur->last_transit = transit;
-            ur->stats.jitter += (fabs(d) - ur->stats.jitter) / 16.0;
-            if (ur->stats.jitter_avg == 0.0) {
-                ur->stats.jitter_avg = ur->stats.jitter;
-            } else {
-                ur->stats.jitter_avg += (ur->stats.jitter - ur->stats.jitter_avg) * JITTER_EWMA_ALPHA;
-            }
-        }
-    } else if (is_audio) {
-        ur->stats.audio_packets++;
-        ur->stats.audio_bytes += len;
+        ur->frame_active = TRUE;
+        ur->frame_timestamp = parsed->timestamp;
+        ur->frame_bytes = len;
+        ur->frame_missing = FALSE;
     } else {
-        ur->stats.ignored_packets++;
+        ur->frame_bytes += len;
     }
 
-    if (parsed->marker && is_video) {
+    if (!ur->seq_initialized) {
+        ur->seq_initialized = TRUE;
+        ur->expected_seq = seq_next(parsed->sequence);
+        ur->stats.expected_sequence = ur->expected_seq;
+    } else {
+        gint16 delta = seq_delta(parsed->sequence, ur->expected_seq);
+        if (delta == 0) {
+            ur->expected_seq = seq_next(parsed->sequence);
+        } else if (delta > 0) {
+            ur->stats.lost_packets += delta;
+            ur->expected_seq = seq_next(parsed->sequence);
+            ur->frame_missing = TRUE;
+            sample.flags |= UDP_SAMPLE_FLAG_LOSS;
+        } else { // delta < 0
+            ur->stats.reordered_packets++;
+            sample.flags |= UDP_SAMPLE_FLAG_REORDER;
+        }
+        ur->stats.expected_sequence = ur->expected_seq;
+    }
+
+    if (ur->have_last_seq && parsed->sequence == ur->last_seq) {
+        ur->stats.duplicate_packets++;
+        sample.flags |= UDP_SAMPLE_FLAG_DUPLICATE;
+    }
+    ur->last_seq = parsed->sequence;
+    ur->have_last_seq = TRUE;
+
+    double arrival_rtp = (double)arrival_ns / 1e9 * 90000.0;
+    double transit = arrival_rtp - (double)parsed->timestamp;
+    if (!ur->transit_initialized) {
+        ur->transit_initialized = TRUE;
+        ur->last_transit = transit;
+        ur->stats.jitter = 0.0;
+        ur->stats.jitter_avg = 0.0;
+    } else {
+        double d = transit - ur->last_transit;
+        ur->last_transit = transit;
+        ur->stats.jitter += (fabs(d) - ur->stats.jitter) / 16.0;
+        if (ur->stats.jitter_avg == 0.0) {
+            ur->stats.jitter_avg = ur->stats.jitter;
+        } else {
+            ur->stats.jitter_avg += (ur->stats.jitter - ur->stats.jitter_avg) * JITTER_EWMA_ALPHA;
+        }
+    }
+
+    if (parsed->marker) {
         sample.flags |= UDP_SAMPLE_FLAG_FRAME_END;
         finalize_frame(ur);
     }
@@ -411,10 +461,16 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
 
     gst_buffer_set_size(gstbuf, (gsize)bytes_read);
 
+    guint64 arrival_ns = get_time_ns();
     gboolean drop_packet = FALSE;
+    gboolean mark_discont = FALSE;
+    gboolean target_is_audio = FALSE;
+    GstAppSrc *target_appsrc = NULL;
     RtpParseResult preview;
     gboolean have_preview = FALSE;
-    gboolean preview_initialized = FALSE;
+
+    g_mutex_lock(&ur->lock);
+
     gboolean filter_non_video = FALSE;
     if (ur->cfg != NULL && ur->cfg->no_audio) {
         filter_non_video = TRUE;
@@ -422,32 +478,47 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     if (ur->aud_pt < 0) {
         filter_non_video = TRUE;
     }
-    if (filter_non_video) {
+
+    gboolean need_preview = filter_non_video || ur->audio_appsrc != NULL || ur->stats_enabled;
+    if (need_preview) {
         have_preview = parse_rtp(map->data, (gsize)bytes_read, &preview);
-        preview_initialized = TRUE;
     }
 
-    guint64 arrival_ns = get_time_ns();
-    gboolean mark_discont = FALSE;
-    g_mutex_lock(&ur->lock);
-    if (ur->discont_pending) {
-        mark_discont = TRUE;
-        ur->discont_pending = FALSE;
+    gboolean is_video = have_preview && preview.payload_type == ur->vid_pt;
+    gboolean is_audio = have_preview && preview.payload_type == ur->aud_pt;
+
+    const RtpParseResult *parsed = have_preview ? &preview : NULL;
+    if (ur->stats_enabled) {
+        process_rtp(ur, map->data, (gsize)bytes_read, arrival_ns, parsed);
     }
-    if (!preview_initialized && ur->stats_enabled) {
-        have_preview = parse_rtp(map->data, (gsize)bytes_read, &preview);
-        preview_initialized = TRUE;
-    }
-    if (filter_non_video && have_preview && preview.payload_type != ur->vid_pt) {
+
+    if (filter_non_video && have_preview && !is_video) {
+        drop_packet = TRUE;
+    } else if (is_audio && ur->audio_appsrc == NULL) {
         drop_packet = TRUE;
     } else {
-        process_rtp(ur, map->data, (gsize)bytes_read, arrival_ns, have_preview ? &preview : NULL);
+        if (is_audio && ur->audio_appsrc != NULL) {
+            target_appsrc = ur->audio_appsrc;
+            target_is_audio = TRUE;
+            if (ur->audio_discont_pending) {
+                mark_discont = TRUE;
+                ur->audio_discont_pending = FALSE;
+            }
+        } else {
+            target_appsrc = ur->video_appsrc;
+            target_is_audio = FALSE;
+            if (ur->video_discont_pending) {
+                mark_discont = TRUE;
+                ur->video_discont_pending = FALSE;
+            }
+        }
     }
+
     g_mutex_unlock(&ur->lock);
 
     gst_buffer_unmap(gstbuf, map);
 
-    if (drop_packet) {
+    if (drop_packet || target_appsrc == NULL) {
         gst_buffer_unref(gstbuf);
         return TRUE;
     }
@@ -457,9 +528,11 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
         GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
     }
 
-    GstFlowReturn flow = gst_app_src_push_buffer(ur->appsrc, gstbuf);
+    GstFlowReturn flow = gst_app_src_push_buffer(target_appsrc, gstbuf);
     if (flow != GST_FLOW_OK) {
-        LOGV("UDP receiver: push_buffer returned %s", gst_flow_get_name(flow));
+        LOGV("UDP receiver: push_buffer (%s) returned %s",
+             target_is_audio ? "audio" : "video",
+             gst_flow_get_name(flow));
         if (flow == GST_FLOW_FLUSHING) {
             g_usleep(1000);
         }
@@ -655,8 +728,8 @@ static gpointer receiver_thread(gpointer data) {
     return NULL;
 }
 
-UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *appsrc) {
-    if (appsrc == NULL) {
+UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *video_appsrc) {
+    if (video_appsrc == NULL) {
         return NULL;
     }
     struct UdpReceiver *ur = g_new0(struct UdpReceiver, 1);
@@ -667,13 +740,34 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     ur->vid_pt = vid_pt;
     ur->aud_pt = aud_pt;
     ur->sockfd = -1;
-    ur->discont_pending = TRUE;
+    ur->video_discont_pending = TRUE;
+    ur->audio_discont_pending = TRUE;
     g_mutex_init(&ur->lock);
-    ur->appsrc = GST_APP_SRC(gst_object_ref(appsrc));
+    ur->video_appsrc = GST_APP_SRC(gst_object_ref(video_appsrc));
+    ur->audio_appsrc = NULL;
     ur->stats_enabled = FALSE;
     ur->pool = NULL;
     ur->buffer_size = 0;
     return ur;
+}
+
+void udp_receiver_set_audio_appsrc(UdpReceiver *ur, GstAppSrc *audio_appsrc) {
+    if (ur == NULL) {
+        return;
+    }
+
+    g_mutex_lock(&ur->lock);
+    if (ur->audio_appsrc != NULL) {
+        gst_object_unref(ur->audio_appsrc);
+        ur->audio_appsrc = NULL;
+    }
+    if (audio_appsrc != NULL) {
+        ur->audio_appsrc = GST_APP_SRC(gst_object_ref(audio_appsrc));
+        ur->audio_discont_pending = TRUE;
+    } else {
+        ur->audio_discont_pending = TRUE;
+    }
+    g_mutex_unlock(&ur->lock);
 }
 
 static int setup_socket_for_port(int port, int *out_fd, const char *label) {
@@ -732,7 +826,8 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         return 0;
     }
     reset_stats_locked(ur);
-    ur->discont_pending = TRUE;
+    ur->video_discont_pending = TRUE;
+    ur->audio_discont_pending = TRUE;
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
     g_mutex_unlock(&ur->lock);
@@ -797,13 +892,20 @@ void udp_receiver_stop(UdpReceiver *ur) {
         ur->sockfd = -1;
     }
 
-    gst_app_src_end_of_stream(ur->appsrc);
+    if (ur->video_appsrc != NULL) {
+        gst_app_src_end_of_stream(ur->video_appsrc);
+    }
+    if (ur->audio_appsrc != NULL) {
+        gst_app_src_end_of_stream(ur->audio_appsrc);
+    }
 
     buffer_pool_stop(ur);
 
     g_mutex_lock(&ur->lock);
     ur->running = FALSE;
     ur->stop_requested = FALSE;
+    ur->video_discont_pending = TRUE;
+    ur->audio_discont_pending = TRUE;
     g_mutex_unlock(&ur->lock);
 }
 
@@ -812,9 +914,13 @@ void udp_receiver_destroy(UdpReceiver *ur) {
         return;
     }
     udp_receiver_stop(ur);
-    if (ur->appsrc != NULL) {
-        gst_object_unref(ur->appsrc);
-        ur->appsrc = NULL;
+    if (ur->video_appsrc != NULL) {
+        gst_object_unref(ur->video_appsrc);
+        ur->video_appsrc = NULL;
+    }
+    if (ur->audio_appsrc != NULL) {
+        gst_object_unref(ur->audio_appsrc);
+        ur->audio_appsrc = NULL;
     }
     buffer_pool_stop(ur);
     g_mutex_clear(&ur->lock);

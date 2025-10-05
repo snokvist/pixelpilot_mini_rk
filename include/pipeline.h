@@ -16,13 +16,7 @@ typedef enum {
 typedef struct {
     PipelineStateEnum state;
     GstElement *pipeline;
-    GstElement *source;
-    GstElement *rtpbin;
     GstElement *video_sink;
-    GstElement *video_branch_entry;
-    GstElement *audio_branch_entry;
-    GstPad *video_pad;
-    GstPad *audio_pad;
     UdpReceiver *udp_receiver;
     GThread *bus_thread;
     GThread *appsink_thread;
