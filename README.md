@@ -56,3 +56,24 @@ will then create a bare `udpsrc` element and UEP/receiver statistics are disable
 Use this mode when integrating with external tooling or experimenting with alternative buffering strategies where the
 application-level receiver is unnecessary. Revert with `--custom-sink receiver` (or remove the INI override) to restore the
 default behaviour and regain access to the telemetry counters.
+
+## OSD rendering with pixman
+
+The on-screen display now renders through libpixman so drawing code can lean on the library's optimized compositing routines
+instead of per-pixel loops. Each frame buffer is wrapped in a cached `pixman_image_t`, rectangles are filled through
+`pixman_image_fill_rectangles`, and glyph alpha masks are cached per scale so repeated text draws only composite the stored
+mask back into the frame buffer. This approach provides a few benefits even if it costs a small amount of CPU time compared
+with the previous handcrafted routines:
+
+* **Maintenance & flexibility** – Using pixman consolidates color conversion, clipping, and blending logic into a proven
+  library. That unlocks easier future enhancements such as anti-aliased fonts or rotated widgets without rewriting the whole
+  renderer.
+* **Correct alpha handling** – The compositor helpers apply premultiplied-alpha rules for every draw call, eliminating the
+  rounding bugs and translucent artifacts that were difficult to avoid in the manual loops.
+* **Glyph reuse** – The glyph cache means we only rasterize each character once per scale, so dynamic overlays avoid the worst
+  case cost of re-building glyph masks every frame.
+
+If CPU usage increases slightly, the most likely causes are the general-purpose blending steps that pixman performs for every
+glyph composite and the creation of a temporary solid fill image for each text draw. When profiling shows these costs matter,
+consider caching solid-color images per palette entry or pre-compositing frequently reused text lines into their own pixman
+surfaces so updates reuse the prepared image instead of re-issuing individual glyph composites every frame.
