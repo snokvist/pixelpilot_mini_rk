@@ -1,6 +1,7 @@
 #include "splashlib.h"
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
+#include <gst/gstutils.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -45,6 +46,7 @@ struct Splash {
 
     // Timing
     GstClockTime next_pts;
+    GstClockTime next_wall_time;
 
     // Queue state
     int active_idx;                 // current looping sequence index
@@ -141,11 +143,35 @@ static GstFlowReturn on_new_sample(GstAppSink *sink, gpointer user) {
 
     GstClockTime pts;
     GstClockTime dur;
+    GstClockTime target;
     g_mutex_lock(&s->lock);
     pts = s->next_pts;
     dur = s->dur;
+    target = s->next_wall_time;
+    if (target == 0) {
+        target = gst_util_get_timestamp();
+        s->next_wall_time = target + dur;
+    } else {
+        s->next_wall_time += dur;
+    }
     s->next_pts += dur;
     g_mutex_unlock(&s->lock);
+
+    GstClockTime now = gst_util_get_timestamp();
+    if (target > now) {
+        GstClockTime wait_ns = target - now;
+        guint64 wait_us = wait_ns / 1000;
+        if (wait_us > 0) {
+            if (wait_us > G_MAXULONG) {
+                wait_us = G_MAXULONG;
+            }
+            g_usleep((gulong)wait_us);
+        }
+    } else if (now - target > dur * 4) {
+        g_mutex_lock(&s->lock);
+        s->next_wall_time = now + dur;
+        g_mutex_unlock(&s->lock);
+    }
 
     GstFlowReturn overall = GST_FLOW_OK;
     gboolean pushed = FALSE;
@@ -279,6 +305,7 @@ Splash* splash_new(void){
     s->loop = g_main_loop_new(NULL, FALSE);
     s->fps = 30.0;
     s->dur = (GstClockTime)(GST_SECOND/30.0 + 0.5);
+    s->next_wall_time = 0;
     s->outputs = SPLASH_OUTPUT_UDP;
     s->host = g_strdup("127.0.0.1");
     s->port = 5600;
@@ -394,6 +421,7 @@ bool splash_apply_config(Splash *s, const SplashConfig *cfg){
         return false;
     }
     s->next_pts = 0;
+    s->next_wall_time = gst_util_get_timestamp();
 
     g_mutex_unlock(&s->lock);
     return true;
@@ -409,6 +437,7 @@ bool splash_start(Splash *s){
     if (s->active_idx < 0 && s->nseq>0) s->active_idx = 0;
     do_segment_seek_locked(s, s->active_idx);
     s->next_pts = 0;
+    s->next_wall_time = gst_util_get_timestamp();
     g_mutex_unlock(&s->lock);
     emit_evt(s, SPLASH_EVT_STARTED, 0, 0, NULL);
     return true;
