@@ -30,6 +30,8 @@ static void usage(const char *prog) {
             "  --osd                        (enable OSD overlay plane with stats)\n"
             "  --osd-plane-id N             (force OSD plane id; default auto)\n"
             "  --osd-refresh-ms N           (default: 500)\n"
+            "  --record-video PATH          (write H.265 video to MP4 at PATH)\n"
+            "  --no-record-video            (disable MP4 recording)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -117,6 +119,9 @@ void cfg_defaults(AppCfg *c) {
         c->splash.sequences[i].start_frame = -1;
         c->splash.sequences[i].end_frame = -1;
     }
+
+    c->record.enable = 0;
+    c->record.output_path[0] = '\0';
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -268,6 +273,15 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->osd_plane_id = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--osd-refresh-ms") && i + 1 < argc) {
             cfg->osd_refresh_ms = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--record-video") && i + 1 < argc) {
+            cfg->record.enable = 1;
+            cli_copy_string(cfg->record.output_path, sizeof(cfg->record.output_path), argv[++i]);
+        } else if (!strcmp(argv[i], "--record-video")) {
+            LOGE("--record-video requires an output path");
+            return -1;
+        } else if (!strcmp(argv[i], "--no-record-video")) {
+            cfg->record.enable = 0;
+            cfg->record.output_path[0] = '\0';
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {

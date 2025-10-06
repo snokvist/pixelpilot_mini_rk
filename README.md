@@ -44,6 +44,8 @@ to the defaults listed in `src/config.c` when omitted.
 | `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
+| `[record].enable` | `true` to persist the H.265 video elementary stream to MP4 via minimp4. |
+| `[record].path` | Output path for the MP4 file; only video is written (no audio). |
 | `[restarts].limit` | Maximum automatic restarts allowed within the configured window. |
 | `[restarts].window-ms` | Rolling window (milliseconds) for counting automatic restarts. |
 | `[gst].log` | `true` forces `GST_DEBUG=3` unless already set in the environment. |

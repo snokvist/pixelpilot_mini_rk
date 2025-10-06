@@ -14,6 +14,7 @@ typedef enum {
 } PipelineStateEnum;
 
 struct Splash;
+struct VideoRecorder;
 
 typedef struct {
     PipelineStateEnum state;
@@ -46,6 +47,7 @@ typedef struct {
     guint splash_idle_timeout_ms;
     guint64 pipeline_start_ns;
     guint64 last_udp_activity_ns;
+    struct VideoRecorder *recorder;
 } PipelineState;
 
 #include "config.h"
