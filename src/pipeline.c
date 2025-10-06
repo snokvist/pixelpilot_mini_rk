@@ -89,6 +89,8 @@ static guint64 monotonic_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+static void pipeline_store_recorder_caps(PipelineState *ps, const GstCaps *caps);
+static GstCaps *pipeline_get_cached_record_caps(PipelineState *ps);
 static GstCaps *pipeline_query_record_caps(PipelineState *ps);
 static gboolean pipeline_start_recorder_session(PipelineState *ps);
 static void pipeline_stop_recorder_session(PipelineState *ps, gboolean allow_restart);
@@ -418,6 +420,43 @@ static void pipeline_update_splash(PipelineState *ps) {
     }
 }
 
+static void pipeline_store_recorder_caps(PipelineState *ps, const GstCaps *caps) {
+    if (ps == NULL || caps == NULL) {
+        return;
+    }
+
+    g_mutex_lock(&ps->lock);
+    gboolean same = FALSE;
+    if (ps->recorder_last_video_caps != NULL) {
+        same = gst_caps_is_equal(ps->recorder_last_video_caps, (GstCaps *)caps);
+    }
+
+    if (!same) {
+        GstCaps *caps_copy = gst_caps_copy(caps);
+        if (caps_copy != NULL) {
+            if (ps->recorder_last_video_caps != NULL) {
+                gst_caps_unref(ps->recorder_last_video_caps);
+            }
+            ps->recorder_last_video_caps = caps_copy;
+        }
+    }
+    g_mutex_unlock(&ps->lock);
+}
+
+static GstCaps *pipeline_get_cached_record_caps(PipelineState *ps) {
+    if (ps == NULL) {
+        return NULL;
+    }
+
+    g_mutex_lock(&ps->lock);
+    GstCaps *caps = NULL;
+    if (ps->recorder_last_video_caps != NULL) {
+        caps = gst_caps_ref(ps->recorder_last_video_caps);
+    }
+    g_mutex_unlock(&ps->lock);
+    return caps;
+}
+
 static GstCaps *pipeline_query_record_caps(PipelineState *ps) {
     if (ps == NULL || ps->video_sink == NULL) {
         return NULL;
@@ -464,7 +503,15 @@ static gboolean pipeline_start_recorder_session(PipelineState *ps) {
     skip_initial_caps = ps->recorder_skip_initial_caps;
     g_mutex_unlock(&ps->lock);
 
-    GstCaps *record_caps = skip_initial_caps ? NULL : pipeline_query_record_caps(ps);
+    GstCaps *record_caps = NULL;
+    if (skip_initial_caps) {
+        record_caps = pipeline_get_cached_record_caps(ps);
+    } else {
+        record_caps = pipeline_query_record_caps(ps);
+        if (record_caps != NULL) {
+            pipeline_store_recorder_caps(ps, record_caps);
+        }
+    }
     gboolean record_audio = want_record && cfg->record.audio && cfg->aud_pt >= 0 && ps->udp_receiver != NULL;
 
     if (!recorder_start(ps->recorder, cfg, record_audio, record_caps)) {
@@ -1202,6 +1249,9 @@ static gpointer appsink_thread_func(gpointer data) {
         }
         if (record_buf != NULL && recorder != NULL) {
             const GstCaps *sample_caps = gst_sample_get_caps(sample);
+            if (sample_caps != NULL) {
+                pipeline_store_recorder_caps(ps, sample_caps);
+            }
             recorder_push_video_buffer(recorder, record_buf, sample_caps);
         }
         gst_sample_unref(sample);
@@ -1347,11 +1397,19 @@ static void cleanup_pipeline(PipelineState *ps) {
     ps->recorder_restart_pending = FALSE;
     ps->recorder_restart_last_ns = 0;
     ps->recorder_skip_initial_caps = FALSE;
+    GstCaps *cached_caps = NULL;
     g_mutex_lock(&ps->lock);
+    if (ps->recorder_last_video_caps != NULL) {
+        cached_caps = ps->recorder_last_video_caps;
+        ps->recorder_last_video_caps = NULL;
+    }
     ps->bus_thread_running = FALSE;
     ps->encountered_error = FALSE;
     ps->stop_requested = FALSE;
     g_mutex_unlock(&ps->lock);
+    if (cached_caps != NULL) {
+        gst_caps_unref(cached_caps);
+    }
 }
 
 int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int audio_disabled, PipelineState *ps) {
@@ -1396,6 +1454,10 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->recorder_restart_pending = FALSE;
     ps->recorder_restart_last_ns = 0;
     ps->recorder_skip_initial_caps = FALSE;
+    if (ps->recorder_last_video_caps != NULL) {
+        gst_caps_unref(ps->recorder_last_video_caps);
+        ps->recorder_last_video_caps = NULL;
+    }
 
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;
