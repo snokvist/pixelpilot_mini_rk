@@ -818,6 +818,30 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "record") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->record.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "path") == 0 || strcasecmp(key, "output") == 0 ||
+            strcasecmp(key, "output-path") == 0) {
+            ini_copy_string(cfg->record.output_path, sizeof(cfg->record.output_path), value);
+            return 0;
+        }
+        if (strcasecmp(key, "mode") == 0) {
+            RecordMode mode;
+            if (cfg_parse_record_mode(value, &mode) != 0) {
+                return -1;
+            }
+            cfg->record.mode = mode;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "gst") == 0) {
         if (strcasecmp(key, "log") == 0) {
             int v = 0;

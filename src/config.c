@@ -30,6 +30,9 @@ static void usage(const char *prog) {
             "  --osd                        (enable OSD overlay plane with stats)\n"
             "  --osd-plane-id N             (force OSD plane id; default auto)\n"
             "  --osd-refresh-ms N           (default: 500)\n"
+            "  --record-video [PATH]        (enable MP4 capture; optional PATH or directory, default /media)\n"
+            "  --record-mode MODE           (standard|sequential|fragmented; default: sequential)\n"
+            "  --no-record-video            (disable MP4 recording)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -48,6 +51,22 @@ static const CustomSinkAlias kCustomSinkAliases[] = {
     {"udpsrc", CUSTOM_SINK_UDPSRC},
     {"gst-udpsrc", CUSTOM_SINK_UDPSRC},
     {"gst", CUSTOM_SINK_UDPSRC},
+};
+
+typedef struct {
+    const char *name;
+    RecordMode mode;
+} RecordModeAlias;
+
+static const RecordModeAlias kRecordModeAliases[] = {
+    {"standard", RECORD_MODE_STANDARD},
+    {"default", RECORD_MODE_STANDARD},
+    {"seekable", RECORD_MODE_STANDARD},
+    {"sequential", RECORD_MODE_SEQUENTIAL},
+    {"append", RECORD_MODE_SEQUENTIAL},
+    {"fragment", RECORD_MODE_FRAGMENTED},
+    {"fragmented", RECORD_MODE_FRAGMENTED},
+    {"fragmentation", RECORD_MODE_FRAGMENTED},
 };
 
 int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out) {
@@ -69,6 +88,32 @@ const char *cfg_custom_sink_mode_name(CustomSinkMode mode) {
         return "receiver";
     case CUSTOM_SINK_UDPSRC:
         return "udpsrc";
+    default:
+        return "unknown";
+    }
+}
+
+int cfg_parse_record_mode(const char *value, RecordMode *mode_out) {
+    if (value == NULL || mode_out == NULL) {
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(kRecordModeAliases) / sizeof(kRecordModeAliases[0]); ++i) {
+        if (strcasecmp(value, kRecordModeAliases[i].name) == 0) {
+            *mode_out = kRecordModeAliases[i].mode;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *cfg_record_mode_name(RecordMode mode) {
+    switch (mode) {
+    case RECORD_MODE_STANDARD:
+        return "standard";
+    case RECORD_MODE_SEQUENTIAL:
+        return "sequential";
+    case RECORD_MODE_FRAGMENTED:
+        return "fragmented";
     default:
         return "unknown";
     }
@@ -118,6 +163,10 @@ void cfg_defaults(AppCfg *c) {
         c->splash.sequences[i].start_frame = -1;
         c->splash.sequences[i].end_frame = -1;
     }
+
+    c->record.enable = 0;
+    strcpy(c->record.output_path, "/media");
+    c->record.mode = RECORD_MODE_SEQUENTIAL;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -269,6 +318,27 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->osd_plane_id = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--osd-refresh-ms") && i + 1 < argc) {
             cfg->osd_refresh_ms = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--record-video")) {
+            cfg->record.enable = 1;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                cli_copy_string(cfg->record.output_path, sizeof(cfg->record.output_path), argv[++i]);
+            } else if (cfg->record.output_path[0] == '\0') {
+                strcpy(cfg->record.output_path, "/media");
+            }
+        } else if (!strcmp(argv[i], "--record-mode") && i + 1 < argc) {
+            const char *mode_str = argv[++i];
+            RecordMode mode;
+            if (cfg_parse_record_mode(mode_str, &mode) != 0) {
+                LOGE("Unknown record mode '%s'", mode_str);
+                return -1;
+            }
+            cfg->record.mode = mode;
+        } else if (!strcmp(argv[i], "--record-mode")) {
+            LOGE("--record-mode requires an argument (standard|sequential|fragmented)");
+            return -1;
+        } else if (!strcmp(argv[i], "--no-record-video")) {
+            cfg->record.enable = 0;
+            cfg->record.output_path[0] = '\0';
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {

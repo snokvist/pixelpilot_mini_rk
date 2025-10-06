@@ -3,6 +3,7 @@
 #include "pipeline.h"
 #include "logging.h"
 #include "splashlib.h"
+#include "video_recorder.h"
 
 #ifndef GST_USE_UNSTABLE_API
 #define GST_USE_UNSTABLE_API
@@ -1007,6 +1008,9 @@ static gpointer appsink_thread_func(gpointer data) {
             GstMapInfo map;
             if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
                 if (map.size > 0 && map.size <= max_packet) {
+                    if (ps->recorder != NULL) {
+                        video_recorder_handle_sample(ps->recorder, sample, map.data, map.size);
+                    }
                     if (video_decoder_feed(ps->decoder, map.data, map.size) != 0) {
                         LOGV("Video decoder feed busy; retrying");
                     }
@@ -1021,6 +1025,10 @@ static gpointer appsink_thread_func(gpointer data) {
 
     if (ps->decoder != NULL) {
         video_decoder_send_eos(ps->decoder);
+    }
+
+    if (ps->recorder != NULL) {
+        video_recorder_flush(ps->recorder);
     }
 
     g_mutex_lock(&ps->lock);
@@ -1134,6 +1142,11 @@ static void cleanup_pipeline(PipelineState *ps) {
     ps->decoder_initialized = FALSE;
     ps->decoder_running = FALSE;
 
+    if (ps->recorder != NULL) {
+        video_recorder_free(ps->recorder);
+        ps->recorder = NULL;
+    }
+
     if (ps->udp_receiver != NULL) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
@@ -1188,6 +1201,7 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->pipeline_start_ns = monotonic_time_ns();
     ps->last_udp_activity_ns = 0;
     ps->splash_active = FALSE;
+    ps->recorder = NULL;
 
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;
@@ -1252,6 +1266,13 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         goto fail;
     }
     ps->decoder_running = TRUE;
+
+    if (cfg->record.enable && cfg->record.output_path[0] != '\0' && ps->recorder == NULL) {
+        ps->recorder = video_recorder_new(&cfg->record);
+        if (ps->recorder == NULL) {
+            LOGW("Recording requested but could not start MP4 writer; continuing without recording");
+        }
+    }
 
     ps->appsink_thread_running = TRUE;
     ps->appsink_thread = g_thread_new("appsink-pump", appsink_thread_func, ps);
