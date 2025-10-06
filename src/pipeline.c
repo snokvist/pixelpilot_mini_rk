@@ -378,16 +378,34 @@ static void pipeline_update_splash(PipelineState *ps) {
 
     if (!active && diff_ms >= idle_ms) {
         gboolean activated = FALSE;
+        GstElement *selector = NULL;
+        GstPad *splash_pad = NULL;
         g_mutex_lock(&ps->lock);
         if (!ps->splash_active && ps->selector_splash_pad != NULL && ps->input_selector != NULL) {
             LOGI("Activating splash fallback after %u ms without video", idle_ms);
-            g_object_set(ps->input_selector, "active-pad", ps->selector_splash_pad, NULL);
             ps->splash_active = TRUE;
             activated = TRUE;
+            selector = ps->input_selector;
+            splash_pad = ps->selector_splash_pad;
+            if (selector != NULL) {
+                gst_object_ref(selector);
+            }
+            if (splash_pad != NULL) {
+                gst_object_ref(splash_pad);
+            }
         }
         g_mutex_unlock(&ps->lock);
         if (activated) {
             pipeline_stop_recorder_session(ps, TRUE);
+            if (selector != NULL && splash_pad != NULL) {
+                g_object_set(selector, "active-pad", splash_pad, NULL);
+            }
+            if (selector != NULL) {
+                gst_object_unref(selector);
+            }
+            if (splash_pad != NULL) {
+                gst_object_unref(splash_pad);
+            }
         }
     } else if (active && last_packet != 0 && diff_ms < idle_ms) {
         g_mutex_lock(&ps->lock);
