@@ -36,6 +36,7 @@
 #endif
 
 #include <gst/app/gstappsrc.h>
+#include <gst/gst.h>
 #include <gst/gstbuffer.h>
 #include <gst/gstbufferpool.h>
 #include <gst/gstevent.h>
@@ -49,6 +50,8 @@
 #define UDP_RECEIVER_MAX_PACKET 4096
 #define UDP_RECEIVER_BATCH 8
 #define UDP_AUDIO_SEQ_MAX_ADVANCE 8192
+#define UDP_AUDIO_CLOCK_RATE 48000u
+#define UDP_AUDIO_WRAP_GUARD (1u << 30)
 
 typedef struct {
     guint16 sequence;
@@ -113,7 +116,98 @@ struct UdpReceiver {
     gboolean have_video_ssrc;
 
     guint64 last_packet_ns;
+
+    gboolean audio_ts_initialized;
+    guint64 audio_ext_base;
+    guint64 audio_last_ext;
+    GstClockTime audio_last_pts;
 };
+
+static void udp_receiver_reset_audio_timing(struct UdpReceiver *ur) {
+    if (ur == NULL) {
+        return;
+    }
+    ur->audio_ts_initialized = FALSE;
+    ur->audio_ext_base = 0;
+    ur->audio_last_ext = 0;
+    ur->audio_last_pts = GST_CLOCK_TIME_NONE;
+}
+
+static inline guint64 udp_receiver_unwrap_audio_timestamp(guint64 last_ext, guint32 current) {
+    guint32 last_low = (guint32)(last_ext & 0xFFFFFFFFu);
+    guint64 last_high = last_ext & 0xFFFFFFFF00000000ull;
+    gint32 diff = (gint32)(current - last_low);
+    guint64 unwrapped = last_high + (guint64)current;
+
+    if (diff < -(gint32)UDP_AUDIO_WRAP_GUARD) {
+        unwrapped += 0x100000000ull;
+    } else if (diff > (gint32)UDP_AUDIO_WRAP_GUARD) {
+        if (last_high >= 0x100000000ull) {
+            unwrapped -= 0x100000000ull;
+        }
+    }
+
+    return unwrapped;
+}
+
+static void udp_receiver_prepare_audio_timestamps(struct UdpReceiver *ur,
+                                                  const RtpParseResult *parsed,
+                                                  gboolean reset_timing,
+                                                  GstClockTime *out_pts,
+                                                  GstClockTime *out_duration) {
+    if (out_pts != NULL) {
+        *out_pts = GST_CLOCK_TIME_NONE;
+    }
+    if (out_duration != NULL) {
+        *out_duration = GST_CLOCK_TIME_NONE;
+    }
+
+    if (ur == NULL || parsed == NULL) {
+        return;
+    }
+
+    if (reset_timing) {
+        udp_receiver_reset_audio_timing(ur);
+    }
+
+    guint32 rtp_ts = parsed->timestamp;
+
+    if (!ur->audio_ts_initialized) {
+        guint64 ext = (guint64)rtp_ts;
+        ur->audio_ts_initialized = TRUE;
+        ur->audio_ext_base = ext;
+        ur->audio_last_ext = ext;
+        ur->audio_last_pts = 0;
+        if (out_pts != NULL) {
+            *out_pts = 0;
+        }
+        return;
+    }
+
+    guint64 last_ext = ur->audio_last_ext;
+    guint64 unwrapped = udp_receiver_unwrap_audio_timestamp(last_ext, rtp_ts);
+
+    if (unwrapped <= last_ext) {
+        if (out_pts != NULL) {
+            *out_pts = ur->audio_last_pts;
+        }
+        return;
+    }
+
+    guint64 offset = unwrapped - ur->audio_ext_base;
+    GstClockTime pts = gst_util_uint64_scale(offset, GST_SECOND, UDP_AUDIO_CLOCK_RATE);
+    GstClockTime duration = gst_util_uint64_scale(unwrapped - last_ext, GST_SECOND, UDP_AUDIO_CLOCK_RATE);
+
+    ur->audio_last_ext = unwrapped;
+    ur->audio_last_pts = pts;
+
+    if (out_pts != NULL) {
+        *out_pts = pts;
+    }
+    if (out_duration != NULL) {
+        *out_duration = duration;
+    }
+}
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
 static inline void udp_receiver_last_packet_store(struct UdpReceiver *ur, guint64 value) {
@@ -317,6 +411,7 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->have_video_ssrc = FALSE;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
+    udp_receiver_reset_audio_timing(ur);
 }
 
 static void log_udp_neon_status_once(void) {
@@ -657,6 +752,26 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     }
 
     if (audio_target_count > 0) {
+        gboolean reset_audio_timing = FALSE;
+        for (guint i = 0; i < audio_target_count; ++i) {
+            if (audio_marks[i]) {
+                reset_audio_timing = TRUE;
+                break;
+            }
+        }
+
+        GstClockTime pts = GST_CLOCK_TIME_NONE;
+        GstClockTime duration = GST_CLOCK_TIME_NONE;
+        if (parsed != NULL) {
+            udp_receiver_prepare_audio_timestamps(ur, parsed, reset_audio_timing, &pts, &duration);
+        } else if (reset_audio_timing) {
+            udp_receiver_reset_audio_timing(ur);
+        }
+
+        GST_BUFFER_PTS(gstbuf) = pts;
+        GST_BUFFER_DTS(gstbuf) = pts;
+        GST_BUFFER_DURATION(gstbuf) = duration;
+
         for (guint i = 0; i < audio_target_count; ++i) {
             GstBuffer *outbuf = (i + 1 == audio_target_count) ? gstbuf : gst_buffer_ref(gstbuf);
             if (audio_marks[i]) {
@@ -679,6 +794,9 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
             }
         }
     } else {
+        GST_BUFFER_PTS(gstbuf) = GST_CLOCK_TIME_NONE;
+        GST_BUFFER_DTS(gstbuf) = GST_CLOCK_TIME_NONE;
+        GST_BUFFER_DURATION(gstbuf) = GST_CLOCK_TIME_NONE;
         GstFlowReturn flow = gst_app_src_push_buffer(target_appsrc, gstbuf);
         if (flow != GST_FLOW_OK) {
             LOGV("UDP receiver: push_buffer (%s) returned %s",
@@ -905,6 +1023,7 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     ur->pool = NULL;
     ur->buffer_size = 0;
     ur->last_packet_ns = 0;
+    udp_receiver_reset_audio_timing(ur);
     return ur;
 }
 
@@ -1092,6 +1211,7 @@ void udp_receiver_stop(UdpReceiver *ur) {
     ur->audio_discont_pending = TRUE;
     ur->audio_record_discont_pending = TRUE;
     g_atomic_int_set(&ur->logged_audio_record_flow, 0);
+    udp_receiver_reset_audio_timing(ur);
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 }
