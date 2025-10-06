@@ -221,7 +221,6 @@ static void set_mpp_decoding_parameters(VideoDecoder *vd) {
     set_control_verbose(vd->mpi, vd->ctx, MPP_DEC_SET_DISABLE_ERROR, 0xffff);
     set_control_verbose(vd->mpi, vd->ctx, MPP_DEC_SET_IMMEDIATE_OUT, 0xffff);
     set_control_verbose(vd->mpi, vd->ctx, MPP_DEC_SET_ENABLE_FAST_PLAY, 0xffff);
-    set_control_verbose(vd->mpi, vd->ctx, MPP_DEC_SET_PARSER_SPLIT_MODE, 0);
 }
 
 static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32_t src_h) {
@@ -373,6 +372,18 @@ static gpointer frame_thread_func(gpointer data) {
         if (mpp_frame_get_info_change(frame)) {
             setup_external_buffers(vd, frame);
         } else {
+            RK_U32 errinfo = mpp_frame_get_errinfo(frame);
+            RK_U32 discard = mpp_frame_get_discard(frame);
+            if (G_UNLIKELY(errinfo || discard)) {
+                LOGW("MPP: dropping frame errinfo=%u discard=%u", errinfo, discard);
+                vd->eos_received = mpp_frame_get_eos(frame) ? TRUE : FALSE;
+                mpp_frame_deinit(&frame);
+                if (vd->eos_received) {
+                    break;
+                }
+                continue;
+            }
+
             MppBuffer buffer = mpp_frame_get_buffer(frame);
             if (buffer != NULL) {
                 MppBufferInfo info;
@@ -496,6 +507,9 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         video_decoder_deinit(vd);
         return -1;
     }
+
+    const RK_U32 need_split = 1;
+    set_control_verbose(vd->mpi, vd->ctx, MPP_DEC_SET_PARSER_SPLIT_MODE, need_split);
 
     MppCodingType coding = MPP_VIDEO_CodingHEVC;
     if (mpp_init(vd->ctx, MPP_CTX_DEC, coding) != MPP_OK) {
