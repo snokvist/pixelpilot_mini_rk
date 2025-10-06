@@ -42,6 +42,9 @@ struct VideoRecorder {
     guint64 default_duration_90k;
     guint64 last_duration_90k;
     gchar *output_path;
+    RecordMode mode;
+    int sequential_mode_flag;
+    int enable_fragmentation;
     struct PendingSample pending;
 };
 
@@ -289,6 +292,25 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
     rec->last_duration_90k = 0;
     rec->output_path = output_path;
 
+    rec->mode = cfg->mode;
+    rec->sequential_mode_flag = 1;
+    rec->enable_fragmentation = 0;
+    switch (rec->mode) {
+    case RECORD_MODE_STANDARD:
+        rec->sequential_mode_flag = 0;
+        rec->enable_fragmentation = 0;
+        break;
+    case RECORD_MODE_FRAGMENTED:
+        rec->sequential_mode_flag = 1;
+        rec->enable_fragmentation = 1;
+        break;
+    case RECORD_MODE_SEQUENTIAL:
+    default:
+        rec->sequential_mode_flag = 1;
+        rec->enable_fragmentation = 0;
+        break;
+    }
+
     rec->fp = fopen(rec->output_path, "wb");
     if (rec->fp == NULL) {
         LOGE("record: failed to open %s: %s", rec->output_path, g_strerror(errno));
@@ -298,8 +320,10 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
     }
 
     LOGI("record: writing video to %s", rec->output_path);
+    LOGI("record: MP4 mode=%s (sequential=%d, fragmented=%d)",
+         cfg_record_mode_name(rec->mode), rec->sequential_mode_flag, rec->enable_fragmentation);
 
-    rec->mux = MP4E_open(1, 0, rec, recorder_write_callback);
+    rec->mux = MP4E_open(rec->sequential_mode_flag, rec->enable_fragmentation, rec, recorder_write_callback);
     if (rec->mux == NULL) {
         LOGE("minimp4: failed to allocate muxer");
         fclose(rec->fp);

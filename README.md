@@ -46,6 +46,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
 | `[record].enable` | `true` to persist the H.265 video elementary stream to MP4 via minimp4. |
 | `[record].path` | Optional output path or directory for the MP4 file. If omitted, files land in `/media` with a timestamped name (video only, no audio). |
+| `[record].mode` | Selects the minimp4 writer mode: `standard` (seekable, updates MP4 metadata at the end), `sequential` (append-only, avoids seeks), or `fragmented` (stream-friendly MP4 fragments). |
 | `[restarts].limit` | Maximum automatic restarts allowed within the configured window. |
 | `[restarts].window-ms` | Rolling window (milliseconds) for counting automatic restarts. |
 | `[gst].log` | `true` forces `GST_DEBUG=3` unless already set in the environment. |

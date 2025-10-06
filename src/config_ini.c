@@ -824,6 +824,14 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             ini_copy_string(cfg->record.output_path, sizeof(cfg->record.output_path), value);
             return 0;
         }
+        if (strcasecmp(key, "mode") == 0) {
+            RecordMode mode;
+            if (cfg_parse_record_mode(value, &mode) != 0) {
+                return -1;
+            }
+            cfg->record.mode = mode;
+            return 0;
+        }
         return -1;
     }
     if (strcasecmp(section, "gst") == 0) {
