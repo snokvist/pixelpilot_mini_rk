@@ -426,12 +426,15 @@ static void pipeline_store_recorder_caps(PipelineState *ps, const GstCaps *caps)
     }
 
     g_mutex_lock(&ps->lock);
+    gboolean splash_active = ps->splash_active;
+    /* Ignore caps reported while the splash video is active so cached
+     * recorder caps always describe the real UDP stream. */
     gboolean same = FALSE;
-    if (ps->recorder_last_video_caps != NULL) {
+    if (!splash_active && ps->recorder_last_video_caps != NULL) {
         same = gst_caps_is_equal(ps->recorder_last_video_caps, (GstCaps *)caps);
     }
 
-    if (!same) {
+    if (!splash_active && !same) {
         GstCaps *caps_copy = gst_caps_copy(caps);
         if (caps_copy != NULL) {
             if (ps->recorder_last_video_caps != NULL) {
