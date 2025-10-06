@@ -46,6 +46,7 @@ struct VideoRecorder {
     int sequential_mode_flag;
     int enable_fragmentation;
     struct PendingSample pending;
+    gboolean awaiting_sync_warning;
 };
 
 static gchar *recorder_timestamp_string(void) {
@@ -250,9 +251,16 @@ static void emit_pending(VideoRecorder *rec, guint32 duration_90k) {
     }
 
     int err = mp4_h26x_write_nal(&rec->writer, rec->pending.data, (int)rec->pending.size, duration_90k);
-    if (err != MP4E_STATUS_OK) {
+    if (err == MP4E_STATUS_BAD_ARGUMENTS) {
+        if (!rec->awaiting_sync_warning) {
+            LOGI("record: waiting for VPS/SPS/PPS+IDR before writing MP4; dropping frame");
+            rec->awaiting_sync_warning = TRUE;
+        }
+    } else if (err != MP4E_STATUS_OK) {
         LOGE("minimp4: failed to write access unit (err=%d)", err);
         rec->failed = TRUE;
+    } else {
+        rec->awaiting_sync_warning = FALSE;
     }
 
     pending_reset(&rec->pending);
@@ -295,6 +303,7 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
     rec->mode = cfg->mode;
     rec->sequential_mode_flag = 1;
     rec->enable_fragmentation = 0;
+    rec->awaiting_sync_warning = FALSE;
     switch (rec->mode) {
     case RECORD_MODE_STANDARD:
         rec->sequential_mode_flag = 0;
