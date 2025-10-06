@@ -459,7 +459,12 @@ static gboolean pipeline_start_recorder_session(PipelineState *ps) {
         LOGW("Recorder audio requested but UDP receiver unavailable; recording without audio");
     }
 
-    GstCaps *record_caps = pipeline_query_record_caps(ps);
+    gboolean skip_initial_caps = FALSE;
+    g_mutex_lock(&ps->lock);
+    skip_initial_caps = ps->recorder_skip_initial_caps;
+    g_mutex_unlock(&ps->lock);
+
+    GstCaps *record_caps = skip_initial_caps ? NULL : pipeline_query_record_caps(ps);
     gboolean record_audio = want_record && cfg->record.audio && cfg->aud_pt >= 0 && ps->udp_receiver != NULL;
 
     if (!recorder_start(ps->recorder, cfg, record_audio, record_caps)) {
@@ -487,6 +492,7 @@ static gboolean pipeline_start_recorder_session(PipelineState *ps) {
     g_mutex_lock(&ps->lock);
     ps->recorder_running = TRUE;
     ps->recorder_restart_last_ns = 0;
+    ps->recorder_skip_initial_caps = FALSE;
     receiver = ps->udp_receiver;
     g_mutex_unlock(&ps->lock);
 
@@ -513,14 +519,17 @@ static void pipeline_stop_recorder_session(PipelineState *ps, gboolean allow_res
         if (allow_restart && ps->recorder_enabled) {
             ps->recorder_restart_pending = TRUE;
             ps->recorder_restart_last_ns = 0;
+            ps->recorder_skip_initial_caps = TRUE;
         } else if (!allow_restart) {
             ps->recorder_restart_pending = FALSE;
             ps->recorder_restart_last_ns = 0;
+            ps->recorder_skip_initial_caps = FALSE;
         }
         ps->recorder_running = FALSE;
     } else if (!allow_restart) {
         ps->recorder_restart_pending = FALSE;
         ps->recorder_restart_last_ns = 0;
+        ps->recorder_skip_initial_caps = FALSE;
     }
     g_mutex_unlock(&ps->lock);
 
@@ -1337,6 +1346,7 @@ static void cleanup_pipeline(PipelineState *ps) {
     ps->recorder_enabled = FALSE;
     ps->recorder_restart_pending = FALSE;
     ps->recorder_restart_last_ns = 0;
+    ps->recorder_skip_initial_caps = FALSE;
     g_mutex_lock(&ps->lock);
     ps->bus_thread_running = FALSE;
     ps->encountered_error = FALSE;
@@ -1385,6 +1395,7 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->recorder_enabled = FALSE;
     ps->recorder_restart_pending = FALSE;
     ps->recorder_restart_last_ns = 0;
+    ps->recorder_skip_initial_caps = FALSE;
 
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;

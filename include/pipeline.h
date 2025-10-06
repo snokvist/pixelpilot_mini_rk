@@ -52,6 +52,7 @@ typedef struct {
     gboolean recorder_enabled;
     gboolean recorder_restart_pending;
     guint64 recorder_restart_last_ns;
+    gboolean recorder_skip_initial_caps;
 } PipelineState;
 
 #include "config.h"
