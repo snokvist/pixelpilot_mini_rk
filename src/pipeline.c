@@ -1008,9 +1008,13 @@ static gpointer appsink_thread_func(gpointer data) {
             GstMapInfo map;
             if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
                 if (map.size > 0 && map.size <= max_packet) {
-                    if (ps->recorder != NULL) {
-                        video_recorder_handle_sample(ps->recorder, sample, map.data, map.size);
+                    g_mutex_lock(&ps->recorder_lock);
+                    VideoRecorder *recorder = ps->recorder;
+                    if (recorder != NULL) {
+                        video_recorder_handle_sample(recorder, sample, map.data, map.size);
                     }
+                    g_mutex_unlock(&ps->recorder_lock);
+
                     if (video_decoder_feed(ps->decoder, map.data, map.size) != 0) {
                         LOGV("Video decoder feed busy; retrying");
                     }
@@ -1027,9 +1031,12 @@ static gpointer appsink_thread_func(gpointer data) {
         video_decoder_send_eos(ps->decoder);
     }
 
-    if (ps->recorder != NULL) {
-        video_recorder_flush(ps->recorder);
+    g_mutex_lock(&ps->recorder_lock);
+    VideoRecorder *recorder = ps->recorder;
+    if (recorder != NULL) {
+        video_recorder_flush(recorder);
     }
+    g_mutex_unlock(&ps->recorder_lock);
 
     g_mutex_lock(&ps->lock);
     ps->appsink_thread_running = FALSE;
@@ -1142,10 +1149,7 @@ static void cleanup_pipeline(PipelineState *ps) {
     ps->decoder_initialized = FALSE;
     ps->decoder_running = FALSE;
 
-    if (ps->recorder != NULL) {
-        video_recorder_free(ps->recorder);
-        ps->recorder = NULL;
-    }
+    pipeline_disable_recording(ps);
 
     if (ps->udp_receiver != NULL) {
         udp_receiver_destroy(ps->udp_receiver);
@@ -1179,6 +1183,7 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
 
     if (!ps->initialized) {
         g_mutex_init(&ps->lock);
+        g_mutex_init(&ps->recorder_lock);
         g_cond_init(&ps->cond);
         ps->initialized = TRUE;
     }
@@ -1201,7 +1206,9 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->pipeline_start_ns = monotonic_time_ns();
     ps->last_udp_activity_ns = 0;
     ps->splash_active = FALSE;
+    g_mutex_lock(&ps->recorder_lock);
     ps->recorder = NULL;
+    g_mutex_unlock(&ps->recorder_lock);
 
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;
@@ -1267,9 +1274,8 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     }
     ps->decoder_running = TRUE;
 
-    if (cfg->record.enable && cfg->record.output_path[0] != '\0' && ps->recorder == NULL) {
-        ps->recorder = video_recorder_new(&cfg->record);
-        if (ps->recorder == NULL) {
+    if (cfg->record.enable && cfg->record.output_path[0] != '\0') {
+        if (pipeline_enable_recording(ps, &cfg->record) != 0) {
             LOGW("Recording requested but could not start MP4 writer; continuing without recording");
         }
     }
@@ -1404,6 +1410,65 @@ void pipeline_set_receiver_stats_enabled(PipelineState *ps, gboolean enabled) {
         udp_receiver_set_stats_enabled(receiver, enabled);
     }
     g_mutex_unlock(&ps->lock);
+}
+
+gboolean pipeline_is_recording(const PipelineState *ps) {
+    if (ps == NULL) {
+        return FALSE;
+    }
+
+    gboolean active = FALSE;
+    GMutex *lock = (GMutex *)&ps->recorder_lock;
+    g_mutex_lock(lock);
+    if (ps->recorder != NULL) {
+        active = TRUE;
+    }
+    g_mutex_unlock(lock);
+    return active;
+}
+
+int pipeline_enable_recording(PipelineState *ps, const RecordCfg *cfg) {
+    if (ps == NULL || cfg == NULL) {
+        return -1;
+    }
+    if (cfg->output_path[0] == '\0') {
+        return -1;
+    }
+
+    RecordCfg local_cfg = *cfg;
+    /* Ensure the recorder helper sees recording as enabled even when we are
+     * toggling it on at runtime (cfg->enable may still be false). */
+    local_cfg.enable = 1;
+
+    VideoRecorder *rec = video_recorder_new(&local_cfg);
+    if (rec == NULL) {
+        return -1;
+    }
+
+    g_mutex_lock(&ps->recorder_lock);
+    if (ps->recorder != NULL) {
+        g_mutex_unlock(&ps->recorder_lock);
+        video_recorder_free(rec);
+        return 0;
+    }
+    ps->recorder = rec;
+    g_mutex_unlock(&ps->recorder_lock);
+    return 0;
+}
+
+void pipeline_disable_recording(PipelineState *ps) {
+    if (ps == NULL) {
+        return;
+    }
+
+    g_mutex_lock(&ps->recorder_lock);
+    VideoRecorder *rec = ps->recorder;
+    ps->recorder = NULL;
+    g_mutex_unlock(&ps->recorder_lock);
+
+    if (rec != NULL) {
+        video_recorder_free(rec);
+    }
 }
 
 int pipeline_get_receiver_stats(const PipelineState *ps, UdpReceiverStats *stats) {
