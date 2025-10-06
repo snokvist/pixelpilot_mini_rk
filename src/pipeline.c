@@ -1435,7 +1435,12 @@ int pipeline_enable_recording(PipelineState *ps, const RecordCfg *cfg) {
         return -1;
     }
 
-    VideoRecorder *rec = video_recorder_new(cfg);
+    RecordCfg local_cfg = *cfg;
+    /* Ensure the recorder helper sees recording as enabled even when we are
+     * toggling it on at runtime (cfg->enable may still be false). */
+    local_cfg.enable = 1;
+
+    VideoRecorder *rec = video_recorder_new(&local_cfg);
     if (rec == NULL) {
         return -1;
     }
