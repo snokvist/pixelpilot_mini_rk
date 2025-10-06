@@ -746,6 +746,14 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->custom_sink = mode;
             return 0;
         }
+        if (strcasecmp(key, "pt97-filter") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->udpsrc_pt97_filter = v;
+            return 0;
+        }
         if (strcasecmp(key, "use-gst-udpsrc") == 0) {
             int v = 0;
             if (parse_bool(value, &v) != 0) {
