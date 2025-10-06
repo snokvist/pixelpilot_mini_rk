@@ -8,6 +8,8 @@
 #define GST_USE_UNSTABLE_API
 #endif
 
+#include <string.h>
+
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 
@@ -18,10 +20,13 @@ struct Recorder {
     GstElement *mux;
     GstPad *mux_video_pad;
     GstPad *mux_audio_pad;
+    gchar *output_path;
     gboolean audio_requested;
     gboolean audio_enabled;
     gboolean running;
     gboolean logged_video_flow_error;
+    gboolean video_caps_set;
+    gboolean logged_caps_warning;
     GMutex lock;
 };
 
@@ -73,6 +78,9 @@ Recorder *recorder_new(void) {
     rec->audio_enabled = FALSE;
     rec->running = FALSE;
     rec->logged_video_flow_error = FALSE;
+    rec->video_caps_set = FALSE;
+    rec->logged_caps_warning = FALSE;
+    rec->output_path = NULL;
     return rec;
 }
 
@@ -103,10 +111,16 @@ void recorder_stop(Recorder *rec) {
     GstAppSrc *video_appsrc = NULL;
     GstAppSrc *audio_appsrc = NULL;
     GstElement *mux = NULL;
+    gchar *output_path = NULL;
 
     g_mutex_lock(&rec->lock);
     if (!rec->running && rec->pipeline == NULL) {
+        output_path = rec->output_path;
+        rec->output_path = NULL;
         g_mutex_unlock(&rec->lock);
+        if (output_path != NULL) {
+            g_free(output_path);
+        }
         return;
     }
 
@@ -114,10 +128,14 @@ void recorder_stop(Recorder *rec) {
     video_appsrc = rec->video_appsrc;
     audio_appsrc = rec->audio_appsrc;
     mux = rec->mux;
+    output_path = rec->output_path;
 
     rec->running = FALSE;
     rec->audio_enabled = FALSE;
     rec->logged_video_flow_error = FALSE;
+    rec->video_caps_set = FALSE;
+    rec->logged_caps_warning = FALSE;
+    rec->output_path = NULL;
 
     recorder_release_pads_locked(rec);
 
@@ -144,6 +162,9 @@ void recorder_stop(Recorder *rec) {
         gst_object_unref(pipeline);
     }
     (void)mux;
+    if (output_path != NULL) {
+        g_free(output_path);
+    }
 }
 
 void recorder_free(Recorder *rec) {
@@ -173,6 +194,106 @@ GstAppSrc *recorder_get_audio_appsrc(Recorder *rec) {
     GstAppSrc *src = rec->audio_enabled ? rec->audio_appsrc : NULL;
     g_mutex_unlock(&rec->lock);
     return src;
+}
+
+static gchar *recorder_make_unique_path(const char *base_path) {
+    if (base_path == NULL || base_path[0] == '\0') {
+        return NULL;
+    }
+
+    GDateTime *now = g_date_time_new_now_local();
+    if (now == NULL) {
+        return g_strdup(base_path);
+    }
+
+    gchar *timestamp = g_date_time_format(now, "%Y%m%d-%H%M%S");
+    g_date_time_unref(now);
+    if (timestamp == NULL) {
+        return g_strdup(base_path);
+    }
+
+    const gchar *last_sep = strrchr(base_path, G_DIR_SEPARATOR);
+#ifdef G_OS_WIN32
+    const gchar *last_win_sep = strrchr(base_path, '\\');
+    if (last_win_sep != NULL && (last_sep == NULL || last_win_sep > last_sep)) {
+        last_sep = last_win_sep;
+    }
+#endif
+    const gchar *dot = strrchr(base_path, '.');
+    gboolean dot_is_ext = dot != NULL && (last_sep == NULL || dot > last_sep);
+
+    gchar *prefix = NULL;
+    const gchar *suffix = dot_is_ext ? dot : "";
+
+    if (dot_is_ext) {
+        prefix = g_strndup(base_path, (gsize)(dot - base_path));
+    } else {
+        prefix = g_strdup(base_path);
+    }
+
+    if (prefix == NULL) {
+        g_free(timestamp);
+        return g_strdup(base_path);
+    }
+
+    gchar *result = g_strdup_printf("%s-%s%s", prefix, timestamp, suffix);
+    g_free(prefix);
+    g_free(timestamp);
+    if (result == NULL) {
+        return g_strdup(base_path);
+    }
+    return result;
+}
+
+static gboolean recorder_set_video_caps_if_needed(Recorder *rec, const GstCaps *caps) {
+    if (rec == NULL || caps == NULL) {
+        return FALSE;
+    }
+
+    GstAppSrc *appsrc = NULL;
+    gboolean already_set = FALSE;
+
+    g_mutex_lock(&rec->lock);
+    already_set = rec->video_caps_set;
+    if (!rec->running || rec->video_appsrc == NULL) {
+        g_mutex_unlock(&rec->lock);
+        return FALSE;
+    }
+    if (!already_set) {
+        appsrc = GST_APP_SRC(gst_object_ref(rec->video_appsrc));
+    }
+    g_mutex_unlock(&rec->lock);
+
+    if (already_set || appsrc == NULL) {
+        if (appsrc != NULL) {
+            gst_object_unref(appsrc);
+        }
+        return already_set;
+    }
+
+    GstCaps *caps_copy = gst_caps_copy(caps);
+    if (caps_copy == NULL) {
+        gst_object_unref(appsrc);
+        g_mutex_lock(&rec->lock);
+        if (!rec->logged_caps_warning) {
+            rec->logged_caps_warning = TRUE;
+            g_mutex_unlock(&rec->lock);
+            LOGW("Recorder: failed to copy video caps; recorded stream may be invalid");
+        } else {
+            g_mutex_unlock(&rec->lock);
+        }
+        return FALSE;
+    }
+
+    gst_app_src_set_caps(appsrc, caps_copy);
+    gst_caps_unref(caps_copy);
+
+    g_mutex_lock(&rec->lock);
+    rec->video_caps_set = TRUE;
+    g_mutex_unlock(&rec->lock);
+
+    gst_object_unref(appsrc);
+    return TRUE;
 }
 
 static gboolean recorder_setup_audio_branch(Recorder *rec,
@@ -300,7 +421,7 @@ static gboolean recorder_setup_audio_branch(Recorder *rec,
     return TRUE;
 }
 
-gboolean recorder_start(Recorder *rec, const AppCfg *cfg, gboolean enable_audio) {
+gboolean recorder_start(Recorder *rec, const AppCfg *cfg, gboolean enable_audio, const GstCaps *video_caps) {
     if (rec == NULL || cfg == NULL) {
         return FALSE;
     }
@@ -360,42 +481,35 @@ gboolean recorder_start(Recorder *rec, const AppCfg *cfg, gboolean enable_audio)
     gst_app_src_set_latency(GST_APP_SRC(video_appsrc), 0, 0);
     gst_app_src_set_max_bytes(GST_APP_SRC(video_appsrc), 4 * 1024 * 1024);
 
-    GstCaps *video_caps = gst_caps_new_simple("video/x-h265",
-                                              "stream-format",
-                                              G_TYPE_STRING,
-                                              "byte-stream",
-                                              "alignment",
-                                              G_TYPE_STRING,
-                                              "au",
-                                              NULL);
-    if (video_caps == NULL) {
+    g_object_set(video_queue, "leaky", 2, NULL);
+    g_object_set(video_parse, "config-interval", -1, NULL);
+    g_object_set(mux, "writing-app", "pixelpilot-mini-rk", "streamable", TRUE, NULL);
+
+    gchar *output_path = recorder_make_unique_path(cfg->record.output_path);
+    if (output_path == NULL) {
         gst_object_unref(pipeline);
         gst_object_unref(video_appsrc);
         gst_object_unref(video_queue);
         gst_object_unref(video_parse);
         gst_object_unref(mux);
         gst_object_unref(filesink);
-        LOGE("Recorder: failed to allocate video caps");
+        LOGE("Recorder: failed to prepare output path");
         return FALSE;
     }
 
-    gst_app_src_set_caps(GST_APP_SRC(video_appsrc), video_caps);
-    gst_caps_unref(video_caps);
-
-    g_object_set(video_queue, "leaky", 2, NULL);
-    g_object_set(video_parse, "config-interval", -1, NULL);
-    g_object_set(mux, "writing-app", "pixelpilot-mini-rk", "streamable", TRUE, NULL);
-    g_object_set(filesink, "location", cfg->record.output_path, "async", FALSE, NULL);
+    g_object_set(filesink, "location", output_path, "async", FALSE, NULL);
 
     gst_bin_add_many(GST_BIN(pipeline), video_appsrc, video_queue, video_parse, mux, filesink, NULL);
 
     if (!gst_element_link_many(video_appsrc, video_queue, video_parse, NULL)) {
+        g_free(output_path);
         gst_object_unref(pipeline);
         LOGE("Recorder: failed to link video branch");
         return FALSE;
     }
 
     if (!gst_element_link(mux, filesink)) {
+        g_free(output_path);
         gst_object_unref(pipeline);
         LOGE("Recorder: failed to link mux to filesink");
         return FALSE;
@@ -411,12 +525,14 @@ gboolean recorder_start(Recorder *rec, const AppCfg *cfg, gboolean enable_audio)
             gst_element_release_request_pad(mux, video_sink_pad);
             gst_object_unref(video_sink_pad);
         }
+        g_free(output_path);
         gst_object_unref(pipeline);
         LOGE("Recorder: failed to obtain video pads");
         return FALSE;
     }
 
     if (gst_pad_link(video_src_pad, video_sink_pad) != GST_PAD_LINK_OK) {
+        g_free(output_path);
         gst_element_release_request_pad(mux, video_sink_pad);
         gst_object_unref(video_sink_pad);
         gst_object_unref(video_src_pad);
@@ -438,6 +554,7 @@ gboolean recorder_start(Recorder *rec, const AppCfg *cfg, gboolean enable_audio)
     if (state_ret == GST_STATE_CHANGE_FAILURE) {
         gst_element_set_state(pipeline, GST_STATE_NULL);
         gst_object_unref(pipeline);
+        g_free(output_path);
         LOGE("Recorder: failed to start pipeline");
         return FALSE;
     }
@@ -449,6 +566,7 @@ gboolean recorder_start(Recorder *rec, const AppCfg *cfg, gboolean enable_audio)
         if (state_ret == GST_STATE_CHANGE_FAILURE) {
             gst_element_set_state(pipeline, GST_STATE_NULL);
             gst_object_unref(pipeline);
+            g_free(output_path);
             LOGE("Recorder: pipeline did not reach playing state");
             return FALSE;
         }
@@ -463,6 +581,11 @@ gboolean recorder_start(Recorder *rec, const AppCfg *cfg, gboolean enable_audio)
     rec->audio_enabled = audio_enabled ? TRUE : FALSE;
     rec->running = TRUE;
     rec->logged_video_flow_error = FALSE;
+    rec->video_caps_set = FALSE;
+    if (rec->output_path != NULL) {
+        g_free(rec->output_path);
+    }
+    rec->output_path = output_path;
     if (!audio_enabled) {
         rec->audio_appsrc = NULL;
         if (rec->mux_audio_pad != NULL) {
@@ -473,19 +596,37 @@ gboolean recorder_start(Recorder *rec, const AppCfg *cfg, gboolean enable_audio)
     }
     g_mutex_unlock(&rec->lock);
 
+    if (video_caps != NULL) {
+        recorder_set_video_caps_if_needed(rec, video_caps);
+    }
+
     LOGI("Recorder: writing Matroska to %s (%s)",
-         cfg->record.output_path,
+         output_path,
          audio_enabled ? "audio enabled" : "video only");
 
     return TRUE;
 }
 
-void recorder_push_video_buffer(Recorder *rec, GstBuffer *buffer) {
+void recorder_push_video_buffer(Recorder *rec, GstBuffer *buffer, const GstCaps *caps) {
     if (rec == NULL || buffer == NULL) {
         if (buffer != NULL) {
             gst_buffer_unref(buffer);
         }
         return;
+    }
+
+    if (caps != NULL) {
+        recorder_set_video_caps_if_needed(rec, caps);
+    } else {
+        g_mutex_lock(&rec->lock);
+        gboolean warned = rec->logged_caps_warning;
+        if (!warned) {
+            rec->logged_caps_warning = TRUE;
+            g_mutex_unlock(&rec->lock);
+            LOGW("Recorder: missing video caps for buffer; stream headers may be incomplete");
+        } else {
+            g_mutex_unlock(&rec->lock);
+        }
     }
 
     GstAppSrc *appsrc = NULL;

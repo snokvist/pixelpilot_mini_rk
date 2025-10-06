@@ -45,7 +45,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
 | `[record].enable` | `true` starts writing the incoming stream to a Matroska file. |
-| `[record].path` | Output path for the Matroska recording. Setting this implicitly enables recording. |
+| `[record].path` | Base output path for the Matroska recording. A timestamp suffix is added on start so each run creates a unique file. |
 | `[record].audio` | `true` muxes the Opus stream when the custom UDP receiver is active; otherwise the file is video-only. |
 | `[restarts].limit` | Maximum automatic restarts allowed within the configured window. |
 | `[restarts].window-ms` | Rolling window (milliseconds) for counting automatic restarts. |
@@ -96,6 +96,8 @@ extra copies. Audio is appended directly from the UDP receiver when the Opus RTP
   the video. Audio capture requires the custom UDP receiver mode; the bare `udpsrc` pipeline only records video.
 
 When `[record].path` is provided the recorder starts automatically on launch and stops when the main pipeline shuts down. The
+recorder appends a `-YYYYMMDD-HHMMSS` timestamp (before the file extension when present) so each session produces a fresh file
+without overwriting earlier captures.
 output file is finalised cleanly on EOS or when `pipeline_stop` is invoked.
 
 ## UDP receiver statistics

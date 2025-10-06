@@ -1017,7 +1017,8 @@ static gpointer appsink_thread_func(gpointer data) {
             }
         }
         if (record_buf != NULL && recorder != NULL) {
-            recorder_push_video_buffer(recorder, record_buf);
+            const GstCaps *sample_caps = gst_sample_get_caps(sample);
+            recorder_push_video_buffer(recorder, record_buf, sample_caps);
         }
         gst_sample_unref(sample);
     }
@@ -1258,9 +1259,27 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
                 goto fail;
             }
         }
-        if (!recorder_start(ps->recorder, cfg, record_audio)) {
+        GstCaps *record_caps = NULL;
+        if (ps->video_sink != NULL) {
+            GstPad *sink_pad = gst_element_get_static_pad(ps->video_sink, "sink");
+            if (sink_pad != NULL) {
+                record_caps = gst_pad_get_current_caps(sink_pad);
+                if (record_caps == NULL) {
+                    record_caps = gst_pad_query_caps(sink_pad, NULL);
+                }
+                gst_object_unref(sink_pad);
+            }
+        }
+
+        if (!recorder_start(ps->recorder, cfg, record_audio, record_caps)) {
             LOGE("Failed to start recorder pipeline");
+            if (record_caps != NULL) {
+                gst_caps_unref(record_caps);
+            }
             goto fail;
+        }
+        if (record_caps != NULL) {
+            gst_caps_unref(record_caps);
         }
         ps->recorder_running = TRUE;
         if (ps->udp_receiver != NULL) {
