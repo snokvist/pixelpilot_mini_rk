@@ -21,10 +21,16 @@
 #include <unistd.h>
 
 static volatile sig_atomic_t g_exit_flag = 0;
+static volatile sig_atomic_t g_toggle_osd_flag = 0;
 
 static void on_sigint(int sig) {
     (void)sig;
     g_exit_flag = 1;
+}
+
+static void on_sigusr(int sig) {
+    (void)sig;
+    g_toggle_osd_flag = 1;
 }
 
 static long long ms_since(struct timespec newer, struct timespec older) {
@@ -48,6 +54,8 @@ int main(int argc, char **argv) {
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
     signal(SIGCHLD, SIG_DFL);
+    signal(SIGUSR1, on_sigusr);
+    signal(SIGUSR2, on_sigusr);
 
     int fd = open(cfg.card_path, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
@@ -172,6 +180,47 @@ int main(int argc, char **argv) {
                             usleep(backoff_ms * 1000);
                             pipeline_set_receiver_stats_enabled(&ps, FALSE);
                         }
+                    }
+                }
+            }
+        }
+
+        if (g_toggle_osd_flag) {
+            sig_atomic_t toggles = g_toggle_osd_flag;
+            g_toggle_osd_flag = 0;
+            for (sig_atomic_t i = 0; i < toggles; ++i) {
+                cfg.osd_enable = cfg.osd_enable ? 0 : 1;
+                if (!cfg.osd_enable) {
+                    LOGI("OSD toggle: disabling overlay");
+                    pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                    if (osd_is_active(&osd)) {
+                        osd_disable(fd, &osd);
+                    }
+                } else {
+                    LOGI("OSD toggle: enabling overlay");
+                    if (!connected) {
+                        LOGI("OSD toggle requested but no display is connected; will enable when possible.");
+                        continue;
+                    }
+                    if (!osd_is_enabled(&osd)) {
+                        osd_teardown(fd, &osd);
+                        if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
+                            pipeline_set_receiver_stats_enabled(&ps, TRUE);
+                            clock_gettime(CLOCK_MONOTONIC, &last_osd);
+                        } else {
+                            pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                            LOGW("OSD toggle: setup failed; overlay remains disabled.");
+                        }
+                    } else if (!osd_is_active(&osd)) {
+                        if (osd_enable(fd, &osd) == 0) {
+                            pipeline_set_receiver_stats_enabled(&ps, TRUE);
+                            clock_gettime(CLOCK_MONOTONIC, &last_osd);
+                        } else {
+                            pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                            LOGW("OSD toggle: enable failed; overlay remains disabled.");
+                        }
+                    } else {
+                        pipeline_set_receiver_stats_enabled(&ps, TRUE);
                     }
                 }
             }

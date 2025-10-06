@@ -123,6 +123,7 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
                       int audio_disabled, int restart_count, OSD *osd);
 int osd_is_enabled(const OSD *osd);
 int osd_is_active(const OSD *osd);
+int osd_enable(int fd, OSD *osd);
 void osd_disable(int fd, OSD *osd);
 void osd_teardown(int fd, OSD *osd);
 

@@ -2475,6 +2475,23 @@ int osd_is_active(const OSD *o) {
     return o->active;
 }
 
+int osd_enable(int fd, OSD *o) {
+    if (!o->enabled) {
+        return -1;
+    }
+    if (o->active) {
+        return 0;
+    }
+    if (!o->plane_id || !o->fb.fb_id) {
+        return -1;
+    }
+    if (osd_commit_enable(fd, o->crtc_id, o) != 0) {
+        return -1;
+    }
+    o->active = 1;
+    return 0;
+}
+
 void osd_disable(int fd, OSD *o) {
     if (!o->active) {
         return;
