@@ -821,6 +821,30 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "record") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->record.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "audio") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->record.audio = v;
+            return 0;
+        }
+        if (strcasecmp(key, "path") == 0 || strcasecmp(key, "file") == 0 || strcasecmp(key, "output") == 0 ||
+            strcasecmp(key, "location") == 0) {
+            ini_copy_string(cfg->record.output_path, sizeof(cfg->record.output_path), value);
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "cpu") == 0) {
         if (strcasecmp(key, "affinity") == 0) {
             return cfg_parse_cpu_list(value, cfg);

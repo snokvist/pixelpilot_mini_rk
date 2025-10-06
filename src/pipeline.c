@@ -3,6 +3,7 @@
 #include "pipeline.h"
 #include "logging.h"
 #include "splashlib.h"
+#include "recorder.h"
 
 #ifndef GST_USE_UNSTABLE_API
 #define GST_USE_UNSTABLE_API
@@ -991,7 +992,18 @@ static gpointer appsink_thread_func(gpointer data) {
         }
 
         GstBuffer *buffer = gst_sample_get_buffer(sample);
+        GstBuffer *record_buf = NULL;
+        Recorder *recorder = NULL;
+        gboolean recorder_active = FALSE;
+
         if (buffer != NULL) {
+            g_mutex_lock(&ps->lock);
+            recorder_active = ps->recorder_running;
+            recorder = ps->recorder;
+            g_mutex_unlock(&ps->lock);
+            if (recorder_active && recorder != NULL) {
+                record_buf = gst_buffer_ref(buffer);
+            }
             GstMapInfo map;
             if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
                 if (map.size > 0 && map.size <= max_packet) {
@@ -1003,6 +1015,9 @@ static gpointer appsink_thread_func(gpointer data) {
                 }
                 gst_buffer_unmap(buffer, &map);
             }
+        }
+        if (record_buf != NULL && recorder != NULL) {
+            recorder_push_video_buffer(recorder, record_buf);
         }
         gst_sample_unref(sample);
     }
@@ -1115,6 +1130,14 @@ static void cleanup_pipeline(PipelineState *ps) {
     }
     ps->appsink_thread_running = FALSE;
 
+    if (ps->udp_receiver != NULL) {
+        udp_receiver_set_audio_record_appsrc(ps->udp_receiver, NULL);
+    }
+
+    if (ps->recorder != NULL) {
+        recorder_stop(ps->recorder);
+    }
+
     if (ps->decoder != NULL) {
         video_decoder_free(ps->decoder);
         ps->decoder = NULL;
@@ -1132,6 +1155,11 @@ static void cleanup_pipeline(PipelineState *ps) {
         gst_object_unref(ps->pipeline);
         ps->pipeline = NULL;
     }
+    if (ps->recorder != NULL) {
+        recorder_free(ps->recorder);
+        ps->recorder = NULL;
+    }
+    ps->recorder_running = FALSE;
     g_mutex_lock(&ps->lock);
     ps->bus_thread_running = FALSE;
     ps->encountered_error = FALSE;
@@ -1176,6 +1204,7 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->pipeline_start_ns = monotonic_time_ns();
     ps->last_udp_activity_ns = 0;
     ps->splash_active = FALSE;
+    ps->recorder_running = FALSE;
 
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;
@@ -1215,6 +1244,39 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     }
 
     ps->pipeline_start_ns = monotonic_time_ns();
+
+    gboolean want_record = cfg->record.enable && cfg->record.output_path[0] != '\0';
+    gboolean record_audio = want_record && cfg->record.audio && cfg->aud_pt >= 0 && ps->udp_receiver != NULL;
+    if (want_record && cfg->record.audio && cfg->aud_pt >= 0 && ps->udp_receiver == NULL) {
+        LOGW("Recorder audio requested but UDP receiver unavailable; recording without audio");
+    }
+    if (want_record) {
+        if (ps->recorder == NULL) {
+            ps->recorder = recorder_new();
+            if (ps->recorder == NULL) {
+                LOGE("Failed to allocate recorder state");
+                goto fail;
+            }
+        }
+        if (!recorder_start(ps->recorder, cfg, record_audio)) {
+            LOGE("Failed to start recorder pipeline");
+            goto fail;
+        }
+        ps->recorder_running = TRUE;
+        if (ps->udp_receiver != NULL) {
+            GstAppSrc *record_audio_src = NULL;
+            if (record_audio) {
+                record_audio_src = recorder_get_audio_appsrc(ps->recorder);
+                if (record_audio_src == NULL) {
+                    LOGW("Recorder audio appsrc unavailable; recording video only");
+                }
+            }
+            udp_receiver_set_audio_record_appsrc(ps->udp_receiver,
+                                                 record_audio && record_audio_src != NULL ? record_audio_src : NULL);
+        }
+    } else if (ps->udp_receiver != NULL) {
+        udp_receiver_set_audio_record_appsrc(ps->udp_receiver, NULL);
+    }
 
     if (drm_fd < 0) {
         LOGE("Invalid DRM file descriptor");
@@ -1295,11 +1357,25 @@ void pipeline_stop(PipelineState *ps, int wait_ms_total) {
         return;
     }
 
+    Recorder *recorder_to_stop = NULL;
+
     g_mutex_lock(&ps->lock);
     ps->state = PIPELINE_STOPPING;
     ps->stop_requested = TRUE;
     ps->decoder_running = FALSE;
+    if (ps->recorder_running) {
+        recorder_to_stop = ps->recorder;
+    }
+    ps->recorder_running = FALSE;
     g_mutex_unlock(&ps->lock);
+
+    if (ps->udp_receiver != NULL) {
+        udp_receiver_set_audio_record_appsrc(ps->udp_receiver, NULL);
+    }
+
+    if (recorder_to_stop != NULL) {
+        recorder_stop(recorder_to_stop);
+    }
 
     if (ps->udp_receiver != NULL) {
         udp_receiver_stop(ps->udp_receiver);

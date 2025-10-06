@@ -44,6 +44,9 @@ to the defaults listed in `src/config.c` when omitted.
 | `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
+| `[record].enable` | `true` starts writing the incoming stream to a Matroska file. |
+| `[record].path` | Output path for the Matroska recording. Setting this implicitly enables recording. |
+| `[record].audio` | `true` muxes the Opus stream when the custom UDP receiver is active; otherwise the file is video-only. |
 | `[restarts].limit` | Maximum automatic restarts allowed within the configured window. |
 | `[restarts].window-ms` | Rolling window (milliseconds) for counting automatic restarts. |
 | `[gst].log` | `true` forces `GST_DEBUG=3` unless already set in the environment. |
@@ -79,6 +82,21 @@ will then create a bare `udpsrc` element and UEP/receiver statistics are disable
 Use this mode when integrating with external tooling or experimenting with alternative buffering strategies where the
 application-level receiver is unnecessary. Revert with `--custom-sink receiver` (or remove the INI override) to restore the
 default behaviour and regain access to the telemetry counters.
+
+## Matroska recording
+
+PixelPilot can capture the incoming RTP stream to a Matroska container without adding a second decode branch. The recorder feeds
+the same H.265 access units extracted by the video appsink into a dedicated muxer, so the GPU continues to receive data with no
+extra copies. Audio is appended directly from the UDP receiver when the Opus RTP payload is available.
+
+* `--record /path/to/output.mkv` enables recording and selects the target file.
+* `--record-enable` or `[record].enable = true` use the path from configuration without changing it.
+* `--record-disable` (or `[record].enable = false`) turns the feature off.
+* `--record-audio` / `--record-no-audio` (or `[record].audio = true/false`) control whether the Opus RTP stream is muxed alongside
+  the video. Audio capture requires the custom UDP receiver mode; the bare `udpsrc` pipeline only records video.
+
+When `[record].path` is provided the recorder starts automatically on launch and stops when the main pipeline shuts down. The
+output file is finalised cleanly on EOS or when `pipeline_stop` is invoked.
 
 ## UDP receiver statistics
 

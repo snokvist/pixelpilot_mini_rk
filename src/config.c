@@ -27,6 +27,11 @@ static void usage(const char *prog) {
             "  --no-audio                   (drop audio branch entirely)\n"
             "  --audio-optional             (auto-fallback to fakesink on failures; default)\n"
             "  --audio-required             (disable auto-fallback; keep real audio only)\n"
+            "  --record PATH                (enable recording to PATH)\n"
+            "  --record-enable              (enable recording using configured path)\n"
+            "  --record-disable             (disable recording)\n"
+            "  --record-audio               (include audio track when recording)\n"
+            "  --record-no-audio            (disable audio track when recording)\n"
             "  --osd                        (enable OSD overlay plane with stats)\n"
             "  --osd-plane-id N             (force OSD plane id; default auto)\n"
             "  --osd-refresh-ms N           (default: 500)\n"
@@ -117,6 +122,10 @@ void cfg_defaults(AppCfg *c) {
         c->splash.sequences[i].start_frame = -1;
         c->splash.sequences[i].end_frame = -1;
     }
+
+    c->record.enable = 0;
+    c->record.audio = 1;
+    c->record.output_path[0] = '\0';
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -262,6 +271,20 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->audio_optional = 1;
         } else if (!strcmp(argv[i], "--audio-required")) {
             cfg->audio_optional = 0;
+        } else if (!strcmp(argv[i], "--record") && i + 1 < argc) {
+            cli_copy_string(cfg->record.output_path, sizeof(cfg->record.output_path), argv[++i]);
+            cfg->record.enable = 1;
+        } else if (!strcmp(argv[i], "--record") && i + 1 >= argc) {
+            LOGE("--record requires a file path argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--record-enable")) {
+            cfg->record.enable = 1;
+        } else if (!strcmp(argv[i], "--record-disable")) {
+            cfg->record.enable = 0;
+        } else if (!strcmp(argv[i], "--record-audio")) {
+            cfg->record.audio = 1;
+        } else if (!strcmp(argv[i], "--record-no-audio")) {
+            cfg->record.audio = 0;
         } else if (!strcmp(argv[i], "--osd")) {
             cfg->osd_enable = 1;
         } else if (!strcmp(argv[i], "--osd-plane-id") && i + 1 < argc) {

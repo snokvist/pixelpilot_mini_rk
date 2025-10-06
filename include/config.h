@@ -34,6 +34,12 @@ typedef struct {
 } SplashCfg;
 
 typedef struct {
+    int enable;
+    int audio;
+    char output_path[PATH_MAX];
+} RecordCfg;
+
+typedef struct {
     char card_path[64];
     char connector_name[32];
     char config_path[PATH_MAX];
@@ -66,6 +72,7 @@ typedef struct {
     OsdLayout osd_layout;
 
     SplashCfg splash;
+    RecordCfg record;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);
