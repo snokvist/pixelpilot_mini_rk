@@ -48,6 +48,7 @@ typedef struct {
     guint64 pipeline_start_ns;
     guint64 last_udp_activity_ns;
     struct VideoRecorder *recorder;
+    GMutex recorder_lock;
 } PipelineState;
 
 #include "config.h"
@@ -57,5 +58,8 @@ void pipeline_stop(PipelineState *ps, int wait_ms_total);
 void pipeline_poll_child(PipelineState *ps);
 int pipeline_get_receiver_stats(const PipelineState *ps, UdpReceiverStats *stats);
 void pipeline_set_receiver_stats_enabled(PipelineState *ps, gboolean enabled);
+gboolean pipeline_is_recording(const PipelineState *ps);
+int pipeline_enable_recording(PipelineState *ps, const RecordCfg *cfg);
+void pipeline_disable_recording(PipelineState *ps);
 
 #endif // PIPELINE_H

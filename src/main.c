@@ -22,6 +22,7 @@
 
 static volatile sig_atomic_t g_exit_flag = 0;
 static volatile sig_atomic_t g_toggle_osd_flag = 0;
+static volatile sig_atomic_t g_toggle_record_flag = 0;
 
 static void on_sigint(int sig) {
     (void)sig;
@@ -29,8 +30,11 @@ static void on_sigint(int sig) {
 }
 
 static void on_sigusr(int sig) {
-    (void)sig;
-    g_toggle_osd_flag = 1;
+    if (sig == SIGUSR1) {
+        g_toggle_osd_flag++;
+    } else if (sig == SIGUSR2) {
+        g_toggle_record_flag++;
+    }
 }
 
 static long long ms_since(struct timespec newer, struct timespec older) {
@@ -222,6 +226,35 @@ int main(int argc, char **argv) {
                     } else {
                         pipeline_set_receiver_stats_enabled(&ps, TRUE);
                     }
+                }
+            }
+        }
+
+        if (g_toggle_record_flag) {
+            sig_atomic_t toggles = g_toggle_record_flag;
+            g_toggle_record_flag = 0;
+            for (sig_atomic_t i = 0; i < toggles; ++i) {
+                if (!cfg.record.enable) {
+                    if (cfg.record.output_path[0] == '\0') {
+                        LOGW("Recording toggle: cannot enable MP4 capture because no output path is configured.");
+                        continue;
+                    }
+                    LOGI("Recording toggle: enabling MP4 capture");
+                    if (ps.state == PIPELINE_RUNNING) {
+                        if (pipeline_enable_recording(&ps, &cfg.record) != 0) {
+                            LOGW("Recording toggle: failed to start MP4 writer; continuing without recording.");
+                            continue;
+                        }
+                    } else {
+                        LOGI("Recording toggle: pipeline stopped; MP4 writer will start when the pipeline restarts.");
+                    }
+                    cfg.record.enable = 1;
+                } else {
+                    LOGI("Recording toggle: disabling MP4 capture");
+                    if (ps.state == PIPELINE_RUNNING) {
+                        pipeline_disable_recording(&ps);
+                    }
+                    cfg.record.enable = 0;
                 }
             }
         }
