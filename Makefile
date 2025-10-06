@@ -14,7 +14,7 @@ PKG_MPPCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags rockchip-mpp)
 PKG_MPPLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs rockchip-mpp)
 
 CFLAGS ?= -O2 -Wall
-CFLAGS += -Iinclude
+CFLAGS += -Iinclude -Ithird_party/minimp4
 
 # Allow opt-in control over NEON usage while auto-detecting safe defaults for
 # supported ARM toolchains. Users can override by invoking `make ENABLE_NEON=0`

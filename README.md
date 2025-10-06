@@ -44,6 +44,9 @@ to the defaults listed in `src/config.c` when omitted.
 | `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
+| `[record].enable` | `true` enables MP4 recording using the internal minimp4 writer. |
+| `[record].directory` | Directory where timestamped recordings are written (equivalent to `--record-dir`). |
+| `[record].mode` | MP4 muxing strategy: `standard` (default), `sequential`, or `fragmented` (fMP4). |
 | `[restarts].limit` | Maximum automatic restarts allowed within the configured window. |
 | `[restarts].window-ms` | Rolling window (milliseconds) for counting automatic restarts. |
 | `[gst].log` | `true` forces `GST_DEBUG=3` unless already set in the environment. |
@@ -146,3 +149,18 @@ end = 359
 
 Provide an H.265 stream with repeated key frames (all-I-frame content works best). Each sequence should align with GOP
 boundaries to avoid decoding artifacts. Disable the feature by omitting the `[splash]` section or setting `enable = false`.
+
+## Recording the incoming stream
+
+Use `--record-dir /path/to/output` or configure `[record]` in the INI file to capture the video arriving at the appsink to MP4
+files. The recorder uses [minimp4](https://github.com/lieff/minimp4) to mux Annex-B H.265 video from the display pipeline along
+with 48 kHz PCM audio whenever the audio pipeline is active. Each run produces a timestamped file such as
+`pixelpilot-20240101-120000.mp4` inside the configured directory. Audio recording is skipped automatically when the audio branch
+is disabled or unavailable, but video capture continues in all modes. Select the muxer behaviour with `--record-mode` (or
+`[record].mode` in the INI):
+
+- `standard` (default) emits a self-contained MP4 that seeks while finalising the header. Use this when writing to regular
+  filesystems.
+- `sequential` avoids post-write seeks so slow or sequential-only storage targets are not penalised.
+- `fragmented` enables minimp4's fragmented MP4 output (fMP4), suitable for progressive consumption by streaming players. This
+  mode implies sequential writing.

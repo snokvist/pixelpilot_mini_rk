@@ -14,6 +14,7 @@ typedef enum {
 } PipelineStateEnum;
 
 struct Splash;
+struct Recorder;
 
 typedef struct {
     PipelineStateEnum state;
@@ -46,6 +47,21 @@ typedef struct {
     guint splash_idle_timeout_ms;
     guint64 pipeline_start_ns;
     guint64 last_udp_activity_ns;
+    struct Recorder *recorder;
+    gboolean recording_enabled;
+    gboolean recording_active;
+    GThread *audio_record_thread;
+    gboolean audio_record_thread_running;
+    GstElement *audio_record_sink;
+    GstElement *audio_record_queue;
+    GstElement *audio_tee;
+    guint audio_record_channels;
+    guint audio_record_rate;
+    guint audio_record_bytes_per_sample;
+    GstPad *audio_tee_play_pad;
+    GstPad *audio_tee_record_pad;
+    int video_width;
+    int video_height;
 } PipelineState;
 
 #include "config.h"

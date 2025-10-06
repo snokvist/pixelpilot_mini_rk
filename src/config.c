@@ -30,6 +30,9 @@ static void usage(const char *prog) {
             "  --osd                        (enable OSD overlay plane with stats)\n"
             "  --osd-plane-id N             (force OSD plane id; default auto)\n"
             "  --osd-refresh-ms N           (default: 500)\n"
+            "  --record-dir PATH            (enable MP4 recording to directory)\n"
+            "  --record-mode MODE           (standard|sequential|fragmented)\n"
+            "  --no-record                  (disable recording, overriding config)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -48,6 +51,19 @@ static const CustomSinkAlias kCustomSinkAliases[] = {
     {"udpsrc", CUSTOM_SINK_UDPSRC},
     {"gst-udpsrc", CUSTOM_SINK_UDPSRC},
     {"gst", CUSTOM_SINK_UDPSRC},
+};
+
+typedef struct {
+    const char *name;
+    RecordMuxMode mode;
+} RecordMuxAlias;
+
+static const RecordMuxAlias kRecordMuxAliases[] = {
+    {"standard", RECORD_MUX_STANDARD},
+    {"default", RECORD_MUX_STANDARD},
+    {"sequential", RECORD_MUX_SEQUENTIAL},
+    {"fragmented", RECORD_MUX_FRAGMENTED},
+    {"fmp4", RECORD_MUX_FRAGMENTED},
 };
 
 int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out) {
@@ -69,6 +85,32 @@ const char *cfg_custom_sink_mode_name(CustomSinkMode mode) {
         return "receiver";
     case CUSTOM_SINK_UDPSRC:
         return "udpsrc";
+    default:
+        return "unknown";
+    }
+}
+
+int cfg_parse_record_mux_mode(const char *value, RecordMuxMode *mode_out) {
+    if (value == NULL || mode_out == NULL) {
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(kRecordMuxAliases) / sizeof(kRecordMuxAliases[0]); ++i) {
+        if (strcasecmp(value, kRecordMuxAliases[i].name) == 0) {
+            *mode_out = kRecordMuxAliases[i].mode;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *cfg_record_mux_mode_name(RecordMuxMode mode) {
+    switch (mode) {
+    case RECORD_MUX_STANDARD:
+        return "standard";
+    case RECORD_MUX_SEQUENTIAL:
+        return "sequential";
+    case RECORD_MUX_FRAGMENTED:
+        return "fragmented";
     default:
         return "unknown";
     }
@@ -117,6 +159,10 @@ void cfg_defaults(AppCfg *c) {
         c->splash.sequences[i].start_frame = -1;
         c->splash.sequences[i].end_frame = -1;
     }
+
+    c->record.enable = 0;
+    c->record.directory[0] = '\0';
+    c->record.mux_mode = RECORD_MUX_STANDARD;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -268,6 +314,23 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->osd_plane_id = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--osd-refresh-ms") && i + 1 < argc) {
             cfg->osd_refresh_ms = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--record-dir") && i + 1 < argc) {
+            cfg->record.enable = 1;
+            cli_copy_string(cfg->record.directory, sizeof(cfg->record.directory), argv[++i]);
+        } else if (!strcmp(argv[i], "--record-mode") && i + 1 < argc) {
+            const char *mode_str = argv[++i];
+            RecordMuxMode mode;
+            if (cfg_parse_record_mux_mode(mode_str, &mode) != 0) {
+                LOGE("Unknown record mux mode '%s'", mode_str);
+                return -1;
+            }
+            cfg->record.mux_mode = mode;
+        } else if (!strcmp(argv[i], "--record-mode")) {
+            LOGE("--record-mode requires an argument (standard|sequential|fragmented)");
+            return -1;
+        } else if (!strcmp(argv[i], "--no-record")) {
+            cfg->record.enable = 0;
+            cfg->record.directory[0] = '\0';
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {

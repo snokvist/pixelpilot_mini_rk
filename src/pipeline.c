@@ -2,6 +2,7 @@
 
 #include "pipeline.h"
 #include "logging.h"
+#include "recorder.h"
 #include "splashlib.h"
 
 #ifndef GST_USE_UNSTABLE_API
@@ -482,12 +483,25 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     GstElement *audio_queue_sink = NULL;
     GstElement *audio_sink = NULL;
     GstCaps *audio_caps = NULL;
+    GstElement *audio_capsfilter = NULL;
+    GstElement *audio_tee = NULL;
+    GstElement *audio_queue_record = NULL;
+    GstElement *audio_record_appsink = NULL;
+    GstCaps *audio_record_caps = NULL;
 
     release_selector_pad(ps->input_selector, &ps->selector_udp_pad);
     release_selector_pad(ps->input_selector, &ps->selector_splash_pad);
     ps->input_selector = NULL;
     ps->splash_active = FALSE;
     ps->splash_available = FALSE;
+    ps->audio_record_sink = NULL;
+    ps->audio_record_queue = NULL;
+    ps->audio_tee = NULL;
+    ps->audio_tee_play_pad = NULL;
+    ps->audio_tee_record_pad = NULL;
+    ps->audio_record_channels = 0;
+    ps->audio_record_rate = 0;
+    ps->audio_record_bytes_per_sample = 0;
 
     pipeline = gst_pipeline_new("pixelpilot-receiver");
     CHECK_ELEM(pipeline, "pipeline");
@@ -576,6 +590,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     }
 
     gboolean enable_audio = (!cfg->no_audio && cfg->aud_pt >= 0 && !audio_disabled);
+    gboolean want_record_audio = (cfg->record.enable && cfg->record.directory[0] != '\0');
     if (enable_audio) {
         audio_appsrc = gst_element_factory_make("appsrc", "udp_audio_appsrc");
         audio_queue_start = gst_element_factory_make("queue", "audio_queue_start");
@@ -585,6 +600,12 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         audio_resample = gst_element_factory_make("audioresample", "audio_resample");
         audio_queue_sink = gst_element_factory_make("queue", "audio_queue_sink");
         audio_sink = gst_element_factory_make("alsasink", "audio_sink");
+        if (want_record_audio) {
+            audio_capsfilter = gst_element_factory_make("capsfilter", "audio_capsfilter");
+            audio_tee = gst_element_factory_make("tee", "audio_tee");
+            audio_queue_record = gst_element_factory_make("queue", "audio_queue_record");
+            audio_record_appsink = gst_element_factory_make("appsink", "audio_record_sink");
+        }
 
         CHECK_ELEM(audio_appsrc, "appsrc");
         CHECK_ELEM(audio_queue_start, "queue");
@@ -594,6 +615,12 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         CHECK_ELEM(audio_resample, "audioresample");
         CHECK_ELEM(audio_queue_sink, "queue");
         CHECK_ELEM(audio_sink, "alsasink");
+        if (want_record_audio) {
+            CHECK_ELEM(audio_capsfilter, "capsfilter");
+            CHECK_ELEM(audio_tee, "tee");
+            CHECK_ELEM(audio_queue_record, "queue");
+            CHECK_ELEM(audio_record_appsink, "appsink");
+        }
 
         g_object_set(audio_appsrc, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
                      GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, "max-bytes", (guint64)(1024 * 1024), NULL);
@@ -615,12 +642,114 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         g_object_set(audio_queue_sink, "leaky", 2, NULL);
         g_object_set(audio_sink, "device", cfg->aud_dev, "sync", FALSE, "async", FALSE, NULL);
 
-        gst_bin_add_many(GST_BIN(pipeline), audio_appsrc, audio_queue_start, audio_depay, audio_decoder,
-                         audio_convert, audio_resample, audio_queue_sink, audio_sink, NULL);
-        if (!gst_element_link_many(audio_appsrc, audio_queue_start, audio_depay, audio_decoder, audio_convert,
-                                   audio_resample, audio_queue_sink, audio_sink, NULL)) {
+        if (want_record_audio) {
+            g_object_set(audio_queue_record, "leaky", 2, "max-size-buffers", 64, "max-size-time", (guint64)0,
+                         "max-size-bytes", (guint64)(2 * 1024 * 1024), NULL);
+        }
+
+        if (want_record_audio) {
+            gst_bin_add_many(GST_BIN(pipeline), audio_appsrc, audio_queue_start, audio_depay, audio_decoder,
+                             audio_convert, audio_resample, audio_capsfilter, audio_tee, audio_queue_sink, audio_sink,
+                             audio_queue_record, audio_record_appsink, NULL);
+        } else {
+            gst_bin_add_many(GST_BIN(pipeline), audio_appsrc, audio_queue_start, audio_depay, audio_decoder,
+                             audio_convert, audio_resample, audio_queue_sink, audio_sink, NULL);
+        }
+
+        if (want_record_audio) {
+            audio_record_caps = gst_caps_new_simple("audio/x-raw", "format", G_TYPE_STRING, "S16LE",
+                                                    "layout", G_TYPE_STRING, "interleaved", "rate", G_TYPE_INT, 48000,
+                                                    "channels", G_TYPE_INT, 2, NULL);
+            if (audio_record_caps == NULL) {
+                LOGE("Failed to allocate raw audio caps for recorder");
+                goto fail;
+            }
+            g_object_set(audio_capsfilter, "caps", audio_record_caps, NULL);
+            gst_app_sink_set_caps(GST_APP_SINK(audio_record_appsink), audio_record_caps);
+            gst_caps_unref(audio_record_caps);
+            audio_record_caps = NULL;
+        }
+
+        gboolean audio_link_ok = FALSE;
+        if (want_record_audio) {
+            audio_link_ok = gst_element_link_many(audio_appsrc, audio_queue_start, audio_depay, audio_decoder,
+                                                 audio_convert, audio_resample, audio_capsfilter, audio_tee, NULL);
+        } else {
+            audio_link_ok = gst_element_link_many(audio_appsrc, audio_queue_start, audio_depay, audio_decoder,
+                                                 audio_convert, audio_resample, audio_queue_sink, audio_sink, NULL);
+        }
+        if (!audio_link_ok) {
             LOGE("Failed to link audio branch for UDP receiver passthrough");
             goto fail;
+        }
+
+        if (want_record_audio) {
+            GstPad *tee_play_pad = gst_element_get_request_pad(audio_tee, "src_%u");
+            GstPad *queue_sink_pad = gst_element_get_static_pad(audio_queue_sink, "sink");
+            if (tee_play_pad == NULL || queue_sink_pad == NULL) {
+                LOGE("Failed to obtain tee pads for audio playback branch");
+                if (tee_play_pad != NULL) {
+                    gst_element_release_request_pad(audio_tee, tee_play_pad);
+                    gst_object_unref(tee_play_pad);
+                }
+                if (queue_sink_pad != NULL) {
+                    gst_object_unref(queue_sink_pad);
+                }
+                goto fail;
+            }
+            if (gst_pad_link(tee_play_pad, queue_sink_pad) != GST_PAD_LINK_OK) {
+                LOGE("Failed to link audio tee to playback queue");
+                gst_element_release_request_pad(audio_tee, tee_play_pad);
+                gst_object_unref(tee_play_pad);
+                gst_object_unref(queue_sink_pad);
+                goto fail;
+            }
+            gst_object_unref(queue_sink_pad);
+
+            GstPad *tee_record_pad = gst_element_get_request_pad(audio_tee, "src_%u");
+            GstPad *record_sink_pad = gst_element_get_static_pad(audio_queue_record, "sink");
+            if (tee_record_pad == NULL || record_sink_pad == NULL) {
+                LOGE("Failed to obtain tee pads for audio recorder branch");
+                if (tee_record_pad != NULL) {
+                    gst_element_release_request_pad(audio_tee, tee_record_pad);
+                    gst_object_unref(tee_record_pad);
+                }
+                if (record_sink_pad != NULL) {
+                    gst_object_unref(record_sink_pad);
+                }
+                goto fail;
+            }
+            if (gst_pad_link(tee_record_pad, record_sink_pad) != GST_PAD_LINK_OK) {
+                LOGE("Failed to link audio tee to recorder queue");
+                gst_element_release_request_pad(audio_tee, tee_record_pad);
+                gst_object_unref(tee_record_pad);
+                gst_object_unref(record_sink_pad);
+                goto fail;
+            }
+            gst_object_unref(record_sink_pad);
+
+            if (!gst_element_link_many(audio_queue_sink, audio_sink, NULL)) {
+                LOGE("Failed to link audio playback queue to sink");
+                goto fail;
+            }
+            if (!gst_element_link_many(audio_queue_record, audio_record_appsink, NULL)) {
+                LOGE("Failed to link audio recorder branch");
+                goto fail;
+            }
+
+            g_object_set(audio_record_appsink, "emit-signals", FALSE, "sync", FALSE, "drop", FALSE,
+                         "max-buffers", 16, NULL);
+            gst_app_sink_set_max_buffers(GST_APP_SINK(audio_record_appsink), 16);
+            gst_app_sink_set_drop(GST_APP_SINK(audio_record_appsink), FALSE);
+
+            ps->audio_record_sink = audio_record_appsink;
+            ps->audio_record_queue = audio_queue_record;
+            ps->audio_tee = audio_tee;
+            ps->audio_tee_play_pad = tee_play_pad;
+            ps->audio_tee_record_pad = tee_record_pad;
+            ps->audio_record_channels = 2;
+            ps->audio_record_rate = 48000;
+            ps->audio_record_bytes_per_sample = 2;
         }
 
         if (receiver != NULL) {
@@ -647,8 +776,23 @@ fail:
     if (audio_caps != NULL) {
         gst_caps_unref(audio_caps);
     }
+    if (audio_record_caps != NULL) {
+        gst_caps_unref(audio_record_caps);
+    }
     if (receiver != NULL) {
         udp_receiver_destroy(receiver);
+    }
+    if (audio_record_appsink != NULL && GST_OBJECT_PARENT(audio_record_appsink) == NULL) {
+        gst_object_unref(audio_record_appsink);
+    }
+    if (audio_queue_record != NULL && GST_OBJECT_PARENT(audio_queue_record) == NULL) {
+        gst_object_unref(audio_queue_record);
+    }
+    if (audio_tee != NULL && GST_OBJECT_PARENT(audio_tee) == NULL) {
+        gst_object_unref(audio_tee);
+    }
+    if (audio_capsfilter != NULL && GST_OBJECT_PARENT(audio_capsfilter) == NULL) {
+        gst_object_unref(audio_capsfilter);
     }
     if (audio_sink != NULL && GST_OBJECT_PARENT(audio_sink) == NULL) {
         gst_object_unref(audio_sink);
@@ -960,6 +1104,66 @@ static gboolean set_enum_property_by_nick(GObject *object, const char *property,
     return success;
 }
 
+static gpointer audio_record_thread_func(gpointer data) {
+    PipelineState *ps = (PipelineState *)data;
+    GstAppSink *appsink = ps->audio_record_sink != NULL ? GST_APP_SINK(ps->audio_record_sink) : NULL;
+    if (appsink == NULL) {
+        g_mutex_lock(&ps->lock);
+        ps->audio_record_thread_running = FALSE;
+        g_mutex_unlock(&ps->lock);
+        return NULL;
+    }
+
+    while (TRUE) {
+        g_mutex_lock(&ps->lock);
+        gboolean stop_requested = ps->stop_requested;
+        gboolean decoder_running = ps->decoder_running;
+        gboolean recording_active = ps->recording_active;
+        g_mutex_unlock(&ps->lock);
+
+        if (stop_requested || !decoder_running || !recording_active) {
+            break;
+        }
+
+        GstSample *sample = gst_app_sink_try_pull_sample(appsink, 100 * GST_MSECOND);
+        if (sample == NULL) {
+            continue;
+        }
+
+        GstBuffer *buffer = gst_sample_get_buffer(sample);
+        if (buffer != NULL && ps->recorder != NULL) {
+            GstMapInfo map;
+            if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                guint samples = 0;
+                if (ps->audio_record_channels > 0 && ps->audio_record_bytes_per_sample > 0) {
+                    samples = (guint)(map.size /
+                                      (ps->audio_record_channels * ps->audio_record_bytes_per_sample));
+                }
+                GstClockTime duration = GST_BUFFER_DURATION(buffer);
+                if (duration != GST_CLOCK_TIME_NONE && ps->audio_record_rate > 0) {
+                    guint64 duration_samples = duration * ps->audio_record_rate;
+                    duration_samples += GST_SECOND / 2;
+                    duration_samples /= GST_SECOND;
+                    if (duration_samples > 0) {
+                        samples = (guint)duration_samples;
+                    }
+                }
+                if (samples > 0) {
+                    recorder_push_audio(ps->recorder, map.data, map.size, samples);
+                }
+                gst_buffer_unmap(buffer, &map);
+            }
+        }
+
+        gst_sample_unref(sample);
+    }
+
+    g_mutex_lock(&ps->lock);
+    ps->audio_record_thread_running = FALSE;
+    g_mutex_unlock(&ps->lock);
+    return NULL;
+}
+
 static gpointer appsink_thread_func(gpointer data) {
     PipelineState *ps = (PipelineState *)data;
     GstAppSink *appsink = ps->video_sink != NULL ? GST_APP_SINK(ps->video_sink) : NULL;
@@ -994,6 +1198,10 @@ static gpointer appsink_thread_func(gpointer data) {
         if (buffer != NULL) {
             GstMapInfo map;
             if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                if (map.size > 0 && ps->recorder != NULL && ps->recording_active) {
+                    GstClockTime duration = GST_BUFFER_DURATION(buffer);
+                    recorder_push_video(ps->recorder, map.data, map.size, duration);
+                }
                 if (map.size > 0 && map.size <= max_packet) {
                     if (video_decoder_feed(ps->decoder, map.data, map.size) != 0) {
                         LOGV("Video decoder feed busy; retrying");
@@ -1109,6 +1317,39 @@ static gpointer bus_thread_func(gpointer data) {
 }
 
 static void cleanup_pipeline(PipelineState *ps) {
+    if (ps->audio_record_thread != NULL) {
+        g_thread_join(ps->audio_record_thread);
+        ps->audio_record_thread = NULL;
+    }
+    ps->audio_record_thread_running = FALSE;
+
+    if (ps->recorder != NULL) {
+        recorder_close(ps->recorder);
+        recorder_free(ps->recorder);
+        ps->recorder = NULL;
+        ps->recording_active = FALSE;
+    }
+
+    if (ps->audio_tee != NULL) {
+        if (ps->audio_tee_play_pad != NULL) {
+            gst_element_release_request_pad(ps->audio_tee, ps->audio_tee_play_pad);
+            gst_object_unref(ps->audio_tee_play_pad);
+            ps->audio_tee_play_pad = NULL;
+        }
+        if (ps->audio_tee_record_pad != NULL) {
+            gst_element_release_request_pad(ps->audio_tee, ps->audio_tee_record_pad);
+            gst_object_unref(ps->audio_tee_record_pad);
+            ps->audio_tee_record_pad = NULL;
+        }
+        ps->audio_tee = NULL;
+    }
+
+    ps->audio_record_sink = NULL;
+    ps->audio_record_queue = NULL;
+    ps->audio_record_channels = 0;
+    ps->audio_record_rate = 0;
+    ps->audio_record_bytes_per_sample = 0;
+
     if (ps->appsink_thread != NULL) {
         g_thread_join(ps->appsink_thread);
         ps->appsink_thread = NULL;
@@ -1167,6 +1408,21 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->decoder_running = FALSE;
     ps->cfg = cfg;
     ps->bus_thread_cpu_slot = 0;
+    ps->recorder = NULL;
+    ps->recording_enabled = (cfg->record.enable && cfg->record.directory[0] != '\0') ? TRUE : FALSE;
+    ps->recording_active = FALSE;
+    ps->audio_record_thread = NULL;
+    ps->audio_record_thread_running = FALSE;
+    ps->audio_record_sink = NULL;
+    ps->audio_record_queue = NULL;
+    ps->audio_tee = NULL;
+    ps->audio_tee_play_pad = NULL;
+    ps->audio_tee_record_pad = NULL;
+    ps->audio_record_channels = 0;
+    ps->audio_record_rate = 0;
+    ps->audio_record_bytes_per_sample = 0;
+    ps->video_width = ms->mode_w;
+    ps->video_height = ms->mode_h;
 
     if (cfg->splash.idle_timeout_ms > 0) {
         ps->splash_idle_timeout_ms = (guint)cfg->splash.idle_timeout_ms;
@@ -1197,6 +1453,26 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     } else {
         LOGE("Unknown custom sink mode %d", cfg->custom_sink);
         goto fail;
+    }
+
+    int audio_disabled_effective = (audio_disabled || cfg->no_audio || cfg->aud_pt < 0 || force_audio_disabled) ? 1 : 0;
+    ps->audio_disabled = audio_disabled_effective;
+
+    if (ps->recording_enabled) {
+        gboolean record_audio = (!ps->audio_disabled && ps->audio_record_sink != NULL && ps->audio_record_channels > 0 &&
+                                 ps->audio_record_rate > 0 && ps->audio_record_bytes_per_sample > 0);
+        ps->recorder = recorder_open(&cfg->record, ps->video_width, ps->video_height, record_audio, ps->audio_record_rate,
+                                     ps->audio_record_channels, ps->audio_record_bytes_per_sample);
+        if (ps->recorder == NULL) {
+            LOGW("Failed to initialise recorder; disabling recording");
+            ps->recording_enabled = FALSE;
+            ps->recording_active = FALSE;
+        } else {
+            ps->recording_active = TRUE;
+            if (!record_audio && ps->audio_record_sink != NULL) {
+                LOGI("Recorder initialised without audio capture; recording video only");
+            }
+        }
     }
 
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);
@@ -1249,6 +1525,15 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         goto fail;
     }
 
+    if (ps->recorder != NULL && ps->audio_record_sink != NULL && !ps->audio_disabled) {
+        ps->audio_record_thread_running = TRUE;
+        ps->audio_record_thread = g_thread_new("audio-recorder", audio_record_thread_func, ps);
+        if (ps->audio_record_thread == NULL) {
+            ps->audio_record_thread_running = FALSE;
+            LOGW("Failed to start audio recorder thread; audio will not be captured");
+        }
+    }
+
     int cpu_slot = 0;
 
     if (ps->udp_receiver != NULL) {
@@ -1262,7 +1547,6 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->bus_thread_running = TRUE;
     ps->stop_requested = FALSE;
     ps->encountered_error = FALSE;
-    ps->audio_disabled = (audio_disabled || cfg->no_audio || cfg->aud_pt < 0 || force_audio_disabled) ? 1 : 0;
     ps->bus_thread_cpu_slot = cpu_slot;
     ps->bus_thread = g_thread_new("gst-bus", bus_thread_func, ps);
     if (ps->bus_thread == NULL) {

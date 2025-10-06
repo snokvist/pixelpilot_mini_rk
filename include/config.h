@@ -23,6 +23,12 @@ typedef struct {
     int end_frame;
 } SplashSequenceCfg;
 
+typedef enum {
+    RECORD_MUX_STANDARD = 0,
+    RECORD_MUX_SEQUENTIAL,
+    RECORD_MUX_FRAGMENTED,
+} RecordMuxMode;
+
 typedef struct {
     int enable;
     int idle_timeout_ms;
@@ -32,6 +38,12 @@ typedef struct {
     int sequence_count;
     SplashSequenceCfg sequences[SPLASH_MAX_SEQUENCES];
 } SplashCfg;
+
+typedef struct {
+    int enable;
+    char directory[PATH_MAX];
+    RecordMuxMode mux_mode;
+} RecordCfg;
 
 typedef struct {
     char card_path[64];
@@ -66,6 +78,7 @@ typedef struct {
     OsdLayout osd_layout;
 
     SplashCfg splash;
+    RecordCfg record;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);
@@ -77,5 +90,7 @@ void cfg_get_process_affinity(const AppCfg *cfg, cpu_set_t *set_out);
 int cfg_get_thread_affinity(const AppCfg *cfg, int slot, cpu_set_t *set_out);
 int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out);
 const char *cfg_custom_sink_mode_name(CustomSinkMode mode);
+int cfg_parse_record_mux_mode(const char *value, RecordMuxMode *mode_out);
+const char *cfg_record_mux_mode_name(RecordMuxMode mode);
 
 #endif // CONFIG_H

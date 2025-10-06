@@ -757,6 +757,31 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "record") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->record.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "directory") == 0) {
+            ini_copy_string(cfg->record.directory, sizeof(cfg->record.directory), value);
+            cfg->record.enable = 1;
+            return 0;
+        }
+        if (strcasecmp(key, "mode") == 0) {
+            RecordMuxMode mode;
+            if (cfg_parse_record_mux_mode(value, &mode) != 0) {
+                LOGE("Invalid record.mode '%s' in INI", value);
+                return -1;
+            }
+            cfg->record.mux_mode = mode;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "audio") == 0) {
         if (strcasecmp(key, "device") == 0) {
             ini_copy_string(cfg->aud_dev, sizeof(cfg->aud_dev), value);
