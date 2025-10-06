@@ -35,6 +35,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].latency-ms` | Network jitter buffer target in milliseconds. This feeds the appsrc `latency` property as well as the OSD token `{pipeline.latency_ms}`. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
+| `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
 | `[splash].enable` | `true` enables the idle fallback player that loops local H.265 sequences when the UDP stream is idle. |
 | `[splash].input` | Path to an Annex-B H.265 elementary stream with intra-only frames that the splash player should loop. |
 | `[splash].fps` | Frame rate used when timestamping splash buffers. |

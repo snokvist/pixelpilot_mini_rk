@@ -85,6 +85,7 @@ void cfg_defaults(AppCfg *c) {
     c->vid_pt = 97;
     c->aud_pt = 98;
     c->latency_ms = 8;
+    c->udpsrc_pt97_filter = 1;
     c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 

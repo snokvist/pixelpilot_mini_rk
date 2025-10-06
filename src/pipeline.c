@@ -716,13 +716,23 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         return FALSE;
     }
 
+    gchar *caps_desc = cfg->udpsrc_pt97_filter
+                            ? g_strdup_printf("application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000, payload=(int)%d",
+                                               cfg->vid_pt)
+                            : g_strdup("application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000");
+    if (caps_desc == NULL) {
+        LOGE("Failed to allocate udpsrc caps description");
+        return FALSE;
+    }
+
     gchar *desc = g_strdup_printf(
-        "udpsrc name=udp_source port=%d caps=\"application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000, payload=(int)%d\" ! "
+        "udpsrc name=udp_source port=%d caps=\"%s\" ! "
         "rtph265depay name=video_depay ! "
         "h265parse name=video_parser config-interval=-1 ! "
         "video/x-h265, stream-format=\"byte-stream\" ! "
         "appsink drop=true name=out_appsink",
-        cfg->udp_port, cfg->vid_pt);
+        cfg->udp_port, caps_desc);
+    g_free(caps_desc);
 
     if (desc == NULL) {
         LOGE("Failed to allocate udpsrc pipeline description");
@@ -778,42 +788,44 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         LOGW("udpsrc pipeline missing h265parse element; byte-stream enforcement skipped");
     }
 
-    GstElement *udpsrc = gst_bin_get_by_name(GST_BIN(pipeline), "udp_source");
-    if (udpsrc == NULL) {
-        LOGE("Failed to find udpsrc element in pipeline");
-        gst_object_unref(appsink);
-        gst_object_unref(pipeline);
-        return FALSE;
-    }
+    if (cfg->udpsrc_pt97_filter) {
+        GstElement *udpsrc = gst_bin_get_by_name(GST_BIN(pipeline), "udp_source");
+        if (udpsrc == NULL) {
+            LOGE("Failed to find udpsrc element in pipeline");
+            gst_object_unref(appsink);
+            gst_object_unref(pipeline);
+            return FALSE;
+        }
 
-    GstPad *src_pad = gst_element_get_static_pad(udpsrc, "src");
-    if (src_pad == NULL) {
-        LOGE("Failed to get udpsrc src pad for payload filtering");
-        gst_object_unref(udpsrc);
-        gst_object_unref(appsink);
-        gst_object_unref(pipeline);
-        return FALSE;
-    }
+        GstPad *src_pad = gst_element_get_static_pad(udpsrc, "src");
+        if (src_pad == NULL) {
+            LOGE("Failed to get udpsrc src pad for payload filtering");
+            gst_object_unref(udpsrc);
+            gst_object_unref(appsink);
+            gst_object_unref(pipeline);
+            return FALSE;
+        }
 
-    UdpsrcPadFilterCtx *ctx = g_new0(UdpsrcPadFilterCtx, 1);
-    if (ctx == NULL) {
-        LOGE("Failed to allocate udpsrc payload filter context");
+        UdpsrcPadFilterCtx *ctx = g_new0(UdpsrcPadFilterCtx, 1);
+        if (ctx == NULL) {
+            LOGE("Failed to allocate udpsrc payload filter context");
+            gst_object_unref(src_pad);
+            gst_object_unref(udpsrc);
+            gst_object_unref(appsink);
+            gst_object_unref(pipeline);
+            return FALSE;
+        }
+
+        ctx->video_pt = cfg->vid_pt;
+        gulong probe_id = gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, udpsrc_pad_filter_probe, ctx, g_free);
         gst_object_unref(src_pad);
         gst_object_unref(udpsrc);
-        gst_object_unref(appsink);
-        gst_object_unref(pipeline);
-        return FALSE;
-    }
-
-    ctx->video_pt = cfg->vid_pt;
-    gulong probe_id = gst_pad_add_probe(src_pad, GST_PAD_PROBE_TYPE_BUFFER, udpsrc_pad_filter_probe, ctx, g_free);
-    gst_object_unref(src_pad);
-    gst_object_unref(udpsrc);
-    if (probe_id == 0) {
-        LOGE("Failed to install udpsrc payload filter probe");
-        gst_object_unref(appsink);
-        gst_object_unref(pipeline);
-        return FALSE;
+        if (probe_id == 0) {
+            LOGE("Failed to install udpsrc payload filter probe");
+            gst_object_unref(appsink);
+            gst_object_unref(pipeline);
+            return FALSE;
+        }
     }
 
     ps->pipeline = pipeline;

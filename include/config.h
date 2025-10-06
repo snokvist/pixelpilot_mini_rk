@@ -44,6 +44,7 @@ typedef struct {
     int vid_pt;
     int aud_pt;
     int latency_ms;
+    int udpsrc_pt97_filter;
     CustomSinkMode custom_sink;
     char aud_dev[128];
 
