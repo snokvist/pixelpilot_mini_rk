@@ -49,6 +49,9 @@ typedef struct {
     guint64 last_udp_activity_ns;
     struct Recorder *recorder;
     gboolean recorder_running;
+    gboolean recorder_enabled;
+    gboolean recorder_restart_pending;
+    guint64 recorder_restart_last_ns;
 } PipelineState;
 
 #include "config.h"

@@ -89,6 +89,11 @@ static guint64 monotonic_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+static GstCaps *pipeline_query_record_caps(PipelineState *ps);
+static gboolean pipeline_start_recorder_session(PipelineState *ps);
+static void pipeline_stop_recorder_session(PipelineState *ps, gboolean allow_restart);
+static void pipeline_restart_recorder_if_needed(PipelineState *ps);
+
 static gpointer splash_loop_thread_func(gpointer data) {
     PipelineState *ps = (PipelineState *)data;
     Splash *splash = NULL;
@@ -372,19 +377,171 @@ static void pipeline_update_splash(PipelineState *ps) {
     g_mutex_unlock(&ps->lock);
 
     if (!active && diff_ms >= idle_ms) {
+        gboolean activated = FALSE;
         g_mutex_lock(&ps->lock);
         if (!ps->splash_active && ps->selector_splash_pad != NULL && ps->input_selector != NULL) {
             LOGI("Activating splash fallback after %u ms without video", idle_ms);
             g_object_set(ps->input_selector, "active-pad", ps->selector_splash_pad, NULL);
             ps->splash_active = TRUE;
+            activated = TRUE;
         }
         g_mutex_unlock(&ps->lock);
+        if (activated) {
+            pipeline_stop_recorder_session(ps, TRUE);
+        }
     } else if (active && last_packet != 0 && diff_ms < idle_ms) {
         g_mutex_lock(&ps->lock);
         if (ps->splash_active && ps->selector_udp_pad != NULL && ps->input_selector != NULL) {
             LOGI("Video stream detected; returning to UDP input");
             g_object_set(ps->input_selector, "active-pad", ps->selector_udp_pad, NULL);
             ps->splash_active = FALSE;
+        }
+        g_mutex_unlock(&ps->lock);
+    }
+}
+
+static GstCaps *pipeline_query_record_caps(PipelineState *ps) {
+    if (ps == NULL || ps->video_sink == NULL) {
+        return NULL;
+    }
+
+    GstPad *sink_pad = gst_element_get_static_pad(ps->video_sink, "sink");
+    if (sink_pad == NULL) {
+        return NULL;
+    }
+
+    GstCaps *caps = gst_pad_get_current_caps(sink_pad);
+    if (caps == NULL) {
+        caps = gst_pad_query_caps(sink_pad, NULL);
+    }
+    gst_object_unref(sink_pad);
+    return caps;
+}
+
+static gboolean pipeline_start_recorder_session(PipelineState *ps) {
+    if (ps == NULL || ps->cfg == NULL) {
+        return FALSE;
+    }
+
+    const AppCfg *cfg = ps->cfg;
+    gboolean want_record = cfg->record.enable && cfg->record.output_path[0] != '\0';
+    if (!want_record) {
+        return TRUE;
+    }
+
+    if (ps->recorder == NULL) {
+        ps->recorder = recorder_new();
+        if (ps->recorder == NULL) {
+            LOGE("Failed to allocate recorder state");
+            return FALSE;
+        }
+    }
+
+    if (want_record && cfg->record.audio && cfg->aud_pt >= 0 && ps->udp_receiver == NULL) {
+        LOGW("Recorder audio requested but UDP receiver unavailable; recording without audio");
+    }
+
+    GstCaps *record_caps = pipeline_query_record_caps(ps);
+    gboolean record_audio = want_record && cfg->record.audio && cfg->aud_pt >= 0 && ps->udp_receiver != NULL;
+
+    if (!recorder_start(ps->recorder, cfg, record_audio, record_caps)) {
+        LOGE("Failed to start recorder pipeline");
+        if (record_caps != NULL) {
+            gst_caps_unref(record_caps);
+        }
+        return FALSE;
+    }
+
+    if (record_caps != NULL) {
+        gst_caps_unref(record_caps);
+    }
+
+    GstAppSrc *record_audio_src = NULL;
+    if (record_audio) {
+        record_audio_src = recorder_get_audio_appsrc(ps->recorder);
+        if (record_audio_src == NULL) {
+            LOGW("Recorder audio appsrc unavailable; recording video only");
+            record_audio = FALSE;
+        }
+    }
+
+    UdpReceiver *receiver = NULL;
+    g_mutex_lock(&ps->lock);
+    ps->recorder_running = TRUE;
+    ps->recorder_restart_last_ns = 0;
+    receiver = ps->udp_receiver;
+    g_mutex_unlock(&ps->lock);
+
+    if (receiver != NULL) {
+        udp_receiver_set_audio_record_appsrc(receiver,
+                                             (record_audio && record_audio_src != NULL) ? record_audio_src : NULL);
+    }
+
+    return TRUE;
+}
+
+static void pipeline_stop_recorder_session(PipelineState *ps, gboolean allow_restart) {
+    if (ps == NULL) {
+        return;
+    }
+
+    Recorder *recorder_to_stop = NULL;
+    UdpReceiver *receiver = NULL;
+
+    g_mutex_lock(&ps->lock);
+    if (ps->recorder_running) {
+        recorder_to_stop = ps->recorder;
+        receiver = ps->udp_receiver;
+        if (allow_restart && ps->recorder_enabled) {
+            ps->recorder_restart_pending = TRUE;
+            ps->recorder_restart_last_ns = 0;
+        } else if (!allow_restart) {
+            ps->recorder_restart_pending = FALSE;
+            ps->recorder_restart_last_ns = 0;
+        }
+        ps->recorder_running = FALSE;
+    } else if (!allow_restart) {
+        ps->recorder_restart_pending = FALSE;
+        ps->recorder_restart_last_ns = 0;
+    }
+    g_mutex_unlock(&ps->lock);
+
+    if (receiver != NULL) {
+        udp_receiver_set_audio_record_appsrc(receiver, NULL);
+    }
+
+    if (recorder_to_stop != NULL) {
+        recorder_stop(recorder_to_stop);
+    }
+}
+
+static void pipeline_restart_recorder_if_needed(PipelineState *ps) {
+    if (ps == NULL) {
+        return;
+    }
+
+    gboolean need_restart = FALSE;
+
+    g_mutex_lock(&ps->lock);
+    if (!ps->splash_active && ps->recorder_enabled && ps->recorder_restart_pending && !ps->recorder_running) {
+        guint64 now = monotonic_time_ns();
+        if (ps->recorder_restart_last_ns == 0 || now - ps->recorder_restart_last_ns >= 500000000ull) {
+            ps->recorder_restart_pending = FALSE;
+            ps->recorder_restart_last_ns = now;
+            need_restart = TRUE;
+        }
+    }
+    g_mutex_unlock(&ps->lock);
+
+    if (!need_restart) {
+        return;
+    }
+
+    if (!pipeline_start_recorder_session(ps)) {
+        LOGW("Failed to restart recorder after splash; will retry when video is active");
+        g_mutex_lock(&ps->lock);
+        if (!ps->splash_active && ps->recorder_enabled && !ps->recorder_running) {
+            ps->recorder_restart_pending = TRUE;
         }
         g_mutex_unlock(&ps->lock);
     }
@@ -1131,12 +1288,10 @@ static void cleanup_pipeline(PipelineState *ps) {
     }
     ps->appsink_thread_running = FALSE;
 
+    pipeline_stop_recorder_session(ps, FALSE);
+
     if (ps->udp_receiver != NULL) {
         udp_receiver_set_audio_record_appsrc(ps->udp_receiver, NULL);
-    }
-
-    if (ps->recorder != NULL) {
-        recorder_stop(ps->recorder);
     }
 
     if (ps->decoder != NULL) {
@@ -1161,6 +1316,9 @@ static void cleanup_pipeline(PipelineState *ps) {
         ps->recorder = NULL;
     }
     ps->recorder_running = FALSE;
+    ps->recorder_enabled = FALSE;
+    ps->recorder_restart_pending = FALSE;
+    ps->recorder_restart_last_ns = 0;
     g_mutex_lock(&ps->lock);
     ps->bus_thread_running = FALSE;
     ps->encountered_error = FALSE;
@@ -1206,6 +1364,9 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->last_udp_activity_ns = 0;
     ps->splash_active = FALSE;
     ps->recorder_running = FALSE;
+    ps->recorder_enabled = FALSE;
+    ps->recorder_restart_pending = FALSE;
+    ps->recorder_restart_last_ns = 0;
 
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;
@@ -1247,51 +1408,14 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->pipeline_start_ns = monotonic_time_ns();
 
     gboolean want_record = cfg->record.enable && cfg->record.output_path[0] != '\0';
-    gboolean record_audio = want_record && cfg->record.audio && cfg->aud_pt >= 0 && ps->udp_receiver != NULL;
-    if (want_record && cfg->record.audio && cfg->aud_pt >= 0 && ps->udp_receiver == NULL) {
-        LOGW("Recorder audio requested but UDP receiver unavailable; recording without audio");
-    }
-    if (want_record) {
-        if (ps->recorder == NULL) {
-            ps->recorder = recorder_new();
-            if (ps->recorder == NULL) {
-                LOGE("Failed to allocate recorder state");
-                goto fail;
-            }
-        }
-        GstCaps *record_caps = NULL;
-        if (ps->video_sink != NULL) {
-            GstPad *sink_pad = gst_element_get_static_pad(ps->video_sink, "sink");
-            if (sink_pad != NULL) {
-                record_caps = gst_pad_get_current_caps(sink_pad);
-                if (record_caps == NULL) {
-                    record_caps = gst_pad_query_caps(sink_pad, NULL);
-                }
-                gst_object_unref(sink_pad);
-            }
-        }
 
-        if (!recorder_start(ps->recorder, cfg, record_audio, record_caps)) {
-            LOGE("Failed to start recorder pipeline");
-            if (record_caps != NULL) {
-                gst_caps_unref(record_caps);
-            }
+    ps->recorder_enabled = want_record;
+    ps->recorder_restart_pending = FALSE;
+    ps->recorder_restart_last_ns = 0;
+
+    if (want_record) {
+        if (!pipeline_start_recorder_session(ps)) {
             goto fail;
-        }
-        if (record_caps != NULL) {
-            gst_caps_unref(record_caps);
-        }
-        ps->recorder_running = TRUE;
-        if (ps->udp_receiver != NULL) {
-            GstAppSrc *record_audio_src = NULL;
-            if (record_audio) {
-                record_audio_src = recorder_get_audio_appsrc(ps->recorder);
-                if (record_audio_src == NULL) {
-                    LOGW("Recorder audio appsrc unavailable; recording video only");
-                }
-            }
-            udp_receiver_set_audio_record_appsrc(ps->udp_receiver,
-                                                 record_audio && record_audio_src != NULL ? record_audio_src : NULL);
         }
     } else if (ps->udp_receiver != NULL) {
         udp_receiver_set_audio_record_appsrc(ps->udp_receiver, NULL);
@@ -1376,24 +1500,19 @@ void pipeline_stop(PipelineState *ps, int wait_ms_total) {
         return;
     }
 
-    Recorder *recorder_to_stop = NULL;
-
     g_mutex_lock(&ps->lock);
     ps->state = PIPELINE_STOPPING;
     ps->stop_requested = TRUE;
     ps->decoder_running = FALSE;
-    if (ps->recorder_running) {
-        recorder_to_stop = ps->recorder;
-    }
-    ps->recorder_running = FALSE;
+    ps->recorder_enabled = FALSE;
+    ps->recorder_restart_pending = FALSE;
+    ps->recorder_restart_last_ns = 0;
     g_mutex_unlock(&ps->lock);
+
+    pipeline_stop_recorder_session(ps, FALSE);
 
     if (ps->udp_receiver != NULL) {
         udp_receiver_set_audio_record_appsrc(ps->udp_receiver, NULL);
-    }
-
-    if (recorder_to_stop != NULL) {
-        recorder_stop(recorder_to_stop);
     }
 
     if (ps->udp_receiver != NULL) {
@@ -1453,6 +1572,7 @@ void pipeline_poll_child(PipelineState *ps) {
     }
 
     pipeline_update_splash(ps);
+    pipeline_restart_recorder_if_needed(ps);
 }
 
 void pipeline_set_receiver_stats_enabled(PipelineState *ps, gboolean enabled) {
