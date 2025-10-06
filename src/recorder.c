@@ -509,4 +509,3 @@ void recorder_push_video_buffer(Recorder *rec, GstBuffer *buffer) {
         }
     }
 }
-*** End of File
