@@ -4,11 +4,14 @@
 
 #include <errno.h>
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gst/app/gstappsink.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
+#define MINIMP4_IMPLEMENTATION
+#define MP4E_MAX_TRACKS 1
 #include "minimp4.h"
 
 struct PendingSample {
@@ -30,8 +33,76 @@ struct VideoRecorder {
     guint height;
     guint64 default_duration_90k;
     guint64 last_duration_90k;
+    gchar *output_path;
     struct PendingSample pending;
 };
+
+static gchar *recorder_timestamp_string(void) {
+    GDateTime *now = g_date_time_new_now_local();
+    if (now == NULL) {
+        return g_strdup("00000000-000000");
+    }
+    gchar *stamp = g_date_time_format(now, "%Y%m%d-%H%M%S");
+    g_date_time_unref(now);
+    if (stamp == NULL) {
+        stamp = g_strdup("00000000-000000");
+    }
+    return stamp;
+}
+
+static gboolean path_looks_like_directory(const gchar *path) {
+    if (path == NULL || *path == '\0') {
+        return TRUE;
+    }
+    size_t len = strlen(path);
+    if (len == 0) {
+        return TRUE;
+    }
+    if (path[len - 1] == G_DIR_SEPARATOR) {
+        return TRUE;
+    }
+    return g_file_test(path, G_FILE_TEST_IS_DIR);
+}
+
+static gchar *build_timestamped_output_path(const gchar *requested_path) {
+    const gchar *base_path = (requested_path != NULL && requested_path[0] != '\0') ? requested_path : "/media";
+    gchar *timestamp = recorder_timestamp_string();
+    if (timestamp == NULL) {
+        return NULL;
+    }
+
+    gchar *full_path = NULL;
+    if (path_looks_like_directory(base_path)) {
+        gchar *filename = g_strdup_printf("pixelpilot-%s.mp4", timestamp);
+        full_path = g_build_filename(base_path, filename, NULL);
+        g_free(filename);
+    } else {
+        gchar *dir = g_path_get_dirname(base_path);
+        gchar *basename = g_path_get_basename(base_path);
+        const gchar *dot = strrchr(basename, '.');
+        gchar *with_timestamp = NULL;
+        if (dot != NULL && dot != basename) {
+            gsize name_len = (gsize)(dot - basename);
+            gchar *name = g_strndup(basename, name_len);
+            with_timestamp = g_strdup_printf("%s-%s%s", name, timestamp, dot);
+            g_free(name);
+        } else {
+            with_timestamp = g_strdup_printf("%s-%s.mp4", basename, timestamp);
+        }
+
+        if (dir != NULL && dir[0] != '\0' && strcmp(dir, ".") != 0) {
+            full_path = g_build_filename(dir, with_timestamp, NULL);
+        } else {
+            full_path = g_strdup(with_timestamp);
+        }
+        g_free(dir);
+        g_free(basename);
+        g_free(with_timestamp);
+    }
+
+    g_free(timestamp);
+    return full_path;
+}
 
 static int recorder_write_callback(int64_t offset, const void *buffer, size_t size, void *token) {
     VideoRecorder *rec = (VideoRecorder *)token;
@@ -177,12 +248,30 @@ static void emit_pending(VideoRecorder *rec, guint32 duration_90k) {
 }
 
 VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
-    if (cfg == NULL || !cfg->enable || cfg->output_path[0] == '\0') {
+    if (cfg == NULL || !cfg->enable) {
         return NULL;
     }
 
+    gchar *output_path = build_timestamped_output_path(cfg->output_path);
+    if (output_path == NULL) {
+        LOGE("record: failed to prepare output path");
+        return NULL;
+    }
+
+    gchar *dir = g_path_get_dirname(output_path);
+    if (dir != NULL && dir[0] != '\0' && strcmp(dir, ".") != 0) {
+        if (g_mkdir_with_parents(dir, 0755) != 0 && errno != EEXIST) {
+            LOGE("record: failed to create directory %s: %s", dir, g_strerror(errno));
+            g_free(dir);
+            g_free(output_path);
+            return NULL;
+        }
+    }
+    g_free(dir);
+
     VideoRecorder *rec = g_new0(VideoRecorder, 1);
     if (rec == NULL) {
+        g_free(output_path);
         return NULL;
     }
 
@@ -190,19 +279,24 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
     rec->failed = FALSE;
     rec->default_duration_90k = 3000;
     rec->last_duration_90k = 0;
+    rec->output_path = output_path;
 
-    rec->fp = fopen(cfg->output_path, "wb");
+    rec->fp = fopen(rec->output_path, "wb");
     if (rec->fp == NULL) {
-        LOGE("record: failed to open %s: %s", cfg->output_path, g_strerror(errno));
+        LOGE("record: failed to open %s: %s", rec->output_path, g_strerror(errno));
+        g_free(rec->output_path);
         g_free(rec);
         return NULL;
     }
+
+    LOGI("record: writing video to %s", rec->output_path);
 
     rec->mux = MP4E_open(1, 0, rec, recorder_write_callback);
     if (rec->mux == NULL) {
         LOGE("minimp4: failed to allocate muxer");
         fclose(rec->fp);
         rec->fp = NULL;
+        g_free(rec->output_path);
         g_free(rec);
         return NULL;
     }
@@ -289,6 +383,7 @@ void video_recorder_free(VideoRecorder *rec) {
         rec->fp = NULL;
     }
 
+    g_free(rec->output_path);
     pending_reset(&rec->pending);
 
     g_free(rec);
