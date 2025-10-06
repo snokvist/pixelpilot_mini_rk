@@ -12,7 +12,15 @@
 
 #define MINIMP4_IMPLEMENTATION
 #define MP4E_MAX_TRACKS 1
+#if defined(__GNUC__) && !defined(__clang_analyzer__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#endif
 #include "minimp4.h"
+#if defined(__GNUC__) && !defined(__clang_analyzer__)
+#pragma GCC diagnostic pop
+#endif
 
 struct PendingSample {
     guint8 *data;
