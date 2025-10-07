@@ -544,10 +544,10 @@ static gboolean handle_received_packet_fastpath(struct UdpReceiver *ur,
         GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
     }
 
-    g_atomic_int_set(&ur->video_stream_active, 1);
-
     GstFlowReturn flow = gst_app_src_push_buffer(ur->video_appsrc, gstbuf);
-    if (flow != GST_FLOW_OK) {
+    if (flow == GST_FLOW_OK) {
+        g_atomic_int_set(&ur->video_stream_active, 1);
+    } else {
         LOGV("UDP receiver: push_buffer (video, fastpath) returned %s", gst_flow_get_name(flow));
         if (flow == GST_FLOW_FLUSHING) {
             g_usleep(1000);
@@ -637,13 +637,8 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
 
     gst_buffer_unmap(gstbuf, map);
 
-    if (!drop_packet && target_appsrc != NULL) {
-        if (target_is_audio) {
-            ur->audio_stream_active = 1;
-        } else {
-            ur->video_stream_active = 1;
-        }
-    }
+    gboolean mark_stream_active = (!drop_packet && target_appsrc != NULL);
+    gboolean mark_audio_stream = mark_stream_active && target_is_audio;
 
     if (drop_packet || target_appsrc == NULL) {
         gst_buffer_unref(gstbuf);
@@ -656,7 +651,15 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     }
 
     GstFlowReturn flow = gst_app_src_push_buffer(target_appsrc, gstbuf);
-    if (flow != GST_FLOW_OK) {
+    if (flow == GST_FLOW_OK) {
+        if (mark_stream_active) {
+            if (mark_audio_stream) {
+                g_atomic_int_set(&ur->audio_stream_active, 1);
+            } else {
+                g_atomic_int_set(&ur->video_stream_active, 1);
+            }
+        }
+    } else {
         LOGV("UDP receiver: push_buffer (%s) returned %s",
              target_is_audio ? "audio" : "video",
              gst_flow_get_name(flow));
@@ -976,8 +979,8 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
     ur->last_packet_ns = 0;
-    ur->video_stream_active = 0;
-    ur->audio_stream_active = 0;
+    g_atomic_int_set(&ur->video_stream_active, 0);
+    g_atomic_int_set(&ur->audio_stream_active, 0);
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 
@@ -1028,8 +1031,8 @@ void udp_receiver_stop(UdpReceiver *ur) {
         return;
     }
     ur->stop_requested = TRUE;
-    video_started = ur->video_stream_active ? TRUE : FALSE;
-    audio_started = ur->audio_stream_active ? TRUE : FALSE;
+    video_started = g_atomic_int_get(&ur->video_stream_active) ? TRUE : FALSE;
+    audio_started = g_atomic_int_get(&ur->audio_stream_active) ? TRUE : FALSE;
     g_mutex_unlock(&ur->lock);
 
     if (ur->sockfd >= 0) {
@@ -1060,8 +1063,8 @@ void udp_receiver_stop(UdpReceiver *ur) {
     ur->stop_requested = FALSE;
     ur->video_discont_pending = TRUE;
     ur->audio_discont_pending = TRUE;
-    ur->video_stream_active = 0;
-    ur->audio_stream_active = 0;
+    g_atomic_int_set(&ur->video_stream_active, 0);
+    g_atomic_int_set(&ur->audio_stream_active, 0);
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 }
