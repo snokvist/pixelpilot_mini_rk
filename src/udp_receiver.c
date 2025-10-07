@@ -1030,7 +1030,14 @@ void udp_receiver_stop(UdpReceiver *ur) {
         gst_app_src_end_of_stream(ur->video_appsrc);
     }
     if (ur->audio_appsrc != NULL) {
-        gst_app_src_end_of_stream(ur->audio_appsrc);
+        gboolean audio_started =
+            (g_atomic_int_get((gint *)&ur->audio_discont_pending) == FALSE);
+        if (!audio_started) {
+            /* No audio buffers were ever pushed, so sending EOS would trigger a
+             * spurious negotiation error on the sink. */
+        } else {
+            gst_app_src_end_of_stream(ur->audio_appsrc);
+        }
     }
 
     buffer_pool_stop(ur);
