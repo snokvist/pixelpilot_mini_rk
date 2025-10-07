@@ -2,6 +2,7 @@
 
 #include "udp_receiver.h"
 #include "logging.h"
+#include "idr_requester.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -110,6 +111,8 @@ struct UdpReceiver {
     gboolean have_video_ssrc;
 
     guint64 last_packet_ns;
+
+    IdrRequester *idr;
 };
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
@@ -753,6 +756,7 @@ static gpointer receiver_thread(gpointer data) {
         GstMapInfo maps[UDP_RECEIVER_BATCH];
         struct mmsghdr msgs[UDP_RECEIVER_BATCH];
         struct iovec iovecs[UDP_RECEIVER_BATCH];
+        struct sockaddr_storage addrs[UDP_RECEIVER_BATCH];
         guint prepared = 0;
 
         while (prepared < UDP_RECEIVER_BATCH) {
@@ -774,10 +778,13 @@ static gpointer receiver_thread(gpointer data) {
 
             buffers[prepared] = gstbuf;
             memset(&msgs[prepared], 0, sizeof(msgs[prepared]));
+            memset(&addrs[prepared], 0, sizeof(addrs[prepared]));
             iovecs[prepared].iov_base = maps[prepared].data;
             iovecs[prepared].iov_len = max_pkt;
             msgs[prepared].msg_hdr.msg_iov = &iovecs[prepared];
             msgs[prepared].msg_hdr.msg_iovlen = 1;
+            msgs[prepared].msg_hdr.msg_name = &addrs[prepared];
+            msgs[prepared].msg_hdr.msg_namelen = sizeof(addrs[prepared]);
             prepared++;
         }
 
@@ -820,6 +827,12 @@ static gpointer receiver_thread(gpointer data) {
         }
 
         for (int i = 0; i < received; i++) {
+            if (ur->idr != NULL && msgs[i].msg_hdr.msg_name != NULL && msgs[i].msg_hdr.msg_namelen > 0) {
+                idr_requester_note_source(ur->idr,
+                                          (const struct sockaddr *)msgs[i].msg_hdr.msg_name,
+                                          msgs[i].msg_hdr.msg_namelen);
+            }
+
             if (msgs[i].msg_hdr.msg_flags & MSG_TRUNC) {
                 LOGW("UDP receiver: truncated UDP packet dropped");
                 gst_buffer_unmap(buffers[i], &maps[i]);
@@ -839,7 +852,11 @@ static gpointer receiver_thread(gpointer data) {
     return NULL;
 }
 
-UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *video_appsrc) {
+UdpReceiver *udp_receiver_create(int udp_port,
+                                 int vid_pt,
+                                 int aud_pt,
+                                 GstAppSrc *video_appsrc,
+                                 IdrRequester *requester) {
     if (video_appsrc == NULL) {
         return NULL;
     }
@@ -861,6 +878,7 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     ur->pool = NULL;
     ur->buffer_size = 0;
     ur->last_packet_ns = 0;
+    ur->idr = requester;
     return ur;
 }
 
@@ -1053,6 +1071,11 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
     copy_history(stats->history, ur->history, UDP_RECEIVER_HISTORY);
     g_mutex_unlock(&ur->lock);
     stats->last_packet_ns = udp_receiver_last_packet_load(ur);
+    guint64 idr_total = 0;
+    if (ur->idr != NULL) {
+        idr_total = idr_requester_get_request_count(ur->idr);
+    }
+    stats->idr_requests = idr_total;
 }
 
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {

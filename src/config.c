@@ -37,6 +37,11 @@ static void usage(const char *prog) {
             "  --sse-bind ADDR              (bind address for SSE streamer; default: 127.0.0.1)\n"
             "  --sse-port N                 (TCP port for SSE streamer; default: 8080)\n"
             "  --sse-interval-ms N          (emit SSE updates every N ms; default: 1000)\n"
+            "  --idr-enable                 (enable automatic IDR requests; default on)\n"
+            "  --idr-disable                (disable automatic IDR requests)\n"
+            "  --idr-port N                 (HTTP port for IDR requests; default: 80)\n"
+            "  --idr-path PATH              (HTTP path for IDR trigger; default: /request/idr)\n"
+            "  --idr-timeout-ms N           (per-request timeout; default: 200)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -176,6 +181,11 @@ void cfg_defaults(AppCfg *c) {
     strcpy(c->sse.bind_address, "127.0.0.1");
     c->sse.port = 8080;
     c->sse.interval_ms = 1000;
+
+    c->idr.enable = 1;
+    c->idr.http_port = 80;
+    c->idr.http_timeout_ms = 200;
+    strcpy(c->idr.http_path, "/request/idr");
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -366,6 +376,26 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg->sse.interval_ms = (unsigned int)interval;
+        } else if (!strcmp(argv[i], "--idr-enable")) {
+            cfg->idr.enable = 1;
+        } else if (!strcmp(argv[i], "--idr-disable")) {
+            cfg->idr.enable = 0;
+        } else if (!strcmp(argv[i], "--idr-port") && i + 1 < argc) {
+            int port = atoi(argv[++i]);
+            if (port <= 0 || port > 65535) {
+                LOGE("--idr-port requires a value between 1 and 65535");
+                return -1;
+            }
+            cfg->idr.http_port = port;
+        } else if (!strcmp(argv[i], "--idr-path") && i + 1 < argc) {
+            cli_copy_string(cfg->idr.http_path, sizeof(cfg->idr.http_path), argv[++i]);
+        } else if (!strcmp(argv[i], "--idr-timeout-ms") && i + 1 < argc) {
+            int timeout = atoi(argv[++i]);
+            if (timeout <= 0) {
+                LOGE("--idr-timeout-ms requires a positive value");
+                return -1;
+            }
+            cfg->idr.http_timeout_ms = (unsigned int)timeout;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {

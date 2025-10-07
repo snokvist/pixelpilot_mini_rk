@@ -1,6 +1,7 @@
 #include "video_decoder.h"
 
 #include "drm_props.h"
+#include "idr_requester.h"
 #include "logging.h"
 
 #include <errno.h>
@@ -83,6 +84,8 @@ struct VideoDecoder {
 
     GThread *frame_thread;
     GThread *display_thread;
+
+    IdrRequester *idr_requester;
 };
 
 VideoDecoder *video_decoder_new(void) {
@@ -376,6 +379,9 @@ static gpointer frame_thread_func(gpointer data) {
             RK_U32 discard = mpp_frame_get_discard(frame);
             if (G_UNLIKELY(errinfo || discard)) {
                 LOGW("MPP: dropping frame errinfo=%u discard=%u", errinfo, discard);
+                if (vd->idr_requester != NULL) {
+                    idr_requester_handle_warning(vd->idr_requester);
+                }
                 vd->eos_received = mpp_frame_get_eos(frame) ? TRUE : FALSE;
                 mpp_frame_deinit(&frame);
                 if (vd->eos_received) {
@@ -682,5 +688,12 @@ void video_decoder_send_eos(VideoDecoder *vd) {
         }
         g_usleep(2000);
     }
+}
+
+void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester) {
+    if (vd == NULL) {
+        return;
+    }
+    vd->idr_requester = requester;
 }
 

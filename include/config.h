@@ -53,6 +53,13 @@ typedef struct {
 } SseCfg;
 
 typedef struct {
+    int enable;
+    int http_port;
+    unsigned int http_timeout_ms;
+    char http_path[128];
+} IdrCfg;
+
+typedef struct {
     char card_path[64];
     char connector_name[32];
     char config_path[PATH_MAX];
@@ -88,6 +95,7 @@ typedef struct {
     SplashCfg splash;
     RecordCfg record;
     SseCfg sse;
+    IdrCfg idr;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);

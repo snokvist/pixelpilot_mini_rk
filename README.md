@@ -36,6 +36,10 @@ to the defaults listed in `src/config.c` when omitted.
 | `[pipeline].latency-ms` | Network jitter buffer target in milliseconds. This feeds the appsrc `latency` property as well as the OSD token `{pipeline.latency_ms}`. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
 | `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
+| `[idr].enable` | `true` enables the automatic IDR requester that fires HTTP recovery bursts when decode warnings appear. |
+| `[idr].port` | HTTP port that exposes the IDR trigger endpoint (default `80`). |
+| `[idr].path` | HTTP path used when issuing the inline request (default `/request/idr`). |
+| `[idr].timeout-ms` | TCP timeout applied to each IDR request in milliseconds (default `200`). |
 | `[splash].enable` | `true` enables the idle fallback player that loops local H.265 sequences when the UDP stream is idle. |
 | `[splash].input` | Path to an Annex-B H.265 elementary stream with intra-only frames that the splash player should loop. |
 | `[splash].fps` | Frame rate used when timestamping splash buffers. |
@@ -115,6 +119,7 @@ arriving on a different SSRC (or with a large sequence gap) is ignored entirely 
 | `udp.frame.avg_kib` | EWMA of recent video frame sizes (KiB). |
 | `udp.sequence.expected` | The next video sequence number the receiver is waiting for. |
 | `udp.timestamp.last_video` | RTP timestamp from the most recent video packet. |
+| `udp.idr_requests` | Total HTTP IDR requests issued while attempting to recover corrupted streams. |
 
 The history buffer exposed through `udp.history.*` tokens retains the 512 most recent packet samples, including packet size,
 payload type, arrival timestamp, and flags for loss, reordering, duplication, and frame boundaries. This makes it possible to
@@ -144,11 +149,18 @@ data: {"have_stats":true,"total_packets":1234,"video_packets":1234,
        "incomplete_frames":0,"last_frame_kib":112.5,"avg_frame_kib":108.3,
        "bitrate_mbps":12.340,"bitrate_avg_mbps":10.876,"jitter_ms":3.25,
        "jitter_avg_ms":2.97,"expected_sequence":54321,
-       "last_video_timestamp":27182818,"last_packet_ns":123456789012}
+       "last_video_timestamp":27182818,"last_packet_ns":123456789012,
+       "idr_requests":7}
 ```
 
 When the receiver has not yet produced statistics, the streamer reports `{"have_stats":false}` so clients can ignore placeholder
 updates.
+
+## Automatic IDR recovery
+
+Packet loss or corruption around an IDR frame leaves the decoder without valid reference data until a fresh I-frame arrives. When enabled, PixelPilot watches the video decoder warnings and immediately issues an HTTP GET burst (defaulting to `http://SOURCE:80/request/idr`) to request a new IDR. The requester fires one request instantly, three more spaced 50 ms apart, then falls back to an exponential interval capped at 500 ms while warnings persist. Each attempt uses a 200 ms TCP timeout so misbehaving endpoints do not clog the worker queue.
+
+Tune the behaviour through `[idr]` in the INI (or the matching `--idr-*` CLI flags): disable it entirely with `idr.enable = false`, override the port or path to match the camera firmware, or extend the timeout when proxies or long RTT links sit between the devices. Every trigger is logged with the cumulative total, and the `udp.idr_requests` counter exposes the same total in OSD templates, SSE payloads, and other telemetry sinks.
 
 ## Splash fallback playback
 
