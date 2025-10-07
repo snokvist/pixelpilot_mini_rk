@@ -56,6 +56,7 @@ typedef struct {
     size_t history_head;
     UdpReceiverPacketSample history[UDP_RECEIVER_HISTORY];
     guint64 last_packet_ns;
+    guint64 idr_requests;
 } UdpReceiverStats;
 
 typedef struct UdpReceiver UdpReceiver;

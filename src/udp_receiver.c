@@ -1071,6 +1071,11 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
     copy_history(stats->history, ur->history, UDP_RECEIVER_HISTORY);
     g_mutex_unlock(&ur->lock);
     stats->last_packet_ns = udp_receiver_last_packet_load(ur);
+    guint64 idr_total = 0;
+    if (ur->idr != NULL) {
+        idr_total = idr_requester_get_request_count(ur->idr);
+    }
+    stats->idr_requests = idr_total;
 }
 
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {

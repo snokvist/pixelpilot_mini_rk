@@ -110,13 +110,13 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
                ",\"frame_count\":%" G_GUINT64_FORMAT
                ",\"incomplete_frames\":%" G_GUINT64_FORMAT
                ",\"last_frame_kib\":%.2f,\"avg_frame_kib\":%.2f,\"bitrate_mbps\":%.3f,\"bitrate_avg_mbps\":%.3f,"
-               "\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u,\"last_video_timestamp\":%u,"
-               "\"last_packet_ns\":%" G_GUINT64_FORMAT "}",
+                "\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u,\"last_video_timestamp\":%u,"
+                "\"last_packet_ns\":%" G_GUINT64_FORMAT ",\"idr_requests\":%" G_GUINT64_FORMAT "}",
                snap->total_packets, snap->video_packets, snap->audio_packets, snap->ignored_packets,
                snap->duplicate_packets, snap->lost_packets, snap->reordered_packets, snap->total_bytes,
                snap->video_bytes, snap->audio_bytes, snap->frame_count, snap->incomplete_frames, last_frame_kib,
-               frame_avg_kib, snap->bitrate_mbps, snap->bitrate_avg_mbps, snap->jitter_ms, snap->jitter_avg_ms,
-               snap->expected_sequence, snap->last_video_timestamp, snap->last_packet_ns);
+                frame_avg_kib, snap->bitrate_mbps, snap->bitrate_avg_mbps, snap->jitter_ms, snap->jitter_avg_ms,
+                snap->expected_sequence, snap->last_video_timestamp, snap->last_packet_ns, snap->idr_requests);
 }
 
 static void sleep_interval(const SseStreamer *streamer) {
@@ -342,6 +342,7 @@ void sse_streamer_publish(SseStreamer *streamer, const UdpReceiverStats *stats, 
             .last_video_timestamp = stats->last_video_timestamp,
             .expected_sequence = stats->expected_sequence,
             .last_packet_ns = stats->last_packet_ns,
+            .idr_requests = stats->idr_requests,
         };
         streamer->stats = snap;
     }

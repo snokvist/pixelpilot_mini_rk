@@ -421,6 +421,10 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.reordered_packets);
         return 0;
     }
+    if (strcmp(key, "udp.idr_requests") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.idr_requests);
+        return 0;
+    }
     if (strcmp(key, "udp.total_bytes") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.total_bytes);
         return 0;
@@ -516,6 +520,10 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
     }
     if (metric && strcmp(metric, "udp.frames.count") == 0) {
         *out_value = (double)ctx->stats.frame_count;
+        return 1;
+    }
+    if (metric && strcmp(metric, "udp.idr_requests") == 0) {
+        *out_value = (double)ctx->stats.idr_requests;
         return 1;
     }
     if (metric && strcmp(metric, "udp.frames.last_bytes") == 0) {

@@ -48,6 +48,8 @@ struct IdrRequester {
 
     gboolean request_in_flight;
     gboolean shutting_down;
+
+    guint64 total_requests;
 };
 
 static guint64 monotonic_ms(void) {
@@ -248,6 +250,7 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
     req->active = FALSE;
     req->request_in_flight = FALSE;
     req->shutting_down = FALSE;
+    req->total_requests = 0;
 
     return req;
 }
@@ -339,6 +342,7 @@ void idr_requester_handle_warning(IdrRequester *req) {
     guint64 now_ms = monotonic_ms();
     IdrHttpTask *task = NULL;
     guint attempt = 0;
+    guint64 pending_total = 0;
     char host_copy[IDR_HOST_MAX];
     char path_copy[IDR_PATH_MAX];
     guint16 port_copy = 0;
@@ -366,7 +370,7 @@ void idr_requester_handle_warning(IdrRequester *req) {
         req->last_request_ms = 0;
     }
 
-    req->last_warning_ms = now_ms;
+        req->last_warning_ms = now_ms;
 
     gboolean time_ready = FALSE;
     if (req->attempt_count == 0) {
@@ -407,6 +411,11 @@ void idr_requester_handle_warning(IdrRequester *req) {
             g_strlcpy(host_copy, task->host, sizeof(host_copy));
             g_strlcpy(path_copy, task->path, sizeof(path_copy));
             port_copy = ntohs(task->addr.sin_port);
+            if (req->total_requests == G_MAXUINT64) {
+                pending_total = G_MAXUINT64;
+            } else {
+                pending_total = req->total_requests + 1u;
+            }
         } else {
             req->request_in_flight = FALSE;
             if (req->attempt_count > 0) {
@@ -425,11 +434,23 @@ void idr_requester_handle_warning(IdrRequester *req) {
         return;
     }
 
-    LOGW("IDR requester: triggering IDR via http://%s:%u%s (attempt %u)",
+    guint64 logged_total = pending_total;
+    if (logged_total == 0) {
+        g_mutex_lock(&req->lock);
+        if (req->total_requests == G_MAXUINT64) {
+            logged_total = G_MAXUINT64;
+        } else {
+            logged_total = req->total_requests + 1u;
+        }
+        g_mutex_unlock(&req->lock);
+    }
+
+    LOGW("IDR requester: triggering IDR via http://%s:%u%s (attempt %u, total %" G_GUINT64_FORMAT ")",
          host_copy,
          (unsigned int)port_copy,
          path_copy,
-         attempt);
+         attempt,
+         logged_total);
 
     GThread *thread = g_thread_new("idr-http", idr_requester_http_worker, task);
     if (thread == NULL) {
@@ -448,6 +469,25 @@ void idr_requester_handle_warning(IdrRequester *req) {
         return;
     }
 
+    if (pending_total > 0) {
+        g_mutex_lock(&req->lock);
+        req->total_requests = pending_total;
+        g_mutex_unlock(&req->lock);
+    }
+
     g_thread_unref(thread);
+}
+
+guint64 idr_requester_get_request_count(const IdrRequester *req) {
+    if (req == NULL) {
+        return 0;
+    }
+
+    guint64 total = 0;
+    GMutex *lock = (GMutex *)&req->lock;
+    g_mutex_lock(lock);
+    total = req->total_requests;
+    g_mutex_unlock(lock);
+    return total;
 }
 
