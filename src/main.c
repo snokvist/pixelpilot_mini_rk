@@ -8,6 +8,7 @@
 #include "logging.h"
 #include "osd.h"
 #include "pipeline.h"
+#include "sse_streamer.h"
 #include "udev_monitor.h"
 
 #include <errno.h>
@@ -39,6 +40,12 @@ static void on_sigusr(int sig) {
 
 static long long ms_since(struct timespec newer, struct timespec older) {
     return (newer.tv_sec - older.tv_sec) * 1000LL + (newer.tv_nsec - older.tv_nsec) / 1000000LL;
+}
+
+static int stats_consumers_active(const OSD *osd, const SseStreamer *sse) {
+    int osd_active = (osd != NULL && osd_is_active(osd)) ? 1 : 0;
+    int sse_active = sse_streamer_requires_stats(sse) ? 1 : 0;
+    return osd_active || sse_active;
 }
 
 int main(int argc, char **argv) {
@@ -77,6 +84,13 @@ int main(int argc, char **argv) {
     UdevMonitor um = {0};
     OSD osd;
     osd_init(&osd);
+    SseStreamer sse_streamer;
+    sse_streamer_init(&sse_streamer);
+    if (cfg.sse.enable) {
+        if (sse_streamer_start(&sse_streamer, &cfg) != 0) {
+            LOGW("Failed to start SSE streamer; continuing without SSE output");
+        }
+    }
 
     if (cfg.use_udev) {
         if (udev_monitor_open(&um) != 0) {
@@ -90,18 +104,18 @@ int main(int argc, char **argv) {
         if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
             if (cfg.osd_enable) {
                 if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
-                    pipeline_set_receiver_stats_enabled(&ps, TRUE);
+                    pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
                 } else {
-                    pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                    pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
                 }
             } else {
-                pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
             }
             if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
                 LOGE("Failed to start pipeline");
-                pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
             } else {
-                pipeline_set_receiver_stats_enabled(&ps, osd_is_active(&osd) ? TRUE : FALSE);
+                pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
             }
             clock_gettime(CLOCK_MONOTONIC, &window_start);
             restart_count = 0;
@@ -209,22 +223,22 @@ int main(int argc, char **argv) {
                     if (!osd_is_enabled(&osd)) {
                         osd_teardown(fd, &osd);
                         if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
-                            pipeline_set_receiver_stats_enabled(&ps, TRUE);
+                            pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
                             clock_gettime(CLOCK_MONOTONIC, &last_osd);
                         } else {
-                            pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                            pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
                             LOGW("OSD toggle: setup failed; overlay remains disabled.");
                         }
                     } else if (!osd_is_active(&osd)) {
                         if (osd_enable(fd, &osd) == 0) {
-                            pipeline_set_receiver_stats_enabled(&ps, TRUE);
+                            pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
                             clock_gettime(CLOCK_MONOTONIC, &last_osd);
                         } else {
-                            pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                            pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
                             LOGW("OSD toggle: enable failed; overlay remains disabled.");
                         }
                     } else {
-                        pipeline_set_receiver_stats_enabled(&ps, TRUE);
+                        pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
                     }
                 }
             }
@@ -268,6 +282,18 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (sse_streamer_requires_stats(&sse_streamer)) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            static struct timespec last_sse = {0, 0};
+            if (last_sse.tv_sec == 0 || ms_since(now, last_sse) >= (long long)cfg.sse.interval_ms) {
+                UdpReceiverStats stats;
+                int have_stats = (pipeline_get_receiver_stats(&ps, &stats) == 0);
+                sse_streamer_publish(&sse_streamer, have_stats ? &stats : NULL, have_stats ? TRUE : FALSE);
+                last_sse = now;
+            }
+        }
+
         if (connected && ps.state == PIPELINE_STOPPED) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
@@ -284,9 +310,9 @@ int main(int argc, char **argv) {
             LOGW("Pipeline not running; restarting%s...", audio_disabled ? " (audio=fakesink)" : "");
             if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
                 LOGE("Restart failed");
-                pipeline_set_receiver_stats_enabled(&ps, FALSE);
+                pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
             } else {
-                pipeline_set_receiver_stats_enabled(&ps, osd_is_active(&osd) ? TRUE : FALSE);
+                pipeline_set_receiver_stats_enabled(&ps, stats_consumers_active(&osd, &sse_streamer));
             }
         }
     }
@@ -304,6 +330,8 @@ int main(int argc, char **argv) {
         udev_monitor_close(&um);
     }
     close(fd);
+    sse_streamer_publish(&sse_streamer, NULL, FALSE);
+    sse_streamer_stop(&sse_streamer);
     LOGI("Bye.");
     return 0;
 }
