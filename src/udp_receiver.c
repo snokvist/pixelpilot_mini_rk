@@ -76,6 +76,8 @@ struct UdpReceiver {
     gint fastpath_enabled;
     gint video_stream_active;
     gint audio_stream_active;
+    guint64 video_bytes_forwarded;
+    guint64 audio_bytes_forwarded;
 
     int udp_port;
     int vid_pt;
@@ -142,6 +144,56 @@ static inline guint64 udp_receiver_last_packet_load(struct UdpReceiver *ur) {
     g_mutex_unlock(&ur->lock);
     return value;
 #endif
+}
+
+static inline guint64 *udp_receiver_select_counter(struct UdpReceiver *ur, gboolean audio) {
+    return audio ? &ur->audio_bytes_forwarded : &ur->video_bytes_forwarded;
+}
+
+static inline void udp_receiver_stream_bytes_store(struct UdpReceiver *ur, gboolean audio, guint64 value) {
+#if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+    __atomic_store_n(udp_receiver_select_counter(ur, audio), value, __ATOMIC_RELAXED);
+#elif GLIB_CHECK_VERSION(2, 30, 0) && defined(G_ATOMIC_LOCK_FREE)
+    g_atomic_int64_set((gint64 *)udp_receiver_select_counter(ur, audio), (gint64)value);
+#else
+    g_mutex_lock(&ur->lock);
+    *udp_receiver_select_counter(ur, audio) = value;
+    g_mutex_unlock(&ur->lock);
+#endif
+}
+
+static inline guint64 udp_receiver_stream_bytes_load(struct UdpReceiver *ur, gboolean audio) {
+#if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+    return __atomic_load_n(udp_receiver_select_counter(ur, audio), __ATOMIC_RELAXED);
+#elif GLIB_CHECK_VERSION(2, 30, 0) && defined(G_ATOMIC_LOCK_FREE)
+    return (guint64)g_atomic_int64_get((gint64 *)udp_receiver_select_counter(ur, audio));
+#else
+    guint64 value;
+    g_mutex_lock(&ur->lock);
+    value = *udp_receiver_select_counter(ur, audio);
+    g_mutex_unlock(&ur->lock);
+    return value;
+#endif
+}
+
+static inline void udp_receiver_stream_bytes_add(struct UdpReceiver *ur, gboolean audio, guint64 value) {
+    if (value == 0) {
+        return;
+    }
+#if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+    __atomic_fetch_add(udp_receiver_select_counter(ur, audio), value, __ATOMIC_RELAXED);
+#elif GLIB_CHECK_VERSION(2, 30, 0) && defined(G_ATOMIC_LOCK_FREE)
+    g_atomic_int64_add((gint64 *)udp_receiver_select_counter(ur, audio), (gint64)value);
+#else
+    g_mutex_lock(&ur->lock);
+    *udp_receiver_select_counter(ur, audio) += value;
+    g_mutex_unlock(&ur->lock);
+#endif
+}
+
+static inline void udp_receiver_reset_stream_counters(struct UdpReceiver *ur) {
+    udp_receiver_stream_bytes_store(ur, FALSE, 0);
+    udp_receiver_stream_bytes_store(ur, TRUE, 0);
 }
 
 static void update_fastpath_locked(struct UdpReceiver *ur) {
@@ -547,6 +599,9 @@ static gboolean handle_received_packet_fastpath(struct UdpReceiver *ur,
     GstFlowReturn flow = gst_app_src_push_buffer(ur->video_appsrc, gstbuf);
     if (flow == GST_FLOW_OK) {
         g_atomic_int_set(&ur->video_stream_active, 1);
+        if (preview.payload_size > 0) {
+            udp_receiver_stream_bytes_add(ur, FALSE, preview.payload_size);
+        }
     } else {
         LOGV("UDP receiver: push_buffer (video, fastpath) returned %s", gst_flow_get_name(flow));
         if (flow == GST_FLOW_FLUSHING) {
@@ -639,6 +694,7 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
 
     gboolean mark_stream_active = (!drop_packet && target_appsrc != NULL);
     gboolean mark_audio_stream = mark_stream_active && target_is_audio;
+    guint payload_size = (parsed != NULL) ? parsed->payload_size : 0u;
 
     if (drop_packet || target_appsrc == NULL) {
         gst_buffer_unref(gstbuf);
@@ -658,6 +714,9 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
             } else {
                 g_atomic_int_set(&ur->video_stream_active, 1);
             }
+        }
+        if (payload_size > 0) {
+            udp_receiver_stream_bytes_add(ur, mark_audio_stream, payload_size);
         }
     } else {
         LOGV("UDP receiver: push_buffer (%s) returned %s",
@@ -916,6 +975,9 @@ void udp_receiver_set_audio_appsrc(UdpReceiver *ur, GstAppSrc *audio_appsrc) {
     }
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
+
+    g_atomic_int_set(&ur->audio_stream_active, 0);
+    udp_receiver_stream_bytes_store(ur, TRUE, 0);
 }
 
 static int setup_socket_for_port(int port, int *out_fd, const char *label) {
@@ -984,6 +1046,8 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 
+    udp_receiver_reset_stream_counters(ur);
+
     if (setup_socket_for_port(ur->udp_port, &ur->sockfd, "udp") != 0) {
         return -1;
     }
@@ -1022,8 +1086,6 @@ void udp_receiver_stop(UdpReceiver *ur) {
     if (ur == NULL) {
         return;
     }
-    gboolean video_started = FALSE;
-    gboolean audio_started = FALSE;
 
     g_mutex_lock(&ur->lock);
     if (!ur->running) {
@@ -1031,8 +1093,6 @@ void udp_receiver_stop(UdpReceiver *ur) {
         return;
     }
     ur->stop_requested = TRUE;
-    video_started = g_atomic_int_get(&ur->video_stream_active) ? TRUE : FALSE;
-    audio_started = g_atomic_int_get(&ur->audio_stream_active) ? TRUE : FALSE;
     g_mutex_unlock(&ur->lock);
 
     if (ur->sockfd >= 0) {
@@ -1048,6 +1108,12 @@ void udp_receiver_stop(UdpReceiver *ur) {
         close(ur->sockfd);
         ur->sockfd = -1;
     }
+
+    guint64 video_bytes = udp_receiver_stream_bytes_load(ur, FALSE);
+    guint64 audio_bytes = udp_receiver_stream_bytes_load(ur, TRUE);
+
+    gboolean video_started = (video_bytes > 0);
+    gboolean audio_started = (audio_bytes > 0);
 
     if (ur->video_appsrc != NULL && video_started) {
         gst_app_src_end_of_stream(ur->video_appsrc);
@@ -1067,6 +1133,8 @@ void udp_receiver_stop(UdpReceiver *ur) {
     g_atomic_int_set(&ur->audio_stream_active, 0);
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
+
+    udp_receiver_reset_stream_counters(ur);
 }
 
 void udp_receiver_destroy(UdpReceiver *ur) {
