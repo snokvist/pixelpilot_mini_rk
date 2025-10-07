@@ -14,6 +14,7 @@
 
 #include <gst/gst.h>
 #include <rockchip/rk_mpi.h>
+#include <rockchip/mpp_err.h>
 
 #if defined(PIXELPILOT_DISABLE_NEON)
 #define PIXELPILOT_NEON_AVAILABLE 0
@@ -527,11 +528,15 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     set_mpp_decoding_parameters(vd);
 
 #if defined(MPP_SET_OUTPUT_TIMEOUT)
-    int64_t timeout = -1;
-    vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_TIMEOUT, &timeout);
+    int64_t timeout = 5000; // allow decode_get_frame() to wake at ~5 ms intervals
+    if (vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_TIMEOUT, &timeout) != MPP_OK) {
+        LOGW("Video decoder: failed to set output timeout");
+    }
 #else
-    int block = MPP_POLL_BLOCK;
-    vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_BLOCK, &block);
+    int block = 5; // poll with a small timeout so shutdown does not block indefinitely
+    if (vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_BLOCK, &block) != MPP_OK) {
+        LOGW("Video decoder: failed to set output block timeout");
+    }
 #endif
 
     g_mutex_init(&vd->lock);
@@ -620,17 +625,30 @@ void video_decoder_stop(VideoDecoder *vd) {
         return;
     }
 
+    gboolean was_running = FALSE;
+
     if (vd->lock_initialized) {
         g_mutex_lock(&vd->lock);
+        was_running = vd->running;
         vd->running = FALSE;
         if (vd->cond_initialized) {
             g_cond_broadcast(&vd->cond);
         }
         g_mutex_unlock(&vd->lock);
     } else {
+        was_running = vd->running;
         vd->running = FALSE;
         if (vd->cond_initialized) {
             g_cond_broadcast(&vd->cond);
+        }
+    }
+
+    if (was_running && vd->mpi && vd->ctx) {
+        video_decoder_send_eos(vd);
+
+        MPP_RET ret = vd->mpi->reset(vd->ctx);
+        if (ret != MPP_OK) {
+            LOGW("Video decoder: reset during stop failed (%d)", ret);
         }
     }
 
@@ -681,9 +699,17 @@ void video_decoder_send_eos(VideoDecoder *vd) {
     mpp_packet_set_pos(vd->packet, vd->packet_buf);
     mpp_packet_set_eos(vd->packet);
 
+    int attempts = 0;
     while (vd->mpi && vd->ctx) {
         MPP_RET ret = vd->mpi->decode_put_packet(vd->ctx, vd->packet);
         if (ret == MPP_OK) {
+            break;
+        }
+        if (ret != MPP_ERR_BUFFER_FULL) {
+            LOGW("Video decoder: decode_put_packet(EOS) failed (%d)", ret);
+        }
+        if (++attempts > 50) {
+            LOGW("Video decoder: giving up on EOS after %d attempts", attempts);
             break;
         }
         g_usleep(2000);
@@ -696,4 +722,3 @@ void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester) 
     }
     vd->idr_requester = requester;
 }
-
