@@ -44,9 +44,10 @@ void osd_layout_defaults(OsdLayout *layout) {
 
     const char *default_lines[] = {
         "HDMI {display.mode} plane={drm.video_plane_id}",
-        "UDP:{udp.port} PTv={udp.vid_pt} PTa={udp.aud_pt} lat={pipeline.latency_ms}ms",
+        "UDP:{udp.port} PTv={udp.vid_pt} PTa={udp.aud_pt} lat={pipeline.latency_ms}ms src={udp.source_ip}:{udp.source_port}",
         "Pipeline: {pipeline.state} restarts={pipeline.restart_count}{pipeline.audio_suffix}",
-        "RTP vpkts={udp.video_packets} net-loss={udp.lost_packets} reo={udp.reordered_packets} dup={udp.duplicate_packets} jitter={udp.jitter.latest_ms}/{udp.jitter.avg_ms}ms",
+        "RTP vpkts={udp.video_packets} net-loss={udp.lost_packets} reo={udp.reordered_packets} dup={udp.duplicate_packets} idr={udp.idr_requests} jitter={udp.jitter.latest_ms}/{udp.jitter.avg_ms}ms",
+        "IDR backoff={udp.idr.backoff_ms}ms loss={udp.idr.loss_duration_ms}ms since={udp.idr.since_last_request_ms}ms cool={udp.idr.cooldown_ms}ms last={udp.idr.last_loss_ms}ms",
         "Frames={udp.frames.count} incomplete={udp.frames.incomplete} last={udp.frames.last_bytes}KB avg={udp.frames.avg_bytes}KB seq={udp.expected_sequence}"
     };
     for (size_t i = 0; i < sizeof(default_lines) / sizeof(default_lines[0]) && i < OSD_MAX_TEXT_LINES; ++i) {

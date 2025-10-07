@@ -730,6 +730,34 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->aud_pt = atoi(value);
             return 0;
         }
+        if (strcasecmp(key, "idr-request") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->idr_request = v;
+            return 0;
+        }
+        if (strcasecmp(key, "idr-request-min-ms") == 0) {
+            cfg->idr_request_min_ms = atoi(value);
+            return 0;
+        }
+        if (strcasecmp(key, "idr-request-max-ms") == 0) {
+            cfg->idr_request_max_ms = atoi(value);
+            return 0;
+        }
+        if (strcasecmp(key, "idr-request-sustain-ms") == 0) {
+            cfg->idr_request_sustain_ms = atoi(value);
+            return 0;
+        }
+        if (strcasecmp(key, "idr-request-reset-ms") == 0) {
+            cfg->idr_request_reset_ms = atoi(value);
+            return 0;
+        }
+        if (strcasecmp(key, "idr-request-timeout-ms") == 0) {
+            cfg->idr_request_timeout_ms = atoi(value);
+            return 0;
+        }
         return -1;
     }
     if (strcasecmp(section, "pipeline") == 0) {

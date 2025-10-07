@@ -33,6 +33,12 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
+| `[udp].idr-request` | `true` triggers an HTTP `GET /request/idr` against the stream source when RTP loss is detected (subject to the configured throttle/backoff). |
+| `[udp].idr-request-min-ms` | Smallest interval (milliseconds) between IDR refresh HTTP requests (default 50). |
+| `[udp].idr-request-max-ms` | Maximum interval (milliseconds) reached after sustained packet loss (default 1000). |
+| `[udp].idr-request-sustain-ms` | Duration of continuous loss before the IDR interval caps at the configured maximum (default 5000). |
+| `[udp].idr-request-reset-ms` | Quiet period (milliseconds) without packet loss before the IDR backoff resets to the minimum interval (default 2000). |
+| `[udp].idr-request-timeout-ms` | Socket send/receive timeout (milliseconds) for the HTTP IDR trigger; keeps outstanding requests bounded (default 200). |
 | `[pipeline].latency-ms` | Network jitter buffer target in milliseconds. This feeds the appsrc `latency` property as well as the OSD token `{pipeline.latency_ms}`. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
 | `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
@@ -112,10 +118,20 @@ arriving on a different SSRC (or with a large sequence gap) is ignored entirely 
 | `udp.frame.avg_kib` | EWMA of recent video frame sizes (KiB). |
 | `udp.sequence.expected` | The next video sequence number the receiver is waiting for. |
 | `udp.timestamp.last_video` | RTP timestamp from the most recent video packet. |
+| `udp.idr_requests` | Count of IDR-trigger HTTP requests fired after detecting RTP loss (subject to the configured throttle). |
+| `udp.idr.backoff_ms` | Current backoff interval (milliseconds) before the next eligible IDR refresh request. |
+| `udp.idr.loss_duration_ms` | Milliseconds spent in the active loss burst that is driving IDR requests (0 when idle). |
+| `udp.idr.since_last_request_ms` | Milliseconds since the last IDR HTTP refresh was dispatched. |
+| `udp.idr.cooldown_ms` | Milliseconds remaining before the exponential backoff resets after a quiet period. |
+| `udp.idr.last_loss_ms` | Milliseconds elapsed since the most recent packet loss event. |
+| `udp.source_ip` / `udp.source_port` | IP and port of the most recent packet source feeding the receiver (updated when telemetry is enabled). |
 
 The history buffer exposed through `udp.history.*` tokens retains the 512 most recent packet samples, including packet size,
 payload type, arrival timestamp, and flags for loss, reordering, duplication, and frame boundaries. This makes it possible to
 build custom diagnostics or render per-packet overlays directly from the INI configuration.
+
+When `[udp].idr-request = true` the receiver issues an asynchronous HTTP `GET /request/idr` to the discovered stream source the
+first time a sequence gap is detected. Requests honour the configurable exponential backoff: they start at `[udp].idr-request-min-ms`, double after each trigger until `[udp].idr-request-max-ms`, and lock to that ceiling once loss has continued for `[udp].idr-request-sustain-ms`. If the stream stays loss-free for `[udp].idr-request-reset-ms` the scheduler automatically returns to the minimum interval without polling on every packet. Each request uses the `[udp].idr-request-timeout-ms` socket timeout (default 200 ms) so retries do not accumulate. The `udp.idr_*` metrics expose the live scheduler state (current backoff, cooldown deadline, and last-loss timing) so the OSD can confirm when IDR refreshes are being requested.
 
 ## Splash fallback playback
 

@@ -89,6 +89,13 @@ void cfg_defaults(AppCfg *c) {
     c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
 
+    c->idr_request = 0;
+    c->idr_request_min_ms = 50;
+    c->idr_request_max_ms = 1000;
+    c->idr_request_sustain_ms = 5000;
+    c->idr_request_reset_ms = 2000;
+    c->idr_request_timeout_ms = 200;
+
     c->no_audio = 0;
     c->audio_optional = 1;
     c->restart_limit = 3;

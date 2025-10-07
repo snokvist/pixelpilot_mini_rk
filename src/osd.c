@@ -300,6 +300,7 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
     char normalized_token[128];
     const char *key = osd_token_normalize(token, normalized_token, sizeof(normalized_token));
     const AppCfg *cfg = ctx->cfg;
+    guint64 now_ns = (guint64)g_get_monotonic_time() * 1000ull;
     if (strcmp(key, "display.mode") == 0) {
         if (ctx->ms) {
             snprintf(buf, buf_sz, "%dx%d@%d", ctx->ms->mode_w, ctx->ms->mode_h, ctx->ms->mode_hz);
@@ -421,6 +422,63 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.reordered_packets);
         return 0;
     }
+    if (strcmp(key, "udp.idr_requests") == 0) {
+        snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.idr_request_count);
+        return 0;
+    }
+    if (strcmp(key, "udp.idr.backoff_ms") == 0) {
+        double ms = (double)ctx->stats.idr_backoff_ns / 1e6;
+        snprintf(buf, buf_sz, "%.1f", ms);
+        return 0;
+    }
+    if (strcmp(key, "udp.idr.loss_duration_ms") == 0) {
+        double ms = 0.0;
+        if (ctx->stats.idr_loss_start_ns != 0 && now_ns >= ctx->stats.idr_loss_start_ns) {
+            ms = (double)(now_ns - ctx->stats.idr_loss_start_ns) / 1e6;
+        }
+        snprintf(buf, buf_sz, "%.1f", ms);
+        return 0;
+    }
+    if (strcmp(key, "udp.idr.since_last_request_ms") == 0) {
+        double ms = 0.0;
+        if (ctx->stats.idr_last_request_ns != 0 && now_ns >= ctx->stats.idr_last_request_ns) {
+            ms = (double)(now_ns - ctx->stats.idr_last_request_ns) / 1e6;
+        }
+        snprintf(buf, buf_sz, "%.1f", ms);
+        return 0;
+    }
+    if (strcmp(key, "udp.idr.cooldown_ms") == 0) {
+        double ms = 0.0;
+        if (ctx->stats.idr_reset_deadline_ns != 0 && ctx->stats.idr_reset_deadline_ns > now_ns) {
+            ms = (double)(ctx->stats.idr_reset_deadline_ns - now_ns) / 1e6;
+        }
+        snprintf(buf, buf_sz, "%.1f", ms);
+        return 0;
+    }
+    if (strcmp(key, "udp.idr.last_loss_ms") == 0) {
+        double ms = 0.0;
+        if (ctx->stats.idr_last_loss_event_ns != 0 && now_ns >= ctx->stats.idr_last_loss_event_ns) {
+            ms = (double)(now_ns - ctx->stats.idr_last_loss_event_ns) / 1e6;
+        }
+        snprintf(buf, buf_sz, "%.1f", ms);
+        return 0;
+    }
+    if (strcmp(key, "udp.source_ip") == 0) {
+        if (ctx->stats.source_address[0] != '\0') {
+            snprintf(buf, buf_sz, "%s", ctx->stats.source_address);
+        } else {
+            snprintf(buf, buf_sz, "n/a");
+        }
+        return 0;
+    }
+    if (strcmp(key, "udp.source_port") == 0) {
+        if (ctx->stats.source_address[0] != '\0') {
+            snprintf(buf, buf_sz, "%u", (unsigned int)ctx->stats.source_port);
+        } else {
+            snprintf(buf, buf_sz, "n/a");
+        }
+        return 0;
+    }
     if (strcmp(key, "udp.total_bytes") == 0) {
         snprintf(buf, buf_sz, "%llu", (unsigned long long)ctx->stats.total_bytes);
         return 0;
@@ -536,6 +594,46 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
     }
     if (metric && strcmp(metric, "udp.reordered_packets") == 0) {
         *out_value = (double)ctx->stats.reordered_packets;
+        return 1;
+    }
+    if (metric && strcmp(metric, "udp.idr.backoff_ms") == 0) {
+        *out_value = (double)ctx->stats.idr_backoff_ns / 1e6;
+        return 1;
+    }
+    if (metric && strcmp(metric, "udp.idr.loss_duration_ms") == 0) {
+        guint64 now_ns = (guint64)g_get_monotonic_time() * 1000ull;
+        double ms = 0.0;
+        if (ctx->stats.idr_loss_start_ns != 0 && now_ns >= ctx->stats.idr_loss_start_ns) {
+            ms = (double)(now_ns - ctx->stats.idr_loss_start_ns) / 1e6;
+        }
+        *out_value = ms;
+        return 1;
+    }
+    if (metric && strcmp(metric, "udp.idr.since_last_request_ms") == 0) {
+        guint64 now_ns = (guint64)g_get_monotonic_time() * 1000ull;
+        double ms = 0.0;
+        if (ctx->stats.idr_last_request_ns != 0 && now_ns >= ctx->stats.idr_last_request_ns) {
+            ms = (double)(now_ns - ctx->stats.idr_last_request_ns) / 1e6;
+        }
+        *out_value = ms;
+        return 1;
+    }
+    if (metric && strcmp(metric, "udp.idr.cooldown_ms") == 0) {
+        guint64 now_ns = (guint64)g_get_monotonic_time() * 1000ull;
+        double ms = 0.0;
+        if (ctx->stats.idr_reset_deadline_ns != 0 && ctx->stats.idr_reset_deadline_ns > now_ns) {
+            ms = (double)(ctx->stats.idr_reset_deadline_ns - now_ns) / 1e6;
+        }
+        *out_value = ms;
+        return 1;
+    }
+    if (metric && strcmp(metric, "udp.idr.last_loss_ms") == 0) {
+        guint64 now_ns = (guint64)g_get_monotonic_time() * 1000ull;
+        double ms = 0.0;
+        if (ctx->stats.idr_last_loss_event_ns != 0 && now_ns >= ctx->stats.idr_last_loss_event_ns) {
+            ms = (double)(now_ns - ctx->stats.idr_last_loss_event_ns) / 1e6;
+        }
+        *out_value = ms;
         return 1;
     }
 

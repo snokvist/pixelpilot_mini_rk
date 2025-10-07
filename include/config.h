@@ -48,6 +48,13 @@ typedef struct {
     CustomSinkMode custom_sink;
     char aud_dev[128];
 
+    int idr_request;
+    int idr_request_min_ms;
+    int idr_request_max_ms;
+    int idr_request_sustain_ms;
+    int idr_request_reset_ms;
+    int idr_request_timeout_ms;
+
     int no_audio;
     int audio_optional;
     int restart_limit;

@@ -49,6 +49,12 @@
 #define UDP_RECEIVER_MAX_PACKET 4096
 #define UDP_RECEIVER_BATCH 8
 #define UDP_AUDIO_SEQ_MAX_ADVANCE 8192
+#define IDR_REQUEST_DEFAULT_MIN_MS 50
+#define IDR_REQUEST_DEFAULT_MAX_MS 1000
+#define IDR_REQUEST_DEFAULT_SUSTAIN_MS 5000
+#define IDR_REQUEST_DEFAULT_RESET_MS 2000
+#define IDR_REQUEST_DEFAULT_TIMEOUT_MS 200
+#define SOURCE_ADDRESS_REFRESH_NS 5000000000ULL   // 5000 ms
 
 typedef struct {
     guint16 sequence;
@@ -110,6 +116,17 @@ struct UdpReceiver {
     gboolean have_video_ssrc;
 
     guint64 last_packet_ns;
+    gboolean have_source_addr;
+    guint64 last_idr_request_ns;
+    guint64 idr_min_interval_ns;
+    guint64 idr_max_interval_ns;
+    guint64 idr_sustain_ns;
+    guint64 idr_reset_ns;
+    guint64 idr_backoff_ns;
+    guint64 idr_loss_start_ns;
+    guint64 last_loss_event_ns;
+    guint64 idr_reset_deadline_ns;
+    guint64 last_source_refresh_ns;
 };
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
@@ -221,6 +238,55 @@ static inline guint64 get_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+static inline guint64 ms_to_ns(int ms) {
+    if (ms <= 0) {
+        return 0;
+    }
+    return (guint64)ms * 1000000ull;
+}
+
+static void udp_receiver_update_source_locked(struct UdpReceiver *ur,
+                                              const struct sockaddr_storage *addr,
+                                              socklen_t addr_len,
+                                              guint64 arrival_ns) {
+    if (ur == NULL || addr == NULL) {
+        return;
+    }
+
+    gboolean need_refresh = !ur->have_source_addr;
+    if (!need_refresh) {
+        if (arrival_ns == 0) {
+            need_refresh = TRUE;
+        } else if (ur->last_source_refresh_ns == 0) {
+            need_refresh = TRUE;
+        } else if (arrival_ns < ur->last_source_refresh_ns) {
+            need_refresh = TRUE;
+        } else if (arrival_ns - ur->last_source_refresh_ns >= SOURCE_ADDRESS_REFRESH_NS) {
+            need_refresh = TRUE;
+        }
+    }
+
+    if (!need_refresh) {
+        return;
+    }
+
+    if (addr->ss_family == AF_INET && addr_len >= (socklen_t)sizeof(struct sockaddr_in)) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+        char buf[UDP_RECEIVER_ADDR_MAX] = {0};
+        if (inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf)) != NULL) {
+            g_strlcpy(ur->stats.source_address, buf, sizeof(ur->stats.source_address));
+            ur->stats.source_port = ntohs(in->sin_port);
+            ur->have_source_addr = TRUE;
+        }
+    }
+
+    if (arrival_ns != 0) {
+        ur->last_source_refresh_ns = arrival_ns;
+    } else {
+        ur->last_source_refresh_ns = get_time_ns();
+    }
+}
+
 static inline void advance_expected_sequence(struct UdpReceiver *ur, const RtpParseResult *parsed) {
     if (!ur->have_video_ssrc || parsed == NULL) {
         return;
@@ -314,6 +380,197 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->have_video_ssrc = FALSE;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
+    ur->have_source_addr = FALSE;
+    ur->last_idr_request_ns = 0;
+    if (ur->idr_min_interval_ns == 0) {
+        ur->idr_min_interval_ns = ms_to_ns(IDR_REQUEST_DEFAULT_MIN_MS);
+    }
+    if (ur->idr_max_interval_ns == 0) {
+        ur->idr_max_interval_ns = ms_to_ns(IDR_REQUEST_DEFAULT_MAX_MS);
+    }
+    if (ur->idr_sustain_ns == 0) {
+        ur->idr_sustain_ns = ms_to_ns(IDR_REQUEST_DEFAULT_SUSTAIN_MS);
+    }
+    if (ur->idr_reset_ns == 0) {
+        ur->idr_reset_ns = ms_to_ns(IDR_REQUEST_DEFAULT_RESET_MS);
+    }
+    ur->idr_backoff_ns = ur->idr_min_interval_ns;
+    ur->idr_loss_start_ns = 0;
+    ur->last_loss_event_ns = 0;
+    ur->idr_reset_deadline_ns = 0;
+    ur->last_source_refresh_ns = 0;
+    ur->stats.idr_backoff_ns = ur->idr_backoff_ns;
+    ur->stats.idr_last_request_ns = 0;
+    ur->stats.idr_loss_start_ns = 0;
+    ur->stats.idr_last_loss_event_ns = 0;
+    ur->stats.idr_reset_deadline_ns = 0;
+}
+
+static void udp_receiver_apply_idr_config_locked(struct UdpReceiver *ur) {
+    if (ur == NULL) {
+        return;
+    }
+
+    guint64 min_ns = ms_to_ns(IDR_REQUEST_DEFAULT_MIN_MS);
+    guint64 max_ns = ms_to_ns(IDR_REQUEST_DEFAULT_MAX_MS);
+    guint64 sustain_ns = ms_to_ns(IDR_REQUEST_DEFAULT_SUSTAIN_MS);
+    guint64 reset_ns = ms_to_ns(IDR_REQUEST_DEFAULT_RESET_MS);
+
+    if (ur->cfg != NULL) {
+        if (ur->cfg->idr_request_min_ms > 0) {
+            min_ns = ms_to_ns(ur->cfg->idr_request_min_ms);
+        }
+        if (ur->cfg->idr_request_max_ms > 0) {
+            max_ns = ms_to_ns(ur->cfg->idr_request_max_ms);
+        }
+        if (ur->cfg->idr_request_sustain_ms > 0) {
+            sustain_ns = ms_to_ns(ur->cfg->idr_request_sustain_ms);
+        }
+        if (ur->cfg->idr_request_reset_ms > 0) {
+            reset_ns = ms_to_ns(ur->cfg->idr_request_reset_ms);
+        }
+    }
+
+    if (max_ns == 0 || max_ns < min_ns) {
+        max_ns = min_ns;
+    }
+    if (sustain_ns == 0) {
+        sustain_ns = max_ns;
+    }
+    if (sustain_ns < min_ns) {
+        sustain_ns = min_ns;
+    }
+    if (reset_ns == 0) {
+        reset_ns = min_ns;
+    }
+
+    ur->idr_min_interval_ns = min_ns;
+    ur->idr_max_interval_ns = max_ns;
+    ur->idr_sustain_ns = sustain_ns;
+    ur->idr_reset_ns = reset_ns;
+}
+
+static void udp_receiver_publish_idr_stats_locked(struct UdpReceiver *ur) {
+    if (ur == NULL) {
+        return;
+    }
+
+    ur->stats.idr_backoff_ns = ur->idr_backoff_ns;
+    ur->stats.idr_last_request_ns = ur->last_idr_request_ns;
+    ur->stats.idr_loss_start_ns = ur->idr_loss_start_ns;
+    ur->stats.idr_last_loss_event_ns = ur->last_loss_event_ns;
+    ur->stats.idr_reset_deadline_ns = ur->idr_reset_deadline_ns;
+}
+
+static void udp_receiver_maybe_reset_idr_locked(struct UdpReceiver *ur, guint64 now_ns) {
+    if (ur == NULL) {
+        return;
+    }
+    if (ur->idr_reset_deadline_ns == 0) {
+        return;
+    }
+    if (now_ns == 0) {
+        now_ns = get_time_ns();
+    }
+    if (now_ns < ur->idr_reset_deadline_ns) {
+        return;
+    }
+
+    ur->idr_backoff_ns = ur->idr_min_interval_ns != 0 ? ur->idr_min_interval_ns : ms_to_ns(IDR_REQUEST_DEFAULT_MIN_MS);
+    ur->idr_loss_start_ns = 0;
+    ur->idr_reset_deadline_ns = 0;
+    udp_receiver_publish_idr_stats_locked(ur);
+}
+
+static gboolean udp_receiver_consider_idr_locked(struct UdpReceiver *ur,
+                                                 guint64 arrival_ns,
+                                                 char *idr_host,
+                                                 size_t idr_host_sz) {
+    if (ur == NULL || ur->cfg == NULL || !ur->cfg->idr_request || !ur->have_source_addr) {
+        return FALSE;
+    }
+
+    guint64 last_event = ur->last_loss_event_ns;
+    guint64 min_ns = ur->idr_min_interval_ns != 0 ? ur->idr_min_interval_ns : ms_to_ns(IDR_REQUEST_DEFAULT_MIN_MS);
+    guint64 max_ns = ur->idr_max_interval_ns != 0 ? ur->idr_max_interval_ns : min_ns;
+    if (max_ns < min_ns) {
+        max_ns = min_ns;
+    }
+    guint64 reset_ns = ur->idr_reset_ns != 0 ? ur->idr_reset_ns : min_ns;
+    guint64 sustain_ns = ur->idr_sustain_ns != 0 ? ur->idr_sustain_ns : max_ns;
+
+    gboolean new_burst = (last_event == 0) || (arrival_ns < last_event) ||
+                         (arrival_ns - last_event >= reset_ns);
+    if (new_burst) {
+        ur->idr_backoff_ns = min_ns;
+        ur->idr_loss_start_ns = arrival_ns;
+    } else if (ur->idr_loss_start_ns == 0) {
+        ur->idr_loss_start_ns = last_event;
+    }
+
+    ur->last_loss_event_ns = arrival_ns;
+
+    if (reset_ns != 0) {
+        if (G_MAXUINT64 - arrival_ns < reset_ns) {
+            ur->idr_reset_deadline_ns = G_MAXUINT64;
+        } else {
+            ur->idr_reset_deadline_ns = arrival_ns + reset_ns;
+        }
+    } else {
+        ur->idr_reset_deadline_ns = 0;
+    }
+
+    if (ur->idr_backoff_ns < min_ns) {
+        ur->idr_backoff_ns = min_ns;
+    }
+    if (ur->idr_backoff_ns > max_ns) {
+        ur->idr_backoff_ns = max_ns;
+    }
+
+    guint64 wait_ns = ur->idr_backoff_ns;
+    guint64 last_request = ur->last_idr_request_ns;
+    gboolean trigger = TRUE;
+    if (last_request != 0) {
+        if (arrival_ns < last_request) {
+            last_request = 0;
+        } else {
+            guint64 elapsed = arrival_ns - last_request;
+            if (elapsed < wait_ns) {
+                trigger = FALSE;
+            }
+        }
+    }
+
+    if (!trigger) {
+        udp_receiver_publish_idr_stats_locked(ur);
+        return FALSE;
+    }
+
+    if (idr_host != NULL && idr_host_sz > 0) {
+        g_strlcpy(idr_host, ur->stats.source_address, idr_host_sz);
+    }
+
+    ur->last_idr_request_ns = arrival_ns;
+    ur->stats.idr_request_count++;
+
+    guint64 loss_start = ur->idr_loss_start_ns != 0 ? ur->idr_loss_start_ns : arrival_ns;
+    guint64 loss_duration = arrival_ns >= loss_start ? arrival_ns - loss_start : 0;
+
+    if (loss_duration >= sustain_ns) {
+        ur->idr_backoff_ns = max_ns;
+    } else {
+        guint64 next = wait_ns * 2u;
+        if (next > max_ns || next < wait_ns) {
+            next = max_ns;
+        }
+        if (next < min_ns) {
+            next = min_ns;
+        }
+        ur->idr_backoff_ns = next;
+    }
+
+    udp_receiver_publish_idr_stats_locked(ur);
+    return TRUE;
 }
 
 static void log_udp_neon_status_once(void) {
@@ -349,6 +606,91 @@ static void update_bitrate(struct UdpReceiver *ur, guint64 arrival_ns, guint32 b
     }
 }
 
+typedef struct {
+    char host[UDP_RECEIVER_ADDR_MAX];
+    int timeout_ms;
+} IdrRequestTask;
+
+static gpointer idr_request_thread(gpointer data) {
+    IdrRequestTask *task = (IdrRequestTask *)data;
+    if (task == NULL || task->host[0] == '\0') {
+        g_free(task);
+        return NULL;
+    }
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        LOGW("UDP receiver: failed to create socket for IDR request: %s", g_strerror(errno));
+        g_free(task);
+        return NULL;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(80);
+    if (inet_pton(AF_INET, task->host, &addr.sin_addr) != 1) {
+        LOGW("UDP receiver: failed to parse IDR host '%s'", task->host);
+        close(fd);
+        g_free(task);
+        return NULL;
+    }
+
+    int timeout_ms = task->timeout_ms > 0 ? task->timeout_ms : IDR_REQUEST_DEFAULT_TIMEOUT_MS;
+    if (timeout_ms <= 0) {
+        timeout_ms = IDR_REQUEST_DEFAULT_TIMEOUT_MS;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+        char request[256];
+        int len = g_snprintf(request, sizeof(request),
+                             "GET /request/idr HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
+                             task->host);
+        if (len > 0 && len < (int)sizeof(request)) {
+            ssize_t sent = send(fd, request, (size_t)len, 0);
+            if (sent < 0) {
+                LOGW("UDP receiver: failed to send IDR request to %s: %s", task->host, g_strerror(errno));
+            }
+        }
+    } else {
+        LOGW("UDP receiver: IDR request connect to %s failed: %s", task->host, g_strerror(errno));
+    }
+
+    close(fd);
+    g_free(task);
+    return NULL;
+}
+
+static void dispatch_idr_request_async(struct UdpReceiver *ur, const char *host) {
+    if (host == NULL || *host == '\0') {
+        return;
+    }
+
+    IdrRequestTask *task = g_new0(IdrRequestTask, 1);
+    if (task == NULL) {
+        return;
+    }
+    g_strlcpy(task->host, host, sizeof(task->host));
+    int timeout_ms = IDR_REQUEST_DEFAULT_TIMEOUT_MS;
+    if (ur != NULL && ur->cfg != NULL && ur->cfg->idr_request_timeout_ms > 0) {
+        timeout_ms = ur->cfg->idr_request_timeout_ms;
+    }
+    task->timeout_ms = timeout_ms;
+
+    GThread *thread = g_thread_new("idr-request", idr_request_thread, task);
+    if (thread != NULL) {
+        g_thread_unref(thread);
+    } else {
+        g_free(task);
+    }
+}
+
 static void finalize_frame(struct UdpReceiver *ur) {
     if (!ur->frame_active) {
         return;
@@ -368,19 +710,26 @@ static void finalize_frame(struct UdpReceiver *ur) {
     ur->frame_missing = FALSE;
 }
 
-static void process_rtp(struct UdpReceiver *ur,
-                        const guint8 *data,
-                        gsize len,
-                        guint64 arrival_ns,
-                        const RtpParseResult *parsed) {
+static gboolean process_rtp(struct UdpReceiver *ur,
+                            const guint8 *data,
+                            gsize len,
+                            guint64 arrival_ns,
+                            const RtpParseResult *parsed,
+                            char *idr_host,
+                            size_t idr_host_sz) {
+    gboolean trigger_idr = FALSE;
+    if (idr_host != NULL && idr_host_sz > 0) {
+        idr_host[0] = '\0';
+    }
+
     if (!ur->stats_enabled) {
-        return;
+        return FALSE;
     }
 
     RtpParseResult local;
     if (parsed == NULL) {
         if (!parse_rtp(data, len, &local)) {
-            return;
+            return FALSE;
         }
         parsed = &local;
     }
@@ -391,12 +740,12 @@ static void process_rtp(struct UdpReceiver *ur,
         ur->stats.audio_packets++;
         ur->stats.audio_bytes += len;
         advance_expected_sequence(ur, parsed);
-        return;
+        return FALSE;
     }
 
     if (!is_video) {
         ur->stats.ignored_packets++;
-        return;
+        return FALSE;
     }
 
     if (!ur->have_video_ssrc || ur->video_ssrc != parsed->ssrc) {
@@ -449,6 +798,9 @@ static void process_rtp(struct UdpReceiver *ur,
             ur->expected_seq = seq_next(parsed->sequence);
             ur->frame_missing = TRUE;
             sample.flags |= UDP_SAMPLE_FLAG_LOSS;
+            if (!trigger_idr) {
+                trigger_idr = udp_receiver_consider_idr_locked(ur, arrival_ns, idr_host, idr_host_sz);
+            }
         } else { // delta < 0
             ur->stats.reordered_packets++;
             sample.flags |= UDP_SAMPLE_FLAG_REORDER;
@@ -488,6 +840,7 @@ static void process_rtp(struct UdpReceiver *ur,
 
     update_bitrate(ur, arrival_ns, (guint32)len);
     history_push(ur, &sample);
+    return trigger_idr;
 }
 
 static gboolean handle_received_packet_fastpath(struct UdpReceiver *ur,
@@ -552,7 +905,9 @@ static gboolean handle_received_packet_fastpath(struct UdpReceiver *ur,
 static gboolean handle_received_packet(struct UdpReceiver *ur,
                                        GstBuffer *gstbuf,
                                        GstMapInfo *map,
-                                       gssize bytes_read) {
+                                       gssize bytes_read,
+                                       const struct sockaddr_storage *addr,
+                                       socklen_t addr_len) {
     if (bytes_read <= 0) {
         gst_buffer_unmap(gstbuf, map);
         gst_buffer_unref(gstbuf);
@@ -576,12 +931,18 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     GstAppSrc *target_appsrc = NULL;
     RtpParseResult preview;
     gboolean have_preview = FALSE;
+    char idr_host[UDP_RECEIVER_ADDR_MAX] = {0};
+    gboolean trigger_idr = FALSE;
 
     g_mutex_lock(&ur->lock);
 
     ur->last_packet_ns = arrival_ns;
     if (ur->stats_enabled) {
         ur->stats.last_packet_ns = arrival_ns;
+    }
+
+    if (addr != NULL) {
+        udp_receiver_update_source_locked(ur, addr, addr_len, arrival_ns);
     }
 
     gboolean filter_non_video = FALSE;
@@ -602,7 +963,13 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
 
     const RtpParseResult *parsed = have_preview ? &preview : NULL;
     if (ur->stats_enabled) {
-        process_rtp(ur, map->data, (gsize)bytes_read, arrival_ns, parsed);
+        trigger_idr = process_rtp(ur,
+                                  map->data,
+                                  (gsize)bytes_read,
+                                  arrival_ns,
+                                  parsed,
+                                  idr_host,
+                                  sizeof(idr_host));
     }
 
     if (filter_non_video && have_preview && !is_video) {
@@ -631,6 +998,10 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
 
     if (drop_packet || target_appsrc == NULL) {
         gst_buffer_unref(gstbuf);
+        if (trigger_idr && idr_host[0] != '\0') {
+            LOGI("UDP receiver: requesting IDR from %s after packet loss", idr_host);
+            dispatch_idr_request_async(ur, idr_host);
+        }
         return TRUE;
     }
 
@@ -647,6 +1018,11 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
         if (flow == GST_FLOW_FLUSHING) {
             g_usleep(1000);
         }
+    }
+
+    if (trigger_idr && idr_host[0] != '\0') {
+        LOGI("UDP receiver: requesting IDR from %s after packet loss", idr_host);
+        dispatch_idr_request_async(ur, idr_host);
     }
 
     return TRUE;
@@ -753,6 +1129,7 @@ static gpointer receiver_thread(gpointer data) {
         GstMapInfo maps[UDP_RECEIVER_BATCH];
         struct mmsghdr msgs[UDP_RECEIVER_BATCH];
         struct iovec iovecs[UDP_RECEIVER_BATCH];
+        struct sockaddr_storage addrs[UDP_RECEIVER_BATCH];
         guint prepared = 0;
 
         while (prepared < UDP_RECEIVER_BATCH) {
@@ -774,10 +1151,13 @@ static gpointer receiver_thread(gpointer data) {
 
             buffers[prepared] = gstbuf;
             memset(&msgs[prepared], 0, sizeof(msgs[prepared]));
+            memset(&addrs[prepared], 0, sizeof(addrs[prepared]));
             iovecs[prepared].iov_base = maps[prepared].data;
             iovecs[prepared].iov_len = max_pkt;
             msgs[prepared].msg_hdr.msg_iov = &iovecs[prepared];
             msgs[prepared].msg_hdr.msg_iovlen = 1;
+            msgs[prepared].msg_hdr.msg_name = &addrs[prepared];
+            msgs[prepared].msg_hdr.msg_namelen = sizeof(addrs[prepared]);
             prepared++;
         }
 
@@ -828,7 +1208,13 @@ static gpointer receiver_thread(gpointer data) {
             }
 
             gssize n = (gssize)msgs[i].msg_len;
-            handle_received_packet(ur, buffers[i], &maps[i], n);
+            struct sockaddr_storage *addr = NULL;
+            socklen_t addr_len = 0;
+            if (msgs[i].msg_hdr.msg_name != NULL && msgs[i].msg_hdr.msg_namelen > 0) {
+                addr = (struct sockaddr_storage *)msgs[i].msg_hdr.msg_name;
+                addr_len = (socklen_t)msgs[i].msg_hdr.msg_namelen;
+            }
+            handle_received_packet(ur, buffers[i], &maps[i], n, addr, addr_len);
         }
     }
 
@@ -861,6 +1247,12 @@ UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc
     ur->pool = NULL;
     ur->buffer_size = 0;
     ur->last_packet_ns = 0;
+    ur->idr_min_interval_ns = ms_to_ns(IDR_REQUEST_DEFAULT_MIN_MS);
+    ur->idr_max_interval_ns = ms_to_ns(IDR_REQUEST_DEFAULT_MAX_MS);
+    ur->idr_sustain_ns = ms_to_ns(IDR_REQUEST_DEFAULT_SUSTAIN_MS);
+    ur->idr_reset_ns = ms_to_ns(IDR_REQUEST_DEFAULT_RESET_MS);
+    ur->idr_backoff_ns = ur->idr_min_interval_ns;
+    ur->idr_reset_deadline_ns = 0;
     return ur;
 }
 
@@ -939,12 +1331,13 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
         g_mutex_unlock(&ur->lock);
         return 0;
     }
-    reset_stats_locked(ur);
-    ur->video_discont_pending = TRUE;
-    ur->audio_discont_pending = TRUE;
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
     ur->last_packet_ns = 0;
+    udp_receiver_apply_idr_config_locked(ur);
+    reset_stats_locked(ur);
+    ur->video_discont_pending = TRUE;
+    ur->audio_discont_pending = TRUE;
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
 
@@ -1049,6 +1442,8 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
         return;
     }
     g_mutex_lock(&ur->lock);
+    udp_receiver_maybe_reset_idr_locked(ur, 0);
+    udp_receiver_publish_idr_stats_locked(ur);
     neon_copy_bytes((guint8 *)stats, (const guint8 *)&ur->stats, sizeof(*stats));
     copy_history(stats->history, ur->history, UDP_RECEIVER_HISTORY);
     g_mutex_unlock(&ur->lock);

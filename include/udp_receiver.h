@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #define UDP_RECEIVER_HISTORY 512
+#define UDP_RECEIVER_ADDR_MAX 64
 
 #define UDP_SAMPLE_FLAG_LOSS 0x01
 #define UDP_SAMPLE_FLAG_REORDER 0x02
@@ -52,10 +53,18 @@ typedef struct {
     double bitrate_avg_mbps;
     guint32 last_video_timestamp;
     guint16 expected_sequence;
+    char source_address[UDP_RECEIVER_ADDR_MAX];
+    guint16 source_port;
     size_t history_count;
     size_t history_head;
     UdpReceiverPacketSample history[UDP_RECEIVER_HISTORY];
     guint64 last_packet_ns;
+    guint64 idr_request_count;
+    guint64 idr_backoff_ns;
+    guint64 idr_last_request_ns;
+    guint64 idr_loss_start_ns;
+    guint64 idr_last_loss_event_ns;
+    guint64 idr_reset_deadline_ns;
 } UdpReceiverStats;
 
 typedef struct UdpReceiver UdpReceiver;
