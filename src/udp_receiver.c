@@ -127,6 +127,7 @@ struct UdpReceiver {
     guint64 last_loss_event_ns;
     guint64 idr_reset_deadline_ns;
     guint64 last_source_refresh_ns;
+    gboolean idr_dispatch_pending;
 };
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
@@ -399,6 +400,7 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->last_loss_event_ns = 0;
     ur->idr_reset_deadline_ns = 0;
     ur->last_source_refresh_ns = 0;
+    ur->idr_dispatch_pending = FALSE;
     ur->stats.idr_backoff_ns = ur->idr_backoff_ns;
     ur->stats.idr_last_request_ns = 0;
     ur->stats.idr_loss_start_ns = 0;
@@ -479,6 +481,7 @@ static void udp_receiver_maybe_reset_idr_locked(struct UdpReceiver *ur, guint64 
     ur->idr_backoff_ns = ur->idr_min_interval_ns != 0 ? ur->idr_min_interval_ns : ms_to_ns(IDR_REQUEST_DEFAULT_MIN_MS);
     ur->idr_loss_start_ns = 0;
     ur->idr_reset_deadline_ns = 0;
+    ur->idr_dispatch_pending = FALSE;
     udp_receiver_publish_idr_stats_locked(ur);
 }
 
@@ -532,27 +535,30 @@ static gboolean udp_receiver_consider_idr_locked(struct UdpReceiver *ur,
 
     guint64 wait_ns = ur->idr_backoff_ns;
     guint64 last_request = ur->last_idr_request_ns;
-    gboolean trigger = FALSE;
+    gboolean schedule = FALSE;
 
     if (idr_host != NULL && idr_host_sz > 0) {
         idr_host[0] = '\0';
     }
 
-    if (idr_enabled && have_source) {
-        trigger = TRUE;
+    if (idr_enabled) {
+        schedule = TRUE;
         if (last_request != 0) {
             if (arrival_ns < last_request) {
                 last_request = 0;
             } else {
                 guint64 elapsed = arrival_ns - last_request;
                 if (elapsed < wait_ns) {
-                    trigger = FALSE;
+                    schedule = FALSE;
                 }
             }
         }
     }
 
-    if (!trigger) {
+    if (!schedule) {
+        if (!idr_enabled) {
+            ur->idr_dispatch_pending = FALSE;
+        }
         udp_receiver_publish_idr_stats_locked(ur);
         if (idr_host != NULL && idr_host_sz > 0 && have_source) {
             g_strlcpy(idr_host, ur->stats.source_address, idr_host_sz);
@@ -560,17 +566,7 @@ static gboolean udp_receiver_consider_idr_locked(struct UdpReceiver *ur,
         return FALSE;
     }
 
-    if (!have_source) {
-        udp_receiver_publish_idr_stats_locked(ur);
-        return FALSE;
-    }
-
-    if (idr_host != NULL && idr_host_sz > 0) {
-        g_strlcpy(idr_host, ur->stats.source_address, idr_host_sz);
-    }
-
     ur->last_idr_request_ns = arrival_ns;
-    ur->stats.idr_request_count++;
 
     guint64 loss_start = ur->idr_loss_start_ns != 0 ? ur->idr_loss_start_ns : arrival_ns;
     guint64 loss_duration = arrival_ns >= loss_start ? arrival_ns - loss_start : 0;
@@ -588,8 +584,19 @@ static gboolean udp_receiver_consider_idr_locked(struct UdpReceiver *ur,
         ur->idr_backoff_ns = next;
     }
 
+    if (have_source) {
+        if (idr_host != NULL && idr_host_sz > 0) {
+            g_strlcpy(idr_host, ur->stats.source_address, idr_host_sz);
+        }
+        ur->stats.idr_request_count++;
+        ur->idr_dispatch_pending = FALSE;
+        udp_receiver_publish_idr_stats_locked(ur);
+        return TRUE;
+    }
+
+    ur->idr_dispatch_pending = TRUE;
     udp_receiver_publish_idr_stats_locked(ur);
-    return TRUE;
+    return FALSE;
 }
 
 static void log_udp_neon_status_once(void) {
@@ -989,6 +996,21 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
                                   parsed,
                                   idr_host,
                                   sizeof(idr_host));
+        if (!trigger_idr && ur->idr_dispatch_pending) {
+            gboolean idr_enabled = (ur->cfg != NULL && ur->cfg->idr_request) ? TRUE : FALSE;
+            gboolean have_source = ur->have_source_addr && ur->stats.source_address[0] != '\0';
+            if (idr_enabled && have_source) {
+                ur->idr_dispatch_pending = FALSE;
+                if (idr_host[0] == '\0') {
+                    g_strlcpy(idr_host, ur->stats.source_address, sizeof(idr_host));
+                }
+                ur->stats.idr_request_count++;
+                udp_receiver_publish_idr_stats_locked(ur);
+                trigger_idr = TRUE;
+            } else if (!idr_enabled) {
+                ur->idr_dispatch_pending = FALSE;
+            }
+        }
     }
 
     if (filter_non_video && have_preview && !is_video) {
