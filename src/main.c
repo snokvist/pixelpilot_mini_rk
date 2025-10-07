@@ -17,13 +17,105 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <limits.h>
 
 static volatile sig_atomic_t g_exit_flag = 0;
 static volatile sig_atomic_t g_toggle_osd_flag = 0;
 static volatile sig_atomic_t g_toggle_record_flag = 0;
+
+static const char *g_instance_pid_path = "/tmp/pixel_pilot_rk.pid";
+
+static void remove_instance_pid(void) {
+    if (unlink(g_instance_pid_path) != 0 && errno != ENOENT) {
+        LOGW("Failed to remove %s: %s", g_instance_pid_path, strerror(errno));
+    }
+}
+
+static pid_t read_existing_pid(void) {
+    int fd = open(g_instance_pid_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return -1;
+    }
+
+    char buf[64];
+    ssize_t len = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (len <= 0) {
+        return -1;
+    }
+
+    buf[len] = '\0';
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(buf, &end, 10);
+    if (errno != 0 || end == buf || parsed <= 0 || parsed > INT_MAX) {
+        return -1;
+    }
+
+    return (pid_t)parsed;
+}
+
+static int write_pid_file(void) {
+    int fd = open(g_instance_pid_path, O_WRONLY | O_CLOEXEC | O_CREAT | O_EXCL, 0644);
+    if (fd < 0) {
+        if (errno == EEXIST) {
+            return 1; // caller will handle existing instance
+        }
+        LOGE("Failed to create %s: %s", g_instance_pid_path, strerror(errno));
+        return -1;
+    }
+
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%ld\n", (long)getpid());
+    if (len < 0 || (size_t)len >= sizeof(buf)) {
+        LOGE("PID buffer overflow while writing %s", g_instance_pid_path);
+        close(fd);
+        unlink(g_instance_pid_path);
+        return -1;
+    }
+
+    ssize_t written = write(fd, buf, (size_t)len);
+    if (written != (ssize_t)len) {
+        LOGE("Failed to write PID file %s: %s", g_instance_pid_path, strerror(errno));
+        close(fd);
+        unlink(g_instance_pid_path);
+        return -1;
+    }
+
+    close(fd);
+    atexit(remove_instance_pid);
+    return 0;
+}
+
+static int ensure_single_instance(void) {
+    for (;;) {
+        int rc = write_pid_file();
+        if (rc == 0) {
+            return 0;
+        }
+        if (rc < 0) {
+            return -1;
+        }
+
+        pid_t existing_pid = read_existing_pid();
+        if (existing_pid > 0) {
+            errno = 0;
+            if (kill(existing_pid, 0) == 0 || errno == EPERM) {
+                LOGE("An existing instance of pixel_pilot_rk is already running ... exiting ...");
+                return -1;
+            }
+        }
+
+        if (unlink(g_instance_pid_path) != 0 && errno != ENOENT) {
+            LOGE("Failed to clear stale pid file %s: %s", g_instance_pid_path, strerror(errno));
+            return -1;
+        }
+    }
+}
 
 static void on_sigint(int sig) {
     (void)sig;
@@ -52,6 +144,10 @@ int main(int argc, char **argv) {
     AppCfg cfg;
     if (parse_cli(argc, argv, &cfg) != 0) {
         return 2;
+    }
+
+    if (ensure_single_instance() < 0) {
+        return 1;
     }
 
     if (cfg_has_cpu_affinity(&cfg)) {
