@@ -47,6 +47,8 @@ typedef struct {
     gboolean splash_active;
     gboolean splash_available;
     guint splash_idle_timeout_ms;
+    gboolean splash_error_pending;
+    gchar *splash_error_message;
     guint64 pipeline_start_ns;
     guint64 last_udp_activity_ns;
     struct VideoRecorder *recorder;

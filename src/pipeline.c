@@ -108,6 +108,32 @@ static gpointer splash_loop_thread_func(gpointer data) {
     return NULL;
 }
 
+static void pipeline_on_splash_event(SplashEventType type, int a, int b, const char *msg, void *user) {
+    (void)a;
+    (void)b;
+
+    PipelineState *ps = (PipelineState *)user;
+    if (ps == NULL) {
+        return;
+    }
+
+    switch (type) {
+    case SPLASH_EVT_ERROR: {
+        const gchar *text = (msg != NULL && msg[0] != '\0') ? msg : "unknown error";
+        LOGE("Splash player error: %s", text);
+        gchar *dup = g_strdup(text);
+        g_mutex_lock(&ps->lock);
+        g_free(ps->splash_error_message);
+        ps->splash_error_message = dup;
+        ps->splash_error_pending = TRUE;
+        g_mutex_unlock(&ps->lock);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static gboolean pipeline_prepare_splash(PipelineState *ps,
                                         const AppCfg *cfg,
                                         GstElement *pipeline,
@@ -131,6 +157,7 @@ static gboolean pipeline_prepare_splash(PipelineState *ps,
         return FALSE;
     }
     ps->splash = splash;
+    splash_set_event_cb(splash, pipeline_on_splash_event, ps);
 
     GstElement *splash_appsrc = NULL;
     GstElement *splash_queue = NULL;
@@ -324,6 +351,7 @@ static void pipeline_teardown_splash(PipelineState *ps) {
     if (ps == NULL) {
         return;
     }
+    gchar *pending_error = NULL;
     if (ps->splash != NULL) {
         splash_stop(ps->splash);
     }
@@ -342,10 +370,38 @@ static void pipeline_teardown_splash(PipelineState *ps) {
     ps->input_selector = NULL;
     ps->splash_available = FALSE;
     ps->splash_active = FALSE;
+    g_mutex_lock(&ps->lock);
+    pending_error = ps->splash_error_message;
+    ps->splash_error_message = NULL;
+    ps->splash_error_pending = FALSE;
+    g_mutex_unlock(&ps->lock);
+    g_free(pending_error);
 }
 
 static void pipeline_update_splash(PipelineState *ps) {
     if (ps == NULL) {
+        return;
+    }
+
+    gboolean disable_splash = FALSE;
+    gchar *error_msg = NULL;
+    g_mutex_lock(&ps->lock);
+    if (ps->splash_error_pending) {
+        disable_splash = TRUE;
+        ps->splash_error_pending = FALSE;
+        error_msg = ps->splash_error_message;
+        ps->splash_error_message = NULL;
+    }
+    g_mutex_unlock(&ps->lock);
+
+    if (disable_splash) {
+        if (error_msg != NULL && error_msg[0] != '\0') {
+            LOGW("Disabling splash fallback after error: %s", error_msg);
+        } else {
+            LOGW("Disabling splash fallback after splash player error");
+        }
+        g_free(error_msg);
+        pipeline_teardown_splash(ps);
         return;
     }
     if (!ps->splash_available || ps->udp_receiver == NULL) {
@@ -1239,6 +1295,12 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->pipeline_start_ns = monotonic_time_ns();
     ps->last_udp_activity_ns = 0;
     ps->splash_active = FALSE;
+    ps->splash_available = FALSE;
+    if (ps->splash_error_message != NULL) {
+        g_free(ps->splash_error_message);
+    }
+    ps->splash_error_message = NULL;
+    ps->splash_error_pending = FALSE;
     g_mutex_lock(&ps->recorder_lock);
     ps->recorder = NULL;
     g_mutex_unlock(&ps->recorder_lock);
