@@ -411,7 +411,8 @@ static GstCaps *build_appsrc_caps(const AppCfg *cfg, gboolean video_only) {
     return gst_caps_new_empty_simple("application/x-rtp");
 }
 
-static GstElement *create_udp_app_source(const AppCfg *cfg,
+static GstElement *create_udp_app_source(PipelineState *ps,
+                                         const AppCfg *cfg,
                                          gboolean video_only,
                                          UdpReceiver **receiver_out,
                                          IdrRequester *requester) {
@@ -442,7 +443,9 @@ static GstElement *create_udp_app_source(const AppCfg *cfg,
         LOGE("Failed to create UDP receiver");
         goto fail;
     }
-    udp_receiver_set_wake_fd(receiver, ps->wake_fd);
+    if (ps != NULL) {
+        udp_receiver_set_wake_fd(receiver, ps->wake_fd);
+    }
 
     if (receiver_out != NULL) {
         *receiver_out = receiver;
@@ -497,7 +500,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     pipeline = gst_pipeline_new("pixelpilot-receiver");
     CHECK_ELEM(pipeline, "pipeline");
 
-    appsrc = create_udp_app_source(cfg, TRUE, &receiver, ps->idr_requester);
+    appsrc = create_udp_app_source(ps, cfg, TRUE, &receiver, ps->idr_requester);
     if (appsrc == NULL) {
         goto fail;
     }
