@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -18,6 +19,28 @@ typedef struct {
     SseStreamer *streamer;
     int fd;
 } SseClientContext;
+
+static void sse_drain_wake_fd(int fd, const char *context) {
+    if (fd < 0) {
+        return;
+    }
+    uint64_t value = 0;
+    ssize_t rc = read(fd, &value, sizeof(value));
+    if (rc < 0 && errno != EAGAIN) {
+        LOGW("SSE streamer: failed to drain wake fd for %s: %s", context, strerror(errno));
+    }
+}
+
+static void sse_signal_wake_fd(int fd, const char *reason) {
+    if (fd < 0) {
+        return;
+    }
+    uint64_t one = 1;
+    ssize_t rc = write(fd, &one, sizeof(one));
+    if (rc < 0 && errno != EAGAIN) {
+        LOGW("SSE streamer: failed to signal wake fd (%s): %s", reason != NULL ? reason : "wake", strerror(errno));
+    }
+}
 
 static int create_listen_socket(const char *bind_address, int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -204,12 +227,33 @@ cleanup:
 static gpointer sse_accept_thread(gpointer data) {
     SseStreamer *streamer = data;
     while (!streamer->shutdown) {
-        struct pollfd pfd = {
-            .fd = streamer->listen_fd,
-            .events = POLLIN,
-            .revents = 0,
-        };
-        int rc = poll(&pfd, 1, 200);
+        struct pollfd pfds[2];
+        int nfds = 0;
+        int idx_listen = -1;
+        int idx_wake = -1;
+
+        if (streamer->listen_fd >= 0) {
+            idx_listen = nfds;
+            pfds[nfds].fd = streamer->listen_fd;
+            pfds[nfds].events = POLLIN;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
+
+        if (streamer->wake_fd >= 0) {
+            idx_wake = nfds;
+            pfds[nfds].fd = streamer->wake_fd;
+            pfds[nfds].events = POLLIN;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
+
+        if (nfds == 0) {
+            g_usleep(1000);
+            continue;
+        }
+
+        int rc = poll(pfds, nfds, 200);
         if (rc < 0) {
             if (errno == EINTR) {
                 continue;
@@ -222,7 +266,11 @@ static gpointer sse_accept_thread(gpointer data) {
         if (rc == 0) {
             continue;
         }
-        if (!(pfd.revents & POLLIN)) {
+        if (idx_wake >= 0 && (pfds[idx_wake].revents & POLLIN)) {
+            sse_drain_wake_fd(streamer->wake_fd, "accept");
+            continue;
+        }
+        if (idx_listen < 0 || !(pfds[idx_listen].revents & POLLIN)) {
             continue;
         }
         struct sockaddr_in addr;
@@ -270,10 +318,11 @@ void sse_streamer_init(SseStreamer *streamer) {
     streamer->listen_fd = -1;
     streamer->interval_ms = 1000;
     streamer->port = 0;
+    streamer->wake_fd = -1;
     g_mutex_init(&streamer->lock);
 }
 
-int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
+int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg, int wake_fd) {
     if (streamer == NULL || cfg == NULL) {
         return -1;
     }
@@ -283,6 +332,8 @@ int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
     }
 
     streamer->configured = TRUE;
+    streamer->wake_fd = wake_fd;
+    sse_drain_wake_fd(streamer->wake_fd, "start");
     streamer->interval_ms = cfg->sse.interval_ms > 0 ? (guint)cfg->sse.interval_ms : 1000u;
     streamer->port = cfg->sse.port;
     if (cfg->sse.bind_address[0] != '\0') {
@@ -308,8 +359,9 @@ int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
         streamer->configured = FALSE;
         return -1;
     }
-    LOGI("SSE streamer: listening on %s:%d (interval=%ums)",
-         streamer->bind_address[0] ? streamer->bind_address : "0.0.0.0", streamer->port, streamer->interval_ms);
+    LOGI("SSE streamer: listening on %s:%d (fd=%d, interval=%ums)",
+         streamer->bind_address[0] ? streamer->bind_address : "0.0.0.0", streamer->port, streamer->listen_fd,
+         streamer->interval_ms);
     return 0;
 }
 
@@ -354,6 +406,7 @@ void sse_streamer_stop(SseStreamer *streamer) {
         return;
     }
     streamer->shutdown = TRUE;
+    sse_signal_wake_fd(streamer->wake_fd, "stop");
     if (streamer->listen_fd >= 0) {
         close(streamer->listen_fd);
         streamer->listen_fd = -1;
@@ -365,6 +418,7 @@ void sse_streamer_stop(SseStreamer *streamer) {
     streamer->running = FALSE;
     streamer->configured = FALSE;
     streamer->have_stats = FALSE;
+    streamer->wake_fd = -1;
 }
 
 gboolean sse_streamer_requires_stats(const SseStreamer *streamer) {

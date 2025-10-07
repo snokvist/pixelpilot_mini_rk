@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <poll.h>
+#include <stdint.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -79,6 +80,7 @@ struct UdpReceiver {
     int vid_pt;
     int aud_pt;
     int sockfd;
+    int wake_fd;
     gboolean video_discont_pending;
     gboolean audio_discont_pending;
 
@@ -114,6 +116,28 @@ struct UdpReceiver {
 
     IdrRequester *idr;
 };
+
+static void udp_receiver_drain_eventfd(int fd, const char *context) {
+    if (fd < 0) {
+        return;
+    }
+    uint64_t value = 0;
+    ssize_t rc = read(fd, &value, sizeof(value));
+    if (rc < 0 && errno != EAGAIN) {
+        LOGW("UDP receiver: failed to drain wake fd for %s: %s", context, g_strerror(errno));
+    }
+}
+
+static void udp_receiver_signal_wake(struct UdpReceiver *ur, const char *reason) {
+    if (ur == NULL || ur->wake_fd < 0) {
+        return;
+    }
+    uint64_t one = 1;
+    ssize_t rc = write(ur->wake_fd, &one, sizeof(one));
+    if (rc < 0 && errno != EAGAIN) {
+        LOGW("UDP receiver: failed to signal wake fd (%s): %s", reason != NULL ? reason : "wake", g_strerror(errno));
+    }
+}
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
 static inline void udp_receiver_last_packet_store(struct UdpReceiver *ur, guint64 value) {
@@ -714,12 +738,21 @@ static gpointer receiver_thread(gpointer data) {
             break;
         }
 
-        struct pollfd fds[1];
+        struct pollfd fds[2];
         int nfds = 0;
         int idx_socket = -1;
+        int idx_wake = -1;
         if (ur->sockfd >= 0) {
             idx_socket = nfds;
             fds[nfds].fd = ur->sockfd;
+            fds[nfds].events = POLLIN;
+            fds[nfds].revents = 0;
+            nfds++;
+        }
+
+        if (ur->wake_fd >= 0) {
+            idx_wake = nfds;
+            fds[nfds].fd = ur->wake_fd;
             fds[nfds].events = POLLIN;
             fds[nfds].revents = 0;
             nfds++;
@@ -739,6 +772,11 @@ static gpointer receiver_thread(gpointer data) {
             break;
         }
         if (pret == 0) {
+            continue;
+        }
+
+        if (idx_wake >= 0 && (fds[idx_wake].revents & POLLIN)) {
+            udp_receiver_drain_eventfd(ur->wake_fd, "receiver");
             continue;
         }
 
@@ -868,6 +906,7 @@ UdpReceiver *udp_receiver_create(int udp_port,
     ur->vid_pt = vid_pt;
     ur->aud_pt = aud_pt;
     ur->sockfd = -1;
+    ur->wake_fd = -1;
     ur->video_discont_pending = TRUE;
     ur->audio_discont_pending = TRUE;
     g_mutex_init(&ur->lock);
@@ -900,6 +939,14 @@ void udp_receiver_set_audio_appsrc(UdpReceiver *ur, GstAppSrc *audio_appsrc) {
     }
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
+}
+
+void udp_receiver_set_wake_fd(UdpReceiver *ur, int wake_fd) {
+    if (ur == NULL) {
+        return;
+    }
+    ur->wake_fd = wake_fd;
+    udp_receiver_drain_eventfd(ur->wake_fd, "setup");
 }
 
 static int setup_socket_for_port(int port, int *out_fd, const char *label) {
@@ -943,6 +990,9 @@ static int setup_socket_for_port(int port, int *out_fd, const char *label) {
         LOGW("UDP receiver: setsockopt(%s, SO_RCVBUF) failed: %s", label != NULL ? label : "udp",
              g_strerror(errno));
     }
+
+    const char *tag = (label != NULL && label[0] != '\0') ? label : "udp";
+    LOGI("UDP receiver: %s fd=%d bound to port %d", tag, fd, port);
 
     *out_fd = fd;
     return 0;
@@ -1011,6 +1061,8 @@ void udp_receiver_stop(UdpReceiver *ur) {
     }
     ur->stop_requested = TRUE;
     g_mutex_unlock(&ur->lock);
+
+    udp_receiver_signal_wake(ur, "stop");
 
     if (ur->sockfd >= 0) {
         shutdown(ur->sockfd, SHUT_RDWR);

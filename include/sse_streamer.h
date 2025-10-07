@@ -43,10 +43,11 @@ typedef struct {
     gboolean shutdown;
     gboolean have_stats;
     SseStatsSnapshot stats;
+    int wake_fd;
 } SseStreamer;
 
 void sse_streamer_init(SseStreamer *streamer);
-int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg);
+int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg, int wake_fd);
 void sse_streamer_publish(SseStreamer *streamer, const UdpReceiverStats *stats, gboolean have_stats);
 void sse_streamer_stop(SseStreamer *streamer);
 gboolean sse_streamer_requires_stats(const SseStreamer *streamer);

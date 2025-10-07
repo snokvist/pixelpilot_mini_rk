@@ -442,6 +442,7 @@ static GstElement *create_udp_app_source(const AppCfg *cfg,
         LOGE("Failed to create UDP receiver");
         goto fail;
     }
+    udp_receiver_set_wake_fd(receiver, ps->wake_fd);
 
     if (receiver_out != NULL) {
         *receiver_out = receiver;

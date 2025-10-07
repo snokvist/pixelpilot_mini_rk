@@ -22,10 +22,33 @@
 #include <time.h>
 #include <unistd.h>
 #include <limits.h>
+#include <stdint.h>
+#include <sys/eventfd.h>
 
 static volatile sig_atomic_t g_exit_flag = 0;
 static volatile sig_atomic_t g_toggle_osd_flag = 0;
 static volatile sig_atomic_t g_toggle_record_flag = 0;
+static int g_shutdown_event_fd = -1;
+
+static void wake_shutdown_eventfd(void) {
+    if (g_shutdown_event_fd < 0) {
+        return;
+    }
+    uint64_t one = 1;
+    ssize_t rc = write(g_shutdown_event_fd, &one, sizeof(one));
+    (void)rc;
+}
+
+static void drain_shutdown_eventfd(void) {
+    if (g_shutdown_event_fd < 0) {
+        return;
+    }
+    uint64_t value = 0;
+    ssize_t rc = read(g_shutdown_event_fd, &value, sizeof(value));
+    if (rc < 0 && errno != EAGAIN) {
+        LOGW("Failed to drain shutdown eventfd: %s", strerror(errno));
+    }
+}
 
 static const char *g_instance_pid_path = "/tmp/pixel_pilot_rk.pid";
 
@@ -120,6 +143,7 @@ static int ensure_single_instance(void) {
 static void on_sigint(int sig) {
     (void)sig;
     g_exit_flag = 1;
+    wake_shutdown_eventfd();
 }
 
 static void on_sigusr(int sig) {
@@ -150,6 +174,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    g_shutdown_event_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (g_shutdown_event_fd < 0) {
+        LOGE("Failed to create shutdown eventfd: %s", strerror(errno));
+        return 1;
+    }
+
     if (cfg_has_cpu_affinity(&cfg)) {
         cpu_set_t mask;
         cfg_get_process_affinity(&cfg, &mask);
@@ -167,6 +197,10 @@ int main(int argc, char **argv) {
     int fd = open(cfg.card_path, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
         LOGE("open %s: %s", cfg.card_path, strerror(errno));
+        if (g_shutdown_event_fd >= 0) {
+            close(g_shutdown_event_fd);
+            g_shutdown_event_fd = -1;
+        }
         return 1;
     }
 
@@ -177,13 +211,14 @@ int main(int argc, char **argv) {
     ModesetResult ms = {0};
     PipelineState ps = {0};
     ps.state = PIPELINE_STOPPED;
+    ps.wake_fd = g_shutdown_event_fd;
     UdevMonitor um = {0};
     OSD osd;
     osd_init(&osd);
     SseStreamer sse_streamer;
     sse_streamer_init(&sse_streamer);
     if (cfg.sse.enable) {
-        if (sse_streamer_start(&sse_streamer, &cfg) != 0) {
+        if (sse_streamer_start(&sse_streamer, &cfg, g_shutdown_event_fd) != 0) {
             LOGW("Failed to start SSE streamer; continuing without SSE output");
         }
     }
@@ -231,18 +266,31 @@ int main(int argc, char **argv) {
     while (!g_exit_flag) {
         pipeline_poll_child(&ps);
 
-        struct pollfd pfds[2];
+        struct pollfd pfds[3];
         int nfds = 0;
+        int idx_udev = -1;
+        int idx_shutdown = -1;
         int ufd = cfg.use_udev ? um.fd : -1;
         if (ufd >= 0) {
+            idx_udev = nfds;
             pfds[nfds++] = (struct pollfd){.fd = ufd, .events = POLLIN};
+        }
+        if (g_shutdown_event_fd >= 0) {
+            idx_shutdown = nfds;
+            pfds[nfds++] = (struct pollfd){.fd = g_shutdown_event_fd, .events = POLLIN};
         }
         pfds[nfds++] = (struct pollfd){.fd = STDIN_FILENO, .events = 0};
 
         int tout = 200;
-        (void)poll(pfds, nfds, tout);
+        int pret = poll(pfds, nfds, tout);
+        if (pret > 0 && idx_shutdown >= 0 && (pfds[idx_shutdown].revents & POLLIN)) {
+            drain_shutdown_eventfd();
+        }
+        if (pret <= 0) {
+            continue;
+        }
 
-        if (ufd >= 0 && nfds > 0 && (pfds[0].revents & POLLIN)) {
+        if (idx_udev >= 0 && (pfds[idx_udev].revents & POLLIN)) {
             if (udev_monitor_did_hotplug(&um)) {
                 struct timespec now;
                 clock_gettime(CLOCK_MONOTONIC, &now);
@@ -428,6 +476,10 @@ int main(int argc, char **argv) {
     close(fd);
     sse_streamer_publish(&sse_streamer, NULL, FALSE);
     sse_streamer_stop(&sse_streamer);
+    if (g_shutdown_event_fd >= 0) {
+        close(g_shutdown_event_fd);
+        g_shutdown_event_fd = -1;
+    }
     LOGI("Bye.");
     return 0;
 }

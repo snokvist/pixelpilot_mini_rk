@@ -51,6 +51,7 @@ typedef struct {
     guint64 last_udp_activity_ns;
     struct VideoRecorder *recorder;
     GMutex recorder_lock;
+    int wake_fd;
 } PipelineState;
 
 #include "config.h"
