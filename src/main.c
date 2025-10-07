@@ -461,21 +461,27 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Teardown order matters: shut down consumers first, then the media pipeline, and
+    // only afterwards release DRM/ALSA resources. This matches the guidance provided
+    // for graceful exits to avoid backend oddities when Ctrl+C is received.
+    pipeline_set_receiver_stats_enabled(&ps, FALSE);
+    sse_streamer_publish(&sse_streamer, NULL, FALSE);
+    sse_streamer_stop(&sse_streamer);
+
     if (ps.state != PIPELINE_STOPPED) {
         pipeline_stop(&ps, 700);
     }
+
     if (osd_is_active(&osd)) {
-        pipeline_set_receiver_stats_enabled(&ps, FALSE);
         osd_disable(fd, &osd);
     }
-    pipeline_set_receiver_stats_enabled(&ps, FALSE);
     osd_teardown(fd, &osd);
+
     if (cfg.use_udev) {
         udev_monitor_close(&um);
     }
+
     close(fd);
-    sse_streamer_publish(&sse_streamer, NULL, FALSE);
-    sse_streamer_stop(&sse_streamer);
     if (g_shutdown_event_fd >= 0) {
         drain_shutdown_eventfd();
         close(g_shutdown_event_fd);
