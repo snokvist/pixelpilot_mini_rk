@@ -20,6 +20,7 @@
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define CHECK_ELEM(elem, name)                                                                      \
     do {                                                                                            \
@@ -148,6 +149,17 @@ static gboolean pipeline_prepare_splash(PipelineState *ps,
     }
     if (cfg->splash.sequence_count <= 0 || cfg->splash.input_path[0] == '\0') {
         LOGW("Splash fallback enabled but missing input or sequences; disabling");
+        return TRUE;
+    }
+
+    const char *asset_path = cfg->splash.input_path;
+    if (!g_file_test(asset_path, G_FILE_TEST_EXISTS | G_FILE_TEST_IS_REGULAR)) {
+        LOGW("Splash fallback asset '%s' missing; disabling fallback", asset_path);
+        return TRUE;
+    }
+    if (g_access(asset_path, R_OK) != 0) {
+        LOGW("Splash fallback asset '%s' not readable (%s); disabling fallback", asset_path,
+             g_strerror(errno));
         return TRUE;
     }
 
