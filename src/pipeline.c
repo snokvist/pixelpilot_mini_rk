@@ -347,7 +347,7 @@ fail:
     return FALSE;
 }
 
-static void pipeline_teardown_splash(PipelineState *ps) {
+static void pipeline_teardown_splash(PipelineState *ps, gboolean preserve_selector_links) {
     if (ps == NULL) {
         return;
     }
@@ -365,9 +365,12 @@ static void pipeline_teardown_splash(PipelineState *ps) {
         ps->splash = NULL;
     }
     ps->splash_loop_running = FALSE;
-    release_selector_pad(ps->input_selector, &ps->selector_udp_pad);
-    release_selector_pad(ps->input_selector, &ps->selector_splash_pad);
-    ps->input_selector = NULL;
+    GstElement *selector = ps->input_selector;
+    release_selector_pad(selector, &ps->selector_splash_pad);
+    if (!preserve_selector_links) {
+        release_selector_pad(selector, &ps->selector_udp_pad);
+        ps->input_selector = NULL;
+    }
     ps->splash_available = FALSE;
     ps->splash_active = FALSE;
     g_mutex_lock(&ps->lock);
@@ -400,10 +403,18 @@ static void pipeline_update_splash(PipelineState *ps) {
         } else {
             LOGW("Disabling splash fallback after splash player error");
         }
+        g_mutex_lock(&ps->lock);
+        if (ps->input_selector != NULL && ps->selector_udp_pad != NULL) {
+            g_object_set(ps->input_selector, "active-pad", ps->selector_udp_pad, NULL);
+        }
+        ps->splash_active = FALSE;
+        g_mutex_unlock(&ps->lock);
+
         g_free(error_msg);
-        pipeline_teardown_splash(ps);
+        pipeline_teardown_splash(ps, TRUE);
         return;
     }
+    g_free(error_msg);
     if (!ps->splash_available || ps->udp_receiver == NULL) {
         return;
     }
@@ -1244,7 +1255,7 @@ static void cleanup_pipeline(PipelineState *ps) {
         idr_requester_free(ps->idr_requester);
         ps->idr_requester = NULL;
     }
-    pipeline_teardown_splash(ps);
+    pipeline_teardown_splash(ps, FALSE);
     ps->video_sink = NULL;
     if (ps->pipeline != NULL) {
         gst_object_unref(ps->pipeline);
