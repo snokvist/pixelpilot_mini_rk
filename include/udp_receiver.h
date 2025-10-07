@@ -59,8 +59,9 @@ typedef struct {
 } UdpReceiverStats;
 
 typedef struct UdpReceiver UdpReceiver;
+struct IdrRequester;
 
-UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *video_appsrc);
+UdpReceiver *udp_receiver_create(int udp_port, int vid_pt, int aud_pt, GstAppSrc *video_appsrc, struct IdrRequester *requester);
 void udp_receiver_set_audio_appsrc(UdpReceiver *ur, GstAppSrc *audio_appsrc);
 int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot);
 void udp_receiver_stop(UdpReceiver *ur);

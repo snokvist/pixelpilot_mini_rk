@@ -411,7 +411,10 @@ static GstCaps *build_appsrc_caps(const AppCfg *cfg, gboolean video_only) {
     return gst_caps_new_empty_simple("application/x-rtp");
 }
 
-static GstElement *create_udp_app_source(const AppCfg *cfg, gboolean video_only, UdpReceiver **receiver_out) {
+static GstElement *create_udp_app_source(const AppCfg *cfg,
+                                         gboolean video_only,
+                                         UdpReceiver **receiver_out,
+                                         IdrRequester *requester) {
     GstElement *appsrc_elem = gst_element_factory_make("appsrc", "udp_appsrc");
     UdpReceiver *receiver = NULL;
     GstCaps *caps = NULL;
@@ -434,7 +437,7 @@ static GstElement *create_udp_app_source(const AppCfg *cfg, gboolean video_only,
     gst_app_src_set_latency(appsrc, 0, 0);
     gst_app_src_set_max_bytes(appsrc, 4 * 1024 * 1024);
 
-    receiver = udp_receiver_create(cfg->udp_port, cfg->vid_pt, cfg->aud_pt, appsrc);
+    receiver = udp_receiver_create(cfg->udp_port, cfg->vid_pt, cfg->aud_pt, appsrc, requester);
     if (receiver == NULL) {
         LOGE("Failed to create UDP receiver");
         goto fail;
@@ -493,7 +496,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     pipeline = gst_pipeline_new("pixelpilot-receiver");
     CHECK_ELEM(pipeline, "pipeline");
 
-    appsrc = create_udp_app_source(cfg, TRUE, &receiver);
+    appsrc = create_udp_app_source(cfg, TRUE, &receiver, ps->idr_requester);
     if (appsrc == NULL) {
         goto fail;
     }
@@ -1155,6 +1158,10 @@ static void cleanup_pipeline(PipelineState *ps) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
     }
+    if (ps->idr_requester != NULL) {
+        idr_requester_free(ps->idr_requester);
+        ps->idr_requester = NULL;
+    }
     pipeline_teardown_splash(ps);
     ps->video_sink = NULL;
     if (ps->pipeline != NULL) {
@@ -1209,6 +1216,15 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     g_mutex_lock(&ps->recorder_lock);
     ps->recorder = NULL;
     g_mutex_unlock(&ps->recorder_lock);
+
+    if (ps->idr_requester != NULL) {
+        idr_requester_free(ps->idr_requester);
+        ps->idr_requester = NULL;
+    }
+    ps->idr_requester = idr_requester_new();
+    if (ps->idr_requester == NULL) {
+        LOGW("IDR requester: allocation failed; automatic IDR recovery disabled");
+    }
 
     GstElement *pipeline = NULL;
     gboolean force_audio_disabled = FALSE;
@@ -1267,6 +1283,8 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         goto fail;
     }
     ps->decoder_initialized = TRUE;
+
+    video_decoder_set_idr_requester(ps->decoder, ps->idr_requester);
 
     if (video_decoder_start(ps->decoder) != 0) {
         LOGE("Failed to start video decoder threads");

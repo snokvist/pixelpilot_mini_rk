@@ -6,6 +6,7 @@
 
 #include "udp_receiver.h"
 #include "video_decoder.h"
+#include "idr_requester.h"
 
 typedef enum {
     PIPELINE_STOPPED = 0,
@@ -22,6 +23,7 @@ typedef struct {
     GstElement *video_sink;
     GstElement *input_selector;
     UdpReceiver *udp_receiver;
+    IdrRequester *idr_requester;
     GThread *bus_thread;
     GThread *appsink_thread;
     GMutex lock;
