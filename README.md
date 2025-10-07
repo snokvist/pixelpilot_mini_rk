@@ -120,6 +120,36 @@ The history buffer exposed through `udp.history.*` tokens retains the 512 most r
 payload type, arrival timestamp, and flags for loss, reordering, duplication, and frame boundaries. This makes it possible to
 build custom diagnostics or render per-packet overlays directly from the INI configuration.
 
+### Streaming stats over Server-Sent Events
+
+Enable the lightweight SSE endpoint with `--sse-enable` (or `[sse].enable = true` in the INI file) to expose the cumulative UDP
+receiver counters without running the on-screen display. The streamer listens on `127.0.0.1:8080` by default and can be tuned
+via:
+
+```
+--sse-bind 0.0.0.0          # address to bind
+--sse-port 9090             # TCP port for HTTP clients
+--sse-interval-ms 1000      # emission interval in milliseconds
+```
+
+Each HTTP client that performs `GET /stats` receives a `text/event-stream` response. Payloads are emitted at the configured
+interval and include all counters listed above:
+
+```
+event: stats
+data: {"have_stats":true,"total_packets":1234,"video_packets":1234,
+       "audio_packets":0,"ignored_packets":0,"duplicate_packets":0,
+       "lost_packets":2,"reordered_packets":1,"total_bytes":9876543,
+       "video_bytes":9876543,"audio_bytes":0,"frame_count":45,
+       "incomplete_frames":0,"last_frame_kib":112.5,"avg_frame_kib":108.3,
+       "bitrate_mbps":12.340,"bitrate_avg_mbps":10.876,"jitter_ms":3.25,
+       "jitter_avg_ms":2.97,"expected_sequence":54321,
+       "last_video_timestamp":27182818,"last_packet_ns":123456789012}
+```
+
+When the receiver has not yet produced statistics, the streamer reports `{"have_stats":false}` so clients can ignore placeholder
+updates.
+
 ## Splash fallback playback
 
 When the primary UDP stream drops out it is often desirable to display a "waiting" slate rather than leaving the screen idle.
