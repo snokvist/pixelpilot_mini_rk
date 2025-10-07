@@ -875,6 +875,38 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "idr") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->idr.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "port") == 0) {
+            int port = atoi(value);
+            if (port <= 0 || port > 65535) {
+                LOGE("config: IDR port '%s' out of range", value);
+                return -1;
+            }
+            cfg->idr.http_port = port;
+            return 0;
+        }
+        if (strcasecmp(key, "path") == 0 || strcasecmp(key, "request") == 0) {
+            ini_copy_string(cfg->idr.http_path, sizeof(cfg->idr.http_path), value);
+            return 0;
+        }
+        if (strcasecmp(key, "timeout-ms") == 0) {
+            int timeout = atoi(value);
+            if (timeout <= 0) {
+                timeout = 1;
+            }
+            cfg->idr.http_timeout_ms = (unsigned int)timeout;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "gst") == 0) {
         if (strcasecmp(key, "log") == 0) {
             int v = 0;

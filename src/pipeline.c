@@ -1221,9 +1221,13 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         idr_requester_free(ps->idr_requester);
         ps->idr_requester = NULL;
     }
-    ps->idr_requester = idr_requester_new();
-    if (ps->idr_requester == NULL) {
-        LOGW("IDR requester: allocation failed; automatic IDR recovery disabled");
+    if (cfg->idr.enable) {
+        ps->idr_requester = idr_requester_new(&cfg->idr);
+        if (ps->idr_requester == NULL) {
+            LOGW("IDR requester: allocation failed; automatic IDR recovery disabled");
+        }
+    } else {
+        LOGI("IDR requester: disabled via configuration");
     }
 
     GstElement *pipeline = NULL;
