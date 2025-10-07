@@ -1083,16 +1083,42 @@ static gpointer bus_thread_func(gpointer data) {
             GError *err = NULL;
             gchar *dbg = NULL;
             gst_message_parse_error(msg, &err, &dbg);
-            LOGE("Pipeline error: %s (debug=%s)", err != NULL ? err->message : "unknown",
-                 dbg != NULL ? dbg : "none");
+
+            gboolean stopping = FALSE;
+            g_mutex_lock(&ps->lock);
+            stopping = ps->stop_requested;
+            g_mutex_unlock(&ps->lock);
+
+            const gchar *src_name = NULL;
+            if (GST_MESSAGE_SRC(msg) != NULL) {
+                src_name = GST_OBJECT_NAME(GST_MESSAGE_SRC(msg));
+            }
+
+            gboolean handled = FALSE;
+            if (stopping && src_name != NULL && g_strcmp0(src_name, "audio_sink") == 0 && err != NULL &&
+                err->domain == GST_STREAM_ERROR && err->code == GST_STREAM_ERROR_WRONG_TYPE && dbg != NULL &&
+                g_strrstr(dbg, "Sink not negotiated before eos event") != NULL) {
+                LOGI("Audio sink reported unnegotiated EOS during shutdown; ignoring.");
+                g_mutex_lock(&ps->lock);
+                ps->stop_requested = TRUE;
+                g_mutex_unlock(&ps->lock);
+                handled = TRUE;
+            }
+
+            if (!handled) {
+                LOGE("Pipeline error: %s (debug=%s)", err != NULL ? err->message : "unknown",
+                     dbg != NULL ? dbg : "none");
+                g_mutex_lock(&ps->lock);
+                ps->encountered_error = TRUE;
+                ps->stop_requested = TRUE;
+                g_mutex_unlock(&ps->lock);
+            }
+
             if (err != NULL) {
                 g_error_free(err);
             }
             g_free(dbg);
-            g_mutex_lock(&ps->lock);
-            ps->encountered_error = TRUE;
-            ps->stop_requested = TRUE;
-            g_mutex_unlock(&ps->lock);
+
             running = FALSE;
             break;
         }
