@@ -842,6 +842,39 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "sse") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->sse.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "bind") == 0 || strcasecmp(key, "address") == 0 ||
+            strcasecmp(key, "bind-address") == 0) {
+            ini_copy_string(cfg->sse.bind_address, sizeof(cfg->sse.bind_address), value);
+            return 0;
+        }
+        if (strcasecmp(key, "port") == 0) {
+            int port = atoi(value);
+            if (port <= 0 || port > 65535) {
+                LOGE("config: SSE port '%s' out of range", value);
+                return -1;
+            }
+            cfg->sse.port = port;
+            return 0;
+        }
+        if (strcasecmp(key, "interval-ms") == 0) {
+            int v = atoi(value);
+            if (v <= 0) {
+                v = 1;
+            }
+            cfg->sse.interval_ms = (unsigned int)v;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "gst") == 0) {
         if (strcasecmp(key, "log") == 0) {
             int v = 0;

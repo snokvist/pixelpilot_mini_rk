@@ -33,6 +33,10 @@ static void usage(const char *prog) {
             "  --record-video [PATH]        (enable MP4 capture; optional PATH or directory, default /media)\n"
             "  --record-mode MODE           (standard|sequential|fragmented; default: sequential)\n"
             "  --no-record-video            (disable MP4 recording)\n"
+            "  --sse-enable                 (enable stats SSE streamer)\n"
+            "  --sse-bind ADDR              (bind address for SSE streamer; default: 127.0.0.1)\n"
+            "  --sse-port N                 (TCP port for SSE streamer; default: 8080)\n"
+            "  --sse-interval-ms N          (emit SSE updates every N ms; default: 1000)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -167,6 +171,11 @@ void cfg_defaults(AppCfg *c) {
     c->record.enable = 0;
     strcpy(c->record.output_path, "/media");
     c->record.mode = RECORD_MODE_SEQUENTIAL;
+
+    c->sse.enable = 0;
+    strcpy(c->sse.bind_address, "127.0.0.1");
+    c->sse.port = 8080;
+    c->sse.interval_ms = 1000;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -339,6 +348,24 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--no-record-video")) {
             cfg->record.enable = 0;
             cfg->record.output_path[0] = '\0';
+        } else if (!strcmp(argv[i], "--sse-enable")) {
+            cfg->sse.enable = 1;
+        } else if (!strcmp(argv[i], "--sse-bind") && i + 1 < argc) {
+            cli_copy_string(cfg->sse.bind_address, sizeof(cfg->sse.bind_address), argv[++i]);
+        } else if (!strcmp(argv[i], "--sse-port") && i + 1 < argc) {
+            int port = atoi(argv[++i]);
+            if (port <= 0 || port > 65535) {
+                LOGE("--sse-port requires a value between 1 and 65535");
+                return -1;
+            }
+            cfg->sse.port = port;
+        } else if (!strcmp(argv[i], "--sse-interval-ms") && i + 1 < argc) {
+            int interval = atoi(argv[++i]);
+            if (interval <= 0) {
+                LOGE("--sse-interval-ms requires a positive value");
+                return -1;
+            }
+            cfg->sse.interval_ms = (unsigned int)interval;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {
