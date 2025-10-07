@@ -486,9 +486,12 @@ static gboolean udp_receiver_consider_idr_locked(struct UdpReceiver *ur,
                                                  guint64 arrival_ns,
                                                  char *idr_host,
                                                  size_t idr_host_sz) {
-    if (ur == NULL || ur->cfg == NULL || !ur->cfg->idr_request || !ur->have_source_addr) {
+    if (ur == NULL || ur->cfg == NULL) {
         return FALSE;
     }
+
+    gboolean idr_enabled = ur->cfg->idr_request ? TRUE : FALSE;
+    gboolean have_source = ur->have_source_addr && ur->stats.source_address[0] != '\0';
 
     guint64 last_event = ur->last_loss_event_ns;
     guint64 min_ns = ur->idr_min_interval_ns != 0 ? ur->idr_min_interval_ns : ms_to_ns(IDR_REQUEST_DEFAULT_MIN_MS);
@@ -529,19 +532,35 @@ static gboolean udp_receiver_consider_idr_locked(struct UdpReceiver *ur,
 
     guint64 wait_ns = ur->idr_backoff_ns;
     guint64 last_request = ur->last_idr_request_ns;
-    gboolean trigger = TRUE;
-    if (last_request != 0) {
-        if (arrival_ns < last_request) {
-            last_request = 0;
-        } else {
-            guint64 elapsed = arrival_ns - last_request;
-            if (elapsed < wait_ns) {
-                trigger = FALSE;
+    gboolean trigger = FALSE;
+
+    if (idr_host != NULL && idr_host_sz > 0) {
+        idr_host[0] = '\0';
+    }
+
+    if (idr_enabled && have_source) {
+        trigger = TRUE;
+        if (last_request != 0) {
+            if (arrival_ns < last_request) {
+                last_request = 0;
+            } else {
+                guint64 elapsed = arrival_ns - last_request;
+                if (elapsed < wait_ns) {
+                    trigger = FALSE;
+                }
             }
         }
     }
 
     if (!trigger) {
+        udp_receiver_publish_idr_stats_locked(ur);
+        if (idr_host != NULL && idr_host_sz > 0 && have_source) {
+            g_strlcpy(idr_host, ur->stats.source_address, idr_host_sz);
+        }
+        return FALSE;
+    }
+
+    if (!have_source) {
         udp_receiver_publish_idr_stats_locked(ur);
         return FALSE;
     }
