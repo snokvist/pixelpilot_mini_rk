@@ -477,6 +477,7 @@ int main(int argc, char **argv) {
     sse_streamer_publish(&sse_streamer, NULL, FALSE);
     sse_streamer_stop(&sse_streamer);
     if (g_shutdown_event_fd >= 0) {
+        drain_shutdown_eventfd();
         close(g_shutdown_event_fd);
         g_shutdown_event_fd = -1;
     }

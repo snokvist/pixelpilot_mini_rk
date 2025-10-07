@@ -345,6 +345,7 @@ int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg, int wake_fd) {
     streamer->listen_fd = create_listen_socket(streamer->bind_address, streamer->port);
     if (streamer->listen_fd < 0) {
         streamer->configured = FALSE;
+        streamer->wake_fd = -1;
         return -1;
     }
 
@@ -357,6 +358,7 @@ int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg, int wake_fd) {
         streamer->listen_fd = -1;
         streamer->running = FALSE;
         streamer->configured = FALSE;
+        streamer->wake_fd = -1;
         return -1;
     }
     LOGI("SSE streamer: listening on %s:%d (fd=%d, interval=%ums)",
