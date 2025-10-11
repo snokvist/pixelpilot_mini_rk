@@ -40,7 +40,7 @@ typedef struct {
     GThread *accept_thread;
     GMutex lock;
     gboolean running;
-    gboolean shutdown;
+    volatile gint shutdown_flag;
     gboolean have_stats;
     SseStatsSnapshot stats;
 } SseStreamer;

@@ -19,6 +19,18 @@ typedef struct {
     int fd;
 } SseClientContext;
 
+static gboolean streamer_is_shutdown(const SseStreamer *streamer) {
+    return g_atomic_int_get((volatile gint *)&streamer->shutdown_flag) != 0;
+}
+
+static void streamer_clear_shutdown(SseStreamer *streamer) {
+    g_atomic_int_set(&streamer->shutdown_flag, 0);
+}
+
+static void streamer_request_shutdown(SseStreamer *streamer) {
+    g_atomic_int_set(&streamer->shutdown_flag, 1);
+}
+
 static int create_listen_socket(const char *bind_address, int port) {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
@@ -121,7 +133,7 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
 
 static void sleep_interval(const SseStreamer *streamer) {
     guint interval = streamer->interval_ms > 0 ? streamer->interval_ms : 1000u;
-    while (interval > 0 && !streamer->shutdown) {
+    while (interval > 0 && !streamer_is_shutdown(streamer)) {
         guint chunk = interval > 100 ? 100 : interval;
         g_usleep(chunk * 1000);
         if (interval >= chunk) {
@@ -170,7 +182,7 @@ static gpointer sse_client_thread(gpointer data) {
         goto cleanup;
     }
 
-    while (!streamer->shutdown) {
+    while (!streamer_is_shutdown(streamer)) {
         SseStatsSnapshot snapshot = {0};
         gboolean have_stats = FALSE;
         g_mutex_lock(&streamer->lock);
@@ -203,7 +215,7 @@ cleanup:
 
 static gpointer sse_accept_thread(gpointer data) {
     SseStreamer *streamer = data;
-    while (!streamer->shutdown) {
+    while (!streamer_is_shutdown(streamer)) {
         struct pollfd pfd = {
             .fd = streamer->listen_fd,
             .events = POLLIN,
@@ -214,7 +226,7 @@ static gpointer sse_accept_thread(gpointer data) {
             if (errno == EINTR) {
                 continue;
             }
-            if (!streamer->shutdown) {
+            if (!streamer_is_shutdown(streamer)) {
                 LOGW("SSE streamer: poll failed: %s", strerror(errno));
             }
             continue;
@@ -271,6 +283,7 @@ void sse_streamer_init(SseStreamer *streamer) {
     streamer->interval_ms = 1000;
     streamer->port = 0;
     g_mutex_init(&streamer->lock);
+    streamer_clear_shutdown(streamer);
 }
 
 int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
@@ -297,7 +310,7 @@ int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
         return -1;
     }
 
-    streamer->shutdown = FALSE;
+    streamer_clear_shutdown(streamer);
     streamer->running = TRUE;
     streamer->accept_thread = g_thread_new("sse-accept", sse_accept_thread, streamer);
     if (streamer->accept_thread == NULL) {
@@ -353,7 +366,7 @@ void sse_streamer_stop(SseStreamer *streamer) {
     if (streamer == NULL) {
         return;
     }
-    streamer->shutdown = TRUE;
+    streamer_request_shutdown(streamer);
     if (streamer->listen_fd >= 0) {
         close(streamer->listen_fd);
         streamer->listen_fd = -1;
