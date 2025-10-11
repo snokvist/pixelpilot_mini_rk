@@ -140,6 +140,12 @@ static int stats_consumers_active(const OSD *osd, const SseStreamer *sse) {
     return osd_active || sse_active;
 }
 
+static void stats_cache_invalidate(int *cached_state) {
+    if (cached_state != NULL) {
+        *cached_state = -1;
+    }
+}
+
 static void pipeline_maybe_set_stats(PipelineState *ps, int *cached_state, gboolean desired) {
     int desired_int = desired ? 1 : 0;
     if (*cached_state == desired_int) {
@@ -217,6 +223,7 @@ int main(int argc, char **argv) {
             } else {
                 pipeline_maybe_set_stats(&ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
             }
+            stats_cache_invalidate(&stats_enabled_cached);
             if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
                 LOGE("Failed to start pipeline");
                 pipeline_maybe_set_stats(&ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
@@ -265,6 +272,7 @@ int main(int argc, char **argv) {
                     if (!now_connected) {
                         if (ps.state != PIPELINE_STOPPED) {
                             pipeline_stop(&ps, 700);
+                            stats_cache_invalidate(&stats_enabled_cached);
                         }
                         if (osd_is_active(&osd)) {
                             pipeline_maybe_set_stats(&ps, &stats_enabled_cached, FALSE);
@@ -285,7 +293,9 @@ int main(int argc, char **argv) {
                             }
                             if (ps.state != PIPELINE_STOPPED) {
                                 pipeline_stop(&ps, 700);
+                                stats_cache_invalidate(&stats_enabled_cached);
                             }
+                            stats_cache_invalidate(&stats_enabled_cached);
                             if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
                                 LOGE("Failed to start pipeline after hotplug");
                                 pipeline_maybe_set_stats(&ps, &stats_enabled_cached, FALSE);
@@ -414,6 +424,7 @@ int main(int argc, char **argv) {
                 LOGW("Audio device likely busy; switching audio branch to fakesink to avoid restart loop.");
             }
             LOGW("Pipeline not running; restarting%s...", audio_disabled ? " (audio=fakesink)" : "");
+            stats_cache_invalidate(&stats_enabled_cached);
             if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
                 LOGE("Restart failed");
                 pipeline_maybe_set_stats(&ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
@@ -425,6 +436,7 @@ int main(int argc, char **argv) {
 
     if (ps.state != PIPELINE_STOPPED) {
         pipeline_stop(&ps, 700);
+        stats_cache_invalidate(&stats_enabled_cached);
     }
     if (osd_is_active(&osd)) {
         pipeline_maybe_set_stats(&ps, &stats_enabled_cached, FALSE);
