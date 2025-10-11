@@ -14,6 +14,17 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#define SSE_MAX_HEADER_SIZE 4096
+#define SSE_CLIENT_TIMEOUT_SEC 5
+
+typedef enum {
+    SSE_REQUEST_OK = 0,
+    SSE_REQUEST_TIMEOUT = -1,
+    SSE_REQUEST_TOO_LARGE = -2,
+    SSE_REQUEST_IO_ERROR = -3,
+    SSE_REQUEST_CLOSED = -4,
+} SseRequestReadResult;
+
 typedef struct {
     SseStreamer *streamer;
     int fd;
@@ -78,6 +89,89 @@ static void set_socket_timeout(int fd, int seconds) {
     tv.tv_sec = seconds;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
         LOGW("SSE streamer: setsockopt(SO_RCVTIMEO) failed: %s", strerror(errno));
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
+        LOGW("SSE streamer: setsockopt(SO_SNDTIMEO) failed: %s", strerror(errno));
+    }
+}
+
+static SseRequestReadResult read_http_request(int fd, char *buffer, size_t buf_sz, ssize_t *out_len) {
+    if (buffer == NULL || buf_sz == 0) {
+        return SSE_REQUEST_IO_ERROR;
+    }
+    size_t total = 0;
+    while (total < buf_sz - 1) {
+        ssize_t rc = recv(fd, buffer + total, (buf_sz - 1) - total, 0);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return SSE_REQUEST_TIMEOUT;
+            }
+            return SSE_REQUEST_IO_ERROR;
+        }
+        if (rc == 0) {
+            return SSE_REQUEST_CLOSED;
+        }
+        total += (size_t)rc;
+        buffer[total] = '\0';
+        if (g_strstr_len(buffer, (gssize)total, "\r\n\r\n") != NULL ||
+            g_strstr_len(buffer, (gssize)total, "\n\n") != NULL) {
+            if (out_len != NULL) {
+                *out_len = (ssize_t)total;
+            }
+            return SSE_REQUEST_OK;
+        }
+    }
+    return SSE_REQUEST_TOO_LARGE;
+}
+
+static gboolean parse_request_line(const char *request, char *method, size_t method_sz, char *path, size_t path_sz) {
+    if (request == NULL || method == NULL || path == NULL || method_sz == 0 || path_sz == 0) {
+        return FALSE;
+    }
+    const char *line_end = strstr(request, "\r\n");
+    if (line_end == NULL) {
+        line_end = strchr(request, '\n');
+    }
+    size_t line_len = line_end != NULL ? (size_t)(line_end - request) : strlen(request);
+    if (line_len >= SSE_MAX_HEADER_SIZE) {
+        line_len = SSE_MAX_HEADER_SIZE - 1;
+    }
+    char line_buf[SSE_MAX_HEADER_SIZE];
+    memcpy(line_buf, request, line_len);
+    line_buf[line_len] = '\0';
+
+    char *first_space = strchr(line_buf, ' ');
+    if (first_space == NULL) {
+        return FALSE;
+    }
+    *first_space = '\0';
+    char *path_start = first_space + 1;
+    if (*path_start == '\0') {
+        return FALSE;
+    }
+    char *second_space = strchr(path_start, ' ');
+    if (second_space == NULL) {
+        return FALSE;
+    }
+    *second_space = '\0';
+
+    g_strlcpy(method, line_buf, method_sz);
+    g_strlcpy(path, path_start, path_sz);
+    return TRUE;
+}
+
+static void send_simple_response(int fd, const char *response) {
+    if (response == NULL) {
+        return;
+    }
+    if (send_all(fd, response, strlen(response)) < 0) {
+        int err = errno;
+        if (err != EPIPE && err != ECONNRESET) {
+            LOGW("SSE streamer: failed to send response: %s", strerror(err));
+        }
     }
 }
 
@@ -149,27 +243,43 @@ static gpointer sse_client_thread(gpointer data) {
     SseStreamer *streamer = ctx->streamer;
     int fd = ctx->fd;
 
-    char request[1024];
-    ssize_t req_len = recv(fd, request, sizeof(request) - 1, 0);
-    if (req_len <= 0) {
+    char request[SSE_MAX_HEADER_SIZE];
+    ssize_t req_len = 0;
+    SseRequestReadResult read_rc = read_http_request(fd, request, sizeof(request), &req_len);
+    if (read_rc != SSE_REQUEST_OK) {
+        switch (read_rc) {
+        case SSE_REQUEST_TIMEOUT:
+            send_simple_response(fd, "HTTP/1.1 408 Request Timeout\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+            break;
+        case SSE_REQUEST_TOO_LARGE:
+            send_simple_response(fd, "HTTP/1.1 431 Request Header Fields Too Large\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+            break;
+        case SSE_REQUEST_IO_ERROR:
+            LOGW("SSE streamer: failed to read HTTP request: %s", strerror(errno));
+            break;
+        case SSE_REQUEST_CLOSED:
+            break;
+        default:
+            break;
+        }
         goto cleanup;
     }
     request[req_len] = '\0';
 
     char method[8] = {0};
-    char path[128] = {0};
-    if (sscanf(request, "%7s %127s", method, path) != 2) {
-        send_all(fd, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n", 44);
+    char path[256] = {0};
+    if (!parse_request_line(request, method, sizeof(method), path, sizeof(path))) {
+        send_simple_response(fd, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         goto cleanup;
     }
 
     if (g_strcmp0(method, "GET") != 0) {
-        send_all(fd, "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n", 58);
+        send_simple_response(fd, "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         goto cleanup;
     }
 
     if (g_strcmp0(path, "/stats") != 0 && g_strcmp0(path, "/stats/") != 0) {
-        send_all(fd, "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n", 49);
+        send_simple_response(fd, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         goto cleanup;
     }
 
@@ -209,6 +319,7 @@ static gpointer sse_client_thread(gpointer data) {
 
 cleanup:
     close(fd);
+    g_atomic_int_set(&streamer->active_client, 0);
     g_free(ctx);
     return NULL;
 }
@@ -251,12 +362,20 @@ static gpointer sse_accept_thread(gpointer data) {
             continue;
         }
 
-        set_socket_timeout(fd, 5);
+        set_socket_timeout(fd, SSE_CLIENT_TIMEOUT_SEC);
+
+        if (!g_atomic_int_compare_and_exchange(&streamer->active_client, 0, 1)) {
+            LOGI("SSE streamer: rejecting additional client while stream is active");
+            send_simple_response(fd, "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 1\r\nContent-Length: 0\r\n\r\n");
+            close(fd);
+            continue;
+        }
 
         SseClientContext *ctx = g_new0(SseClientContext, 1);
         if (ctx == NULL) {
             LOGW("SSE streamer: failed to allocate client context");
             close(fd);
+            g_atomic_int_set(&streamer->active_client, 0);
             continue;
         }
         ctx->streamer = streamer;
@@ -266,6 +385,7 @@ static gpointer sse_accept_thread(gpointer data) {
             LOGW("SSE streamer: failed to spawn client thread");
             close(fd);
             g_free(ctx);
+            g_atomic_int_set(&streamer->active_client, 0);
             continue;
         }
         g_thread_unref(client);
@@ -284,6 +404,7 @@ void sse_streamer_init(SseStreamer *streamer) {
     streamer->port = 0;
     g_mutex_init(&streamer->lock);
     streamer_clear_shutdown(streamer);
+    g_atomic_int_set(&streamer->active_client, 0);
 }
 
 int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
@@ -378,6 +499,7 @@ void sse_streamer_stop(SseStreamer *streamer) {
     streamer->running = FALSE;
     streamer->configured = FALSE;
     streamer->have_stats = FALSE;
+    g_atomic_int_set(&streamer->active_client, 0);
 }
 
 gboolean sse_streamer_requires_stats(const SseStreamer *streamer) {

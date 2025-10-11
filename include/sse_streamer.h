@@ -41,6 +41,7 @@ typedef struct {
     GMutex lock;
     gboolean running;
     volatile gint shutdown_flag;
+    volatile gint active_client;
     gboolean have_stats;
     SseStatsSnapshot stats;
 } SseStreamer;
