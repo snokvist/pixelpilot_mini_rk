@@ -452,7 +452,15 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         return 0;
     }
     if (strcmp(key, "record.indicator") == 0) {
-        const char *indicator = ctx->rec_stats.active ? "● REC" : (ctx->record_enabled ? "◐ REC" : "○ REC");
+        gboolean active = (ctx->have_record_stats && ctx->rec_stats.active);
+        const char *indicator = NULL;
+        if (active) {
+            indicator = "● REC ACTIVE";
+        } else if (ctx->record_enabled) {
+            indicator = "◐ REC ARMED";
+        } else {
+            indicator = "○ REC OFF";
+        }
         snprintf(buf, buf_sz, "%s", indicator);
         return 0;
     }
