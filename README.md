@@ -86,7 +86,10 @@ will then create a bare `udpsrc` element and UEP/receiver statistics are disable
 
 Use this mode when integrating with external tooling or experimenting with alternative buffering strategies where the
 application-level receiver is unnecessary. Revert with `--custom-sink receiver` (or remove the INI override) to restore the
-default behaviour and regain access to the telemetry counters.
+default behaviour and regain access to the telemetry counters. Keep in mind that the automatic IDR requester also depends on
+the custom receiver: it learns the sender's IP/port from incoming UDP packets and reuses that information when issuing HTTP
+burst requests. The bare `udpsrc` pipeline never surfaces that metadata, so even if `[idr].enable = true` is set in a minimal
+configuration the recovery logic stays inactive.
 
 ## UDP receiver statistics
 
