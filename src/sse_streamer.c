@@ -163,18 +163,6 @@ static gboolean parse_request_line(const char *request, char *method, size_t met
     return TRUE;
 }
 
-static void send_simple_response(int fd, const char *response) {
-    if (response == NULL) {
-        return;
-    }
-    if (send_all(fd, response, strlen(response)) < 0) {
-        int err = errno;
-        if (err != EPIPE && err != ECONNRESET) {
-            LOGW("SSE streamer: failed to send response: %s", strerror(err));
-        }
-    }
-}
-
 static ssize_t send_all(int fd, const char *data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
@@ -191,6 +179,18 @@ static ssize_t send_all(int fd, const char *data, size_t len) {
         sent += (size_t)rc;
     }
     return (ssize_t)sent;
+}
+
+static void send_simple_response(int fd, const char *response) {
+    if (response == NULL) {
+        return;
+    }
+    if (send_all(fd, response, strlen(response)) < 0) {
+        int err = errno;
+        if (err != EPIPE && err != ECONNRESET) {
+            LOGW("SSE streamer: failed to send response: %s", strerror(err));
+        }
+    }
 }
 
 static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot *snap, gboolean have_stats) {
