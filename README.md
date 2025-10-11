@@ -141,21 +141,21 @@ via:
 ```
 
 Each HTTP client that performs `GET /stats` receives a `text/event-stream` response. Payloads are emitted at the configured
-interval and include all counters listed above together with recording telemetry:
+interval and include all counters listed above together with recording telemetry. Byte-oriented counters are reported in
+megabytes (MiB) for readability:
 
 ```
 event: stats
 data: {"have_stats":true,"total_packets":1234,"video_packets":1234,
        "audio_packets":0,"ignored_packets":0,"duplicate_packets":0,
-       "lost_packets":2,"reordered_packets":1,"total_bytes":9876543,
-       "video_bytes":9876543,"audio_bytes":0,"frame_count":45,
+       "lost_packets":2,"reordered_packets":1,"total_mbytes":9,
+       "video_mbytes":9,"audio_mbytes":0,"frame_count":45,
        "incomplete_frames":0,"last_frame_kib":112.5,"avg_frame_kib":108.3,
        "bitrate_mbps":12.340,"bitrate_avg_mbps":10.876,"jitter_ms":3.25,
        "jitter_avg_ms":2.97,"expected_sequence":54321,
-       "last_video_timestamp":27182818,"last_packet_ns":123456789012,
        "idr_requests":7,"recording_enabled":true,
        "recording_active":false,"recording_duration_s":12.5,
-       "recording_media_s":10.0,"recording_bytes":31457280,
+       "recording_media_s":10.0,"recording_mbytes":30,
        "recording_path":"/media/pixelpilot-20240101-120000.mp4"}
 ```
 
