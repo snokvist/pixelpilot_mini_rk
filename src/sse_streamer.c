@@ -233,11 +233,11 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
                ",\"total_mbytes\":%.2f,\"video_mbytes\":%.2f,\"audio_mbytes\":%.2f"
                ",\"frame_count\":%" G_GUINT64_FORMAT
                ",\"incomplete_frames\":%" G_GUINT64_FORMAT
-               ",\"last_frame_kib\":%.2f,\"avg_frame_kib\":%.2f,\"bitrate_mbps\":%.3f,\"bitrate_avg_mbps\":%.3f,""
-               "\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u,""
-               "\"idr_requests\":%" G_GUINT64_FORMAT
-               ",\"recording_enabled\":%s,\"recording_active\":%s,\"recording_duration_s\":%.3f,""
-               "\"recording_media_s\":%.3f,\"recording_mbytes\":%.2f"
+               ",\"last_frame_kib\":%.2f,\"avg_frame_kib\":%.2f,\"bitrate_mbps\":%.3f,\"bitrate_avg_mbps\":%.3f"
+               ",\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u"
+               ",\"idr_requests\":%" G_GUINT64_FORMAT
+               ",\"recording_enabled\":%s,\"recording_active\":%s,\"recording_duration_s\":%.3f"
+               ",\"recording_media_s\":%.3f,\"recording_mbytes\":%.2f"
                ",\"recording_path\":\"%s\"}",
                snap->total_packets, snap->video_packets, snap->audio_packets, snap->ignored_packets,
                snap->duplicate_packets, snap->lost_packets, snap->reordered_packets, total_mbytes, video_mbytes,
