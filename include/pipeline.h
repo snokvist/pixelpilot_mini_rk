@@ -55,7 +55,7 @@ typedef struct {
 
 #include <limits.h>
 
-typedef struct {
+typedef struct PipelineRecordingStats {
     gboolean active;
     guint64 bytes_written;
     guint64 elapsed_ns;

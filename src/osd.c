@@ -448,7 +448,7 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         const char *path = (ctx->have_record_stats && ctx->rec_stats.output_path[0] != '\0')
                                ? ctx->rec_stats.output_path
                                : "";
-        snprintf(buf, buf_sz, "%s", path);
+        g_strlcpy(buf, path, buf_sz);
         return 0;
     }
     if (strcmp(key, "record.indicator") == 0) {
