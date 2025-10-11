@@ -72,6 +72,31 @@ static void emit_evt(Splash *s, SplashEventType t, int a, int b, const char *m){
     if (s->evt_cb) s->evt_cb(t, a, b, m, s->evt_user);
 }
 
+static GstBuffer *prepare_output_buffer(GstBuffer *inbuf, GstClockTime pts, GstClockTime dur) {
+    if (!inbuf) {
+        return NULL;
+    }
+
+    GstBuffer *out = gst_buffer_ref(inbuf);
+    if (!out) {
+        return NULL;
+    }
+
+    if (!gst_buffer_is_writable(out)) {
+        GstBuffer *writable = gst_buffer_make_writable(out);
+        if (!writable) {
+            gst_buffer_unref(out);
+            return NULL;
+        }
+        out = writable;
+    }
+
+    GST_BUFFER_PTS(out)      = pts;
+    GST_BUFFER_DTS(out)      = GST_CLOCK_TIME_NONE;
+    GST_BUFFER_DURATION(out) = dur;
+    return out;
+}
+
 static gboolean do_segment_seek_locked(Splash *s, int which){
     g_return_val_if_fail(s->reader!=NULL, FALSE);
     if (which < 0 || which >= s->nseq) return FALSE;
@@ -176,24 +201,34 @@ static GstFlowReturn on_new_sample(GstAppSink *sink, gpointer user) {
     GstFlowReturn overall = GST_FLOW_OK;
     gboolean pushed = FALSE;
 
-    if ((s->outputs & SPLASH_OUTPUT_UDP) && s->appsrc_udp) {
-        GstBuffer *out = gst_buffer_copy_deep(inbuf);
-        GST_BUFFER_PTS(out)      = pts;
-        GST_BUFFER_DTS(out)      = GST_CLOCK_TIME_NONE;
-        GST_BUFFER_DURATION(out) = dur;
+    gboolean need_udp = (s->outputs & SPLASH_OUTPUT_UDP) && s->appsrc_udp;
+    gboolean need_appsrc = (s->outputs & SPLASH_OUTPUT_APPSRC) && s->appsrc_out;
+    GstBuffer *prepared = NULL;
+
+    if (need_udp || need_appsrc) {
+        prepared = prepare_output_buffer(inbuf, pts, dur);
+        if (!prepared) {
+            gst_sample_unref(samp);
+            return GST_FLOW_ERROR;
+        }
+    }
+
+    if (need_udp) {
+        GstBuffer *out = gst_buffer_ref(prepared);
         GstFlowReturn fr = gst_app_src_push_buffer(GST_APP_SRC(s->appsrc_udp), out);
         overall = fr;
         pushed = TRUE;
     }
 
-    if ((s->outputs & SPLASH_OUTPUT_APPSRC) && s->appsrc_out) {
-        GstBuffer *out = gst_buffer_copy_deep(inbuf);
-        GST_BUFFER_PTS(out)      = pts;
-        GST_BUFFER_DTS(out)      = GST_CLOCK_TIME_NONE;
-        GST_BUFFER_DURATION(out) = dur;
+    if (need_appsrc) {
+        GstBuffer *out = gst_buffer_ref(prepared);
         GstFlowReturn fr = gst_app_src_push_buffer(GST_APP_SRC(s->appsrc_out), out);
         if (!pushed || overall == GST_FLOW_OK) overall = fr;
         pushed = TRUE;
+    }
+
+    if (prepared) {
+        gst_buffer_unref(prepared);
     }
 
     gst_sample_unref(samp);

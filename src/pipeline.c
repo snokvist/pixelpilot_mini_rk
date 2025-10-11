@@ -514,9 +514,9 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     appsink = gst_element_factory_make("appsink", "out_appsink");
     CHECK_ELEM(appsink, "appsink");
 
-    g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
     gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
+    g_object_set(appsink, "sync", FALSE, NULL);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
     if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
@@ -600,7 +600,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         CHECK_ELEM(audio_sink, "alsasink");
 
         g_object_set(audio_appsrc, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
-                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, "max-bytes", (guint64)(1024 * 1024), NULL);
+                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, NULL);
         gst_app_src_set_latency(GST_APP_SRC(audio_appsrc), 0, 0);
         gst_app_src_set_max_bytes(GST_APP_SRC(audio_appsrc), 1024 * 1024);
 
