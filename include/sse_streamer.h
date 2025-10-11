@@ -28,9 +28,7 @@ typedef struct {
     double jitter_avg_ms;
     double bitrate_mbps;
     double bitrate_avg_mbps;
-    guint32 last_video_timestamp;
     guint16 expected_sequence;
-    guint64 last_packet_ns;
     guint64 idr_requests;
     gboolean recording_enabled;
     gboolean recording_active;

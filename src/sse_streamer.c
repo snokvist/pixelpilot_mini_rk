@@ -18,6 +18,13 @@
 #define SSE_MAX_HEADER_SIZE 4096
 #define SSE_CLIENT_TIMEOUT_SEC 5
 
+static double bytes_to_mbytes_trunc(guint64 bytes) {
+    const guint64 mib = bytes / 1048576u;
+    const guint64 remainder = bytes % 1048576u;
+    const guint64 fractional = (remainder * 100u) / 1048576u;
+    return (double)mib + (double)fractional / 100.0;
+}
+
 typedef enum {
     SSE_REQUEST_OK = 0,
     SSE_REQUEST_TIMEOUT = -1,
@@ -202,8 +209,12 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
 
     double last_frame_kib = snap->last_frame_bytes / 1024.0;
     double frame_avg_kib = snap->frame_size_avg / 1024.0;
+    double total_mbytes = bytes_to_mbytes_trunc(snap->total_bytes);
+    double video_mbytes = bytes_to_mbytes_trunc(snap->video_bytes);
+    double audio_mbytes = bytes_to_mbytes_trunc(snap->audio_bytes);
     double recording_elapsed_s = snap->recording_elapsed_ns / 1e9;
     double recording_media_s = snap->recording_media_ns / 1e9;
+    double recording_mbytes = bytes_to_mbytes_trunc(snap->recording_bytes);
     const char *recording_enabled = snap->recording_enabled ? "true" : "false";
     const char *recording_active = snap->recording_active ? "true" : "false";
     char *escaped_path = NULL;
@@ -219,25 +230,21 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
                ",\"duplicate_packets\":%" G_GUINT64_FORMAT
                ",\"lost_packets\":%" G_GUINT64_FORMAT
                ",\"reordered_packets\":%" G_GUINT64_FORMAT
-               ",\"total_bytes\":%" G_GUINT64_FORMAT
-               ",\"video_bytes\":%" G_GUINT64_FORMAT
-               ",\"audio_bytes\":%" G_GUINT64_FORMAT
+               ",\"total_mbytes\":%.2f,\"video_mbytes\":%.2f,\"audio_mbytes\":%.2f"
                ",\"frame_count\":%" G_GUINT64_FORMAT
                ",\"incomplete_frames\":%" G_GUINT64_FORMAT
-               ",\"last_frame_kib\":%.2f,\"avg_frame_kib\":%.2f,\"bitrate_mbps\":%.3f,\"bitrate_avg_mbps\":%.3f,"
-               "\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u,\"last_video_timestamp\":%u,"
-               "\"last_packet_ns\":%" G_GUINT64_FORMAT ",\"idr_requests\":%" G_GUINT64_FORMAT
-               ",\"recording_enabled\":%s,\"recording_active\":%s,\"recording_duration_s\":%.3f,"
-               "\"recording_media_s\":%.3f,\"recording_bytes\":%" G_GUINT64_FORMAT
+               ",\"last_frame_kib\":%.2f,\"avg_frame_kib\":%.2f,\"bitrate_mbps\":%.3f,\"bitrate_avg_mbps\":%.3f,""
+               "\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u,""
+               "\"idr_requests\":%" G_GUINT64_FORMAT
+               ",\"recording_enabled\":%s,\"recording_active\":%s,\"recording_duration_s\":%.3f,""
+               "\"recording_media_s\":%.3f,\"recording_mbytes\":%.2f"
                ",\"recording_path\":\"%s\"}",
                snap->total_packets, snap->video_packets, snap->audio_packets, snap->ignored_packets,
-               snap->duplicate_packets, snap->lost_packets, snap->reordered_packets, snap->total_bytes,
-               snap->video_bytes, snap->audio_bytes, snap->frame_count, snap->incomplete_frames, last_frame_kib,
-               frame_avg_kib, snap->bitrate_mbps, snap->bitrate_avg_mbps, snap->jitter_ms, snap->jitter_avg_ms,
-               snap->expected_sequence, snap->last_video_timestamp, snap->last_packet_ns, snap->idr_requests,
-               recording_enabled, recording_active, recording_elapsed_s, recording_media_s, snap->recording_bytes,
-               escaped_path != NULL ? escaped_path : "");
-
+               snap->duplicate_packets, snap->lost_packets, snap->reordered_packets, total_mbytes, video_mbytes,
+               audio_mbytes, snap->frame_count, snap->incomplete_frames, last_frame_kib, frame_avg_kib,
+               snap->bitrate_mbps, snap->bitrate_avg_mbps, snap->jitter_ms, snap->jitter_avg_ms, snap->expected_sequence,
+               snap->idr_requests, recording_enabled, recording_active, recording_elapsed_s, recording_media_s,
+               recording_mbytes, escaped_path != NULL ? escaped_path : "");
     g_free(escaped_path);
 }
 
@@ -490,9 +497,7 @@ void sse_streamer_publish(SseStreamer *streamer, const UdpReceiverStats *stats, 
         snap.jitter_avg_ms = stats->jitter_avg / 90.0;
         snap.bitrate_mbps = stats->bitrate_mbps;
         snap.bitrate_avg_mbps = stats->bitrate_avg_mbps;
-        snap.last_video_timestamp = stats->last_video_timestamp;
         snap.expected_sequence = stats->expected_sequence;
-        snap.last_packet_ns = stats->last_packet_ns;
         snap.idr_requests = stats->idr_requests;
     }
     snap.recording_enabled = recording_enabled ? TRUE : FALSE;
