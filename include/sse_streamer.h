@@ -2,9 +2,12 @@
 #define SSE_STREAMER_H
 
 #include <glib.h>
+#include <limits.h>
 
 #include "config.h"
 #include "udp_receiver.h"
+
+struct PipelineRecordingStats;
 
 typedef struct {
     guint64 total_packets;
@@ -29,6 +32,12 @@ typedef struct {
     guint16 expected_sequence;
     guint64 last_packet_ns;
     guint64 idr_requests;
+    gboolean recording_enabled;
+    gboolean recording_active;
+    guint64 recording_bytes;
+    guint64 recording_elapsed_ns;
+    guint64 recording_media_ns;
+    char recording_path[PATH_MAX];
 } SseStatsSnapshot;
 
 typedef struct {
@@ -48,7 +57,8 @@ typedef struct {
 
 void sse_streamer_init(SseStreamer *streamer);
 int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg);
-void sse_streamer_publish(SseStreamer *streamer, const UdpReceiverStats *stats, gboolean have_stats);
+void sse_streamer_publish(SseStreamer *streamer, const UdpReceiverStats *stats, gboolean have_stats,
+                         gboolean recording_enabled, const struct PipelineRecordingStats *recording);
 void sse_streamer_stop(SseStreamer *streamer);
 gboolean sse_streamer_requires_stats(const SseStreamer *streamer);
 

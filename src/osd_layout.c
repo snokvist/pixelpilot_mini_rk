@@ -44,7 +44,8 @@ void osd_layout_defaults(OsdLayout *layout) {
 
     const char *default_lines[] = {
         "HDMI {display.mode} plane={drm.video_plane_id}",
-        "UDP:{udp.port} PTv={udp.vid_pt} PTa={udp.aud_pt} lat={pipeline.latency_ms}ms",
+        "UDP:{udp.port} PTv={udp.vid_pt} PTa={udp.aud_pt} sink-buf={pipeline.appsink_max_buffers}",
+        "Record {record.state} active={record.active} dur={record.duration_hms} bytes={record.megabytes}MiB",
         "Pipeline: {pipeline.state} restarts={pipeline.restart_count}{pipeline.audio_suffix}",
         "RTP vpkts={udp.video_packets} net-loss={udp.lost_packets} reo={udp.reordered_packets} dup={udp.duplicate_packets} jitter={udp.jitter.latest_ms}/{udp.jitter.avg_ms}ms",
         "Frames={udp.frames.count} incomplete={udp.frames.incomplete} last={udp.frames.last_bytes}KB avg={udp.frames.avg_bytes}KB seq={udp.expected_sequence}"
