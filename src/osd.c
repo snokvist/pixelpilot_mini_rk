@@ -226,6 +226,9 @@ typedef struct {
     int restart_count;
     int have_stats;
     UdpReceiverStats stats;
+    int record_enabled;
+    int have_record_stats;
+    PipelineRecordingStats rec_stats;
 } OsdRenderContext;
 
 static const char *osd_key_copy_lower(const char *src, char *dst, size_t dst_sz) {
@@ -275,6 +278,17 @@ static const char *osd_token_normalize(const char *token, char *buf, size_t buf_
     }
 
     return buf;
+}
+
+static void format_duration_hms(guint64 ns, char *buf, size_t buf_sz) {
+    if (buf == NULL || buf_sz == 0) {
+        return;
+    }
+    guint64 total_sec = ns / G_GUINT64_CONSTANT(1000000000);
+    guint hours = (guint)(total_sec / 3600);
+    guint mins = (guint)((total_sec % 3600) / 60);
+    guint secs = (guint)(total_sec % 60);
+    g_snprintf(buf, buf_sz, "%02u:%02u:%02u", hours, mins, secs);
 }
 
 static const char *osd_pipeline_state_name(const PipelineState *ps) {
@@ -356,8 +370,8 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         snprintf(buf, buf_sz, "%d", cfg ? cfg->aud_pt : 0);
         return 0;
     }
-    if (strcmp(key, "pipeline.latency_ms") == 0) {
-        snprintf(buf, buf_sz, "%d", cfg ? cfg->latency_ms : 0);
+    if (strcmp(key, "pipeline.appsink_max_buffers") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->appsink_max_buffers : 0);
         return 0;
     }
     if (strcmp(key, "pipeline.state") == 0) {
@@ -378,6 +392,68 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
     }
     if (strcmp(key, "pipeline.audio_status") == 0) {
         snprintf(buf, buf_sz, "%s", ctx->audio_disabled ? "fakesink" : "normal");
+        return 0;
+    }
+
+    if (strcmp(key, "record.enable") == 0 || strcmp(key, "record.enabled") == 0) {
+        snprintf(buf, buf_sz, "%s", ctx->record_enabled ? "yes" : "no");
+        return 0;
+    }
+    if (strcmp(key, "record.active") == 0) {
+        int active = (ctx->have_record_stats && ctx->rec_stats.active);
+        snprintf(buf, buf_sz, "%s", active ? "yes" : "no");
+        return 0;
+    }
+    if (strcmp(key, "record.state") == 0 || strcmp(key, "record.status") == 0) {
+        const char *state = "disabled";
+        if (ctx->record_enabled) {
+            state = (ctx->have_record_stats && ctx->rec_stats.active) ? "active" : "enabled";
+        }
+        snprintf(buf, buf_sz, "%s", state);
+        return 0;
+    }
+    if (strcmp(key, "record.duration_s") == 0) {
+        double seconds = ctx->have_record_stats ? (ctx->rec_stats.elapsed_ns / 1e9) : 0.0;
+        snprintf(buf, buf_sz, "%.1f", seconds);
+        return 0;
+    }
+    if (strcmp(key, "record.media_duration_s") == 0) {
+        double seconds = ctx->have_record_stats ? (ctx->rec_stats.media_duration_ns / 1e9) : 0.0;
+        snprintf(buf, buf_sz, "%.1f", seconds);
+        return 0;
+    }
+    if (strcmp(key, "record.duration_hms") == 0) {
+        char tmp[32];
+        format_duration_hms(ctx->have_record_stats ? ctx->rec_stats.elapsed_ns : 0, tmp, sizeof(tmp));
+        snprintf(buf, buf_sz, "%s", tmp);
+        return 0;
+    }
+    if (strcmp(key, "record.media_duration_hms") == 0) {
+        char tmp[32];
+        format_duration_hms(ctx->have_record_stats ? ctx->rec_stats.media_duration_ns : 0, tmp, sizeof(tmp));
+        snprintf(buf, buf_sz, "%s", tmp);
+        return 0;
+    }
+    if (strcmp(key, "record.bytes") == 0) {
+        guint64 bytes = ctx->have_record_stats ? ctx->rec_stats.bytes_written : 0;
+        g_snprintf(buf, buf_sz, "%" G_GUINT64_FORMAT, bytes);
+        return 0;
+    }
+    if (strcmp(key, "record.megabytes") == 0) {
+        double mib = ctx->have_record_stats ? (ctx->rec_stats.bytes_written / (1024.0 * 1024.0)) : 0.0;
+        snprintf(buf, buf_sz, "%.2f", mib);
+        return 0;
+    }
+    if (strcmp(key, "record.path") == 0) {
+        const char *path = (ctx->have_record_stats && ctx->rec_stats.output_path[0] != '\0')
+                               ? ctx->rec_stats.output_path
+                               : "";
+        snprintf(buf, buf_sz, "%s", path);
+        return 0;
+    }
+    if (strcmp(key, "record.indicator") == 0) {
+        const char *indicator = ctx->rec_stats.active ? "● REC" : (ctx->record_enabled ? "◐ REC" : "○ REC");
+        snprintf(buf, buf_sz, "%s", indicator);
         return 0;
     }
 
@@ -551,8 +627,28 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
         *out_value = (double)ctx->restart_count;
         return 1;
     }
-    if (metric && strcmp(metric, "pipeline.latency_ms") == 0) {
-        *out_value = (double)(ctx->cfg ? ctx->cfg->latency_ms : 0);
+    if (metric && strcmp(metric, "pipeline.appsink_max_buffers") == 0) {
+        *out_value = (double)(ctx->cfg ? ctx->cfg->appsink_max_buffers : 0);
+        return 1;
+    }
+    if (metric && strcmp(metric, "record.duration_s") == 0) {
+        double seconds = ctx->have_record_stats ? (ctx->rec_stats.elapsed_ns / 1e9) : 0.0;
+        *out_value = seconds;
+        return 1;
+    }
+    if (metric && strcmp(metric, "record.media_duration_s") == 0) {
+        double seconds = ctx->have_record_stats ? (ctx->rec_stats.media_duration_ns / 1e9) : 0.0;
+        *out_value = seconds;
+        return 1;
+    }
+    if (metric && strcmp(metric, "record.bytes") == 0) {
+        double bytes = ctx->have_record_stats ? (double)ctx->rec_stats.bytes_written : 0.0;
+        *out_value = bytes;
+        return 1;
+    }
+    if (metric && strcmp(metric, "record.megabytes") == 0) {
+        double mib = ctx->have_record_stats ? (ctx->rec_stats.bytes_written / (1024.0 * 1024.0)) : 0.0;
+        *out_value = mib;
         return 1;
     }
 
@@ -2447,9 +2543,16 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         .audio_disabled = audio_disabled,
         .restart_count = restart_count,
         .have_stats = 0,
+        .record_enabled = cfg ? cfg->record.enable : 0,
+        .have_record_stats = 0,
     };
     if (ps && pipeline_get_receiver_stats(ps, &ctx.stats) == 0) {
         ctx.have_stats = 1;
+    }
+    if (ps && pipeline_get_recording_stats(ps, &ctx.rec_stats) == 0) {
+        ctx.have_record_stats = 1;
+    } else {
+        memset(&ctx.rec_stats, 0, sizeof(ctx.rec_stats));
     }
 
     for (int i = 0; i < o->element_count; ++i) {

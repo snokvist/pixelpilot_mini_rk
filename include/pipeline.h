@@ -53,6 +53,16 @@ typedef struct {
     GMutex recorder_lock;
 } PipelineState;
 
+#include <limits.h>
+
+typedef struct {
+    gboolean active;
+    guint64 bytes_written;
+    guint64 elapsed_ns;
+    guint64 media_duration_ns;
+    char output_path[PATH_MAX];
+} PipelineRecordingStats;
+
 #include "config.h"
 
 int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int audio_disabled, PipelineState *ps);
@@ -63,5 +73,6 @@ void pipeline_set_receiver_stats_enabled(PipelineState *ps, gboolean enabled);
 gboolean pipeline_is_recording(const PipelineState *ps);
 int pipeline_enable_recording(PipelineState *ps, const RecordCfg *cfg);
 void pipeline_disable_recording(PipelineState *ps);
+int pipeline_get_recording_stats(const PipelineState *ps, PipelineRecordingStats *stats);
 
 #endif // PIPELINE_H

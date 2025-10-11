@@ -33,7 +33,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
-| `[pipeline].latency-ms` | Network jitter buffer target in milliseconds. This feeds the appsrc `latency` property as well as the OSD token `{pipeline.latency_ms}`. |
+| `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
 | `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
 | `[idr].enable` | `true` enables the automatic IDR requester that fires HTTP recovery bursts when decode warnings appear. |
@@ -141,7 +141,7 @@ via:
 ```
 
 Each HTTP client that performs `GET /stats` receives a `text/event-stream` response. Payloads are emitted at the configured
-interval and include all counters listed above:
+interval and include all counters listed above together with recording telemetry:
 
 ```
 event: stats
@@ -153,7 +153,10 @@ data: {"have_stats":true,"total_packets":1234,"video_packets":1234,
        "bitrate_mbps":12.340,"bitrate_avg_mbps":10.876,"jitter_ms":3.25,
        "jitter_avg_ms":2.97,"expected_sequence":54321,
        "last_video_timestamp":27182818,"last_packet_ns":123456789012,
-       "idr_requests":7}
+       "idr_requests":7,"recording_enabled":true,
+       "recording_active":false,"recording_duration_s":12.5,
+       "recording_media_s":10.0,"recording_bytes":31457280,
+       "recording_path":"/media/pixelpilot-20240101-120000.mp4"}
 ```
 
 When the receiver has not yet produced statistics, the streamer reports `{"have_stats":false}` so clients can ignore placeholder

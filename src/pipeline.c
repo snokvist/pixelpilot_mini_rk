@@ -514,7 +514,8 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     appsink = gst_element_factory_make("appsink", "out_appsink");
     CHECK_ELEM(appsink, "appsink");
 
-    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
+    guint max_buffers = (cfg && cfg->appsink_max_buffers > 0) ? (guint)cfg->appsink_max_buffers : 4u;
+    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), max_buffers);
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
     g_object_set(appsink, "sync", FALSE, NULL);
 
@@ -766,9 +767,9 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         return FALSE;
     }
 
-    g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
-    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
-    gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
+    guint max_buffers = (cfg && cfg->appsink_max_buffers > 0) ? (guint)cfg->appsink_max_buffers : 4u;
+    g_object_set(appsink, "drop", TRUE, "max-buffers", max_buffers, "sync", FALSE, NULL);
+    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), max_buffers);
 
     GstCaps *caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
                                         "alignment", G_TYPE_STRING, "au", NULL);
@@ -1501,5 +1502,35 @@ int pipeline_get_receiver_stats(const PipelineState *ps, UdpReceiverStats *stats
         return -1;
     }
     udp_receiver_get_stats(ps->udp_receiver, stats);
+    return 0;
+}
+
+int pipeline_get_recording_stats(const PipelineState *ps, PipelineRecordingStats *stats) {
+    if (stats == NULL) {
+        return -1;
+    }
+    memset(stats, 0, sizeof(*stats));
+    if (ps == NULL) {
+        return -1;
+    }
+
+    g_mutex_lock((GMutex *)&ps->recorder_lock);
+    VideoRecorder *rec = ps->recorder;
+    if (rec != NULL) {
+        VideoRecorderStats vr_stats;
+        video_recorder_get_stats(rec, &vr_stats);
+        stats->active = vr_stats.active ? TRUE : FALSE;
+        stats->bytes_written = vr_stats.bytes_written;
+        stats->elapsed_ns = vr_stats.elapsed_ns;
+        stats->media_duration_ns = vr_stats.media_duration_ns;
+        g_strlcpy(stats->output_path, vr_stats.output_path, sizeof(stats->output_path));
+    } else {
+        stats->active = FALSE;
+        stats->bytes_written = 0;
+        stats->elapsed_ns = 0;
+        stats->media_duration_ns = 0;
+        stats->output_path[0] = '\0';
+    }
+    g_mutex_unlock((GMutex *)&ps->recorder_lock);
     return 0;
 }

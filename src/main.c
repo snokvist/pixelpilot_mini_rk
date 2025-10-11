@@ -404,8 +404,13 @@ int main(int argc, char **argv) {
             static struct timespec last_sse = {0, 0};
             if (last_sse.tv_sec == 0 || ms_since(now, last_sse) >= (long long)cfg.sse.interval_ms) {
                 UdpReceiverStats stats;
+                PipelineRecordingStats rec_stats;
                 int have_stats = (pipeline_get_receiver_stats(&ps, &stats) == 0);
-                sse_streamer_publish(&sse_streamer, have_stats ? &stats : NULL, have_stats ? TRUE : FALSE);
+                if (pipeline_get_recording_stats(&ps, &rec_stats) != 0) {
+                    memset(&rec_stats, 0, sizeof(rec_stats));
+                }
+                sse_streamer_publish(&sse_streamer, have_stats ? &stats : NULL, have_stats ? TRUE : FALSE,
+                                     cfg.record.enable ? TRUE : FALSE, &rec_stats);
                 last_sse = now;
             }
         }
@@ -448,7 +453,8 @@ int main(int argc, char **argv) {
         udev_monitor_close(&um);
     }
     close(fd);
-    sse_streamer_publish(&sse_streamer, NULL, FALSE);
+    PipelineRecordingStats rec_stats = {0};
+    sse_streamer_publish(&sse_streamer, NULL, FALSE, cfg.record.enable ? TRUE : FALSE, &rec_stats);
     sse_streamer_stop(&sse_streamer);
     LOGI("Bye.");
     return 0;

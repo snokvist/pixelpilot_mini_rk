@@ -1,6 +1,7 @@
 #include "sse_streamer.h"
 
 #include "logging.h"
+#include "pipeline.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -201,6 +202,14 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
 
     double last_frame_kib = snap->last_frame_bytes / 1024.0;
     double frame_avg_kib = snap->frame_size_avg / 1024.0;
+    double recording_elapsed_s = snap->recording_elapsed_ns / 1e9;
+    double recording_media_s = snap->recording_media_ns / 1e9;
+    const char *recording_enabled = snap->recording_enabled ? "true" : "false";
+    const char *recording_active = snap->recording_active ? "true" : "false";
+    char *escaped_path = NULL;
+    if (snap->recording_path[0] != '\0') {
+        escaped_path = g_strescape(snap->recording_path, NULL);
+    }
 
     g_snprintf(buf, buf_sz,
                "{\"have_stats\":true,\"total_packets\":%" G_GUINT64_FORMAT
@@ -216,13 +225,20 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
                ",\"frame_count\":%" G_GUINT64_FORMAT
                ",\"incomplete_frames\":%" G_GUINT64_FORMAT
                ",\"last_frame_kib\":%.2f,\"avg_frame_kib\":%.2f,\"bitrate_mbps\":%.3f,\"bitrate_avg_mbps\":%.3f,"
-                "\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u,\"last_video_timestamp\":%u,"
-                "\"last_packet_ns\":%" G_GUINT64_FORMAT ",\"idr_requests\":%" G_GUINT64_FORMAT "}",
+               "\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u,\"last_video_timestamp\":%u,"
+               "\"last_packet_ns\":%" G_GUINT64_FORMAT ",\"idr_requests\":%" G_GUINT64_FORMAT
+               ",\"recording_enabled\":%s,\"recording_active\":%s,\"recording_duration_s\":%.3f,"
+               "\"recording_media_s\":%.3f,\"recording_bytes\":%" G_GUINT64_FORMAT
+               ",\"recording_path\":\"%s\"}",
                snap->total_packets, snap->video_packets, snap->audio_packets, snap->ignored_packets,
                snap->duplicate_packets, snap->lost_packets, snap->reordered_packets, snap->total_bytes,
                snap->video_bytes, snap->audio_bytes, snap->frame_count, snap->incomplete_frames, last_frame_kib,
-                frame_avg_kib, snap->bitrate_mbps, snap->bitrate_avg_mbps, snap->jitter_ms, snap->jitter_avg_ms,
-                snap->expected_sequence, snap->last_video_timestamp, snap->last_packet_ns, snap->idr_requests);
+               frame_avg_kib, snap->bitrate_mbps, snap->bitrate_avg_mbps, snap->jitter_ms, snap->jitter_avg_ms,
+               snap->expected_sequence, snap->last_video_timestamp, snap->last_packet_ns, snap->idr_requests,
+               recording_enabled, recording_active, recording_elapsed_s, recording_media_s, snap->recording_bytes,
+               escaped_path != NULL ? escaped_path : "");
+
+    g_free(escaped_path);
 }
 
 static void sleep_interval(const SseStreamer *streamer) {
@@ -302,10 +318,10 @@ static gpointer sse_client_thread(gpointer data) {
         }
         g_mutex_unlock(&streamer->lock);
 
-        char json[768];
+        char json[4096];
         format_json_payload(json, sizeof(json), &snapshot, have_stats);
 
-        char event_buf[1024];
+        char event_buf[4608];
         int event_len = g_snprintf(event_buf, sizeof(event_buf), "event: stats\ndata: %s\n\n", json);
         if (event_len <= 0 || event_len >= (int)sizeof(event_buf)) {
             break;
@@ -447,39 +463,53 @@ int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
     return 0;
 }
 
-void sse_streamer_publish(SseStreamer *streamer, const UdpReceiverStats *stats, gboolean have_stats) {
+void sse_streamer_publish(SseStreamer *streamer, const UdpReceiverStats *stats, gboolean have_stats,
+                         gboolean recording_enabled, const struct PipelineRecordingStats *recording) {
     if (streamer == NULL || !streamer->running) {
         return;
     }
     g_mutex_lock(&streamer->lock);
     streamer->have_stats = have_stats ? TRUE : FALSE;
+    SseStatsSnapshot snap = {0};
     if (have_stats && stats != NULL) {
-        SseStatsSnapshot snap = {
-            .total_packets = stats->total_packets,
-            .video_packets = stats->video_packets,
-            .audio_packets = stats->audio_packets,
-            .ignored_packets = stats->ignored_packets,
-            .duplicate_packets = stats->duplicate_packets,
-            .lost_packets = stats->lost_packets,
-            .reordered_packets = stats->reordered_packets,
-            .total_bytes = stats->total_bytes,
-            .video_bytes = stats->video_bytes,
-            .audio_bytes = stats->audio_bytes,
-            .frame_count = stats->frame_count,
-            .incomplete_frames = stats->incomplete_frames,
-            .last_frame_bytes = stats->last_frame_bytes,
-            .frame_size_avg = stats->frame_size_avg,
-            .jitter_ms = stats->jitter / 90.0,
-            .jitter_avg_ms = stats->jitter_avg / 90.0,
-            .bitrate_mbps = stats->bitrate_mbps,
-            .bitrate_avg_mbps = stats->bitrate_avg_mbps,
-            .last_video_timestamp = stats->last_video_timestamp,
-            .expected_sequence = stats->expected_sequence,
-            .last_packet_ns = stats->last_packet_ns,
-            .idr_requests = stats->idr_requests,
-        };
-        streamer->stats = snap;
+        snap.total_packets = stats->total_packets;
+        snap.video_packets = stats->video_packets;
+        snap.audio_packets = stats->audio_packets;
+        snap.ignored_packets = stats->ignored_packets;
+        snap.duplicate_packets = stats->duplicate_packets;
+        snap.lost_packets = stats->lost_packets;
+        snap.reordered_packets = stats->reordered_packets;
+        snap.total_bytes = stats->total_bytes;
+        snap.video_bytes = stats->video_bytes;
+        snap.audio_bytes = stats->audio_bytes;
+        snap.frame_count = stats->frame_count;
+        snap.incomplete_frames = stats->incomplete_frames;
+        snap.last_frame_bytes = stats->last_frame_bytes;
+        snap.frame_size_avg = stats->frame_size_avg;
+        snap.jitter_ms = stats->jitter / 90.0;
+        snap.jitter_avg_ms = stats->jitter_avg / 90.0;
+        snap.bitrate_mbps = stats->bitrate_mbps;
+        snap.bitrate_avg_mbps = stats->bitrate_avg_mbps;
+        snap.last_video_timestamp = stats->last_video_timestamp;
+        snap.expected_sequence = stats->expected_sequence;
+        snap.last_packet_ns = stats->last_packet_ns;
+        snap.idr_requests = stats->idr_requests;
     }
+    snap.recording_enabled = recording_enabled ? TRUE : FALSE;
+    if (recording != NULL) {
+        snap.recording_active = recording->active ? TRUE : FALSE;
+        snap.recording_bytes = recording->bytes_written;
+        snap.recording_elapsed_ns = recording->elapsed_ns;
+        snap.recording_media_ns = recording->media_duration_ns;
+        g_strlcpy(snap.recording_path, recording->output_path, sizeof(snap.recording_path));
+    } else {
+        snap.recording_active = FALSE;
+        snap.recording_bytes = 0;
+        snap.recording_elapsed_ns = 0;
+        snap.recording_media_ns = 0;
+        snap.recording_path[0] = '\0';
+    }
+    streamer->stats = snap;
     g_mutex_unlock(&streamer->lock);
 }
 

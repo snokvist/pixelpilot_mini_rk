@@ -47,6 +47,10 @@ struct VideoRecorder {
     int enable_fragmentation;
     struct PendingSample pending;
     gboolean awaiting_sync_warning;
+    guint64 bytes_written;
+    guint64 total_duration_90k;
+    guint64 start_time_ns;
+    GMutex stats_lock;
 };
 
 static gchar *recorder_timestamp_string(void) {
@@ -130,6 +134,9 @@ static int recorder_write_callback(int64_t offset, const void *buffer, size_t si
         LOGE("minimp4: fwrite short write (%zu/%zu): %s", written, size, g_strerror(errno));
         return -1;
     }
+    g_mutex_lock(&rec->stats_lock);
+    rec->bytes_written += written;
+    g_mutex_unlock(&rec->stats_lock);
     return 0;
 }
 
@@ -261,6 +268,9 @@ static void emit_pending(VideoRecorder *rec, guint32 duration_90k) {
         rec->failed = TRUE;
     } else {
         rec->awaiting_sync_warning = FALSE;
+        g_mutex_lock(&rec->stats_lock);
+        rec->total_duration_90k += duration_90k;
+        g_mutex_unlock(&rec->stats_lock);
     }
 
     pending_reset(&rec->pending);
@@ -294,11 +304,15 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
         return NULL;
     }
 
+    g_mutex_init(&rec->stats_lock);
     rec->enabled = TRUE;
     rec->failed = FALSE;
     rec->default_duration_90k = 3000;
     rec->last_duration_90k = 0;
     rec->output_path = output_path;
+    rec->bytes_written = 0;
+    rec->total_duration_90k = 0;
+    rec->start_time_ns = (guint64)g_get_monotonic_time() * 1000u;
 
     rec->mode = cfg->mode;
     rec->sequential_mode_flag = 1;
@@ -338,6 +352,7 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
         fclose(rec->fp);
         rec->fp = NULL;
         g_free(rec->output_path);
+        g_mutex_clear(&rec->stats_lock);
         g_free(rec);
         return NULL;
     }
@@ -424,8 +439,39 @@ void video_recorder_free(VideoRecorder *rec) {
         rec->fp = NULL;
     }
 
-    g_free(rec->output_path);
+    if (rec->output_path != NULL) {
+        g_free(rec->output_path);
+        rec->output_path = NULL;
+    }
     pending_reset(&rec->pending);
 
+    g_mutex_clear(&rec->stats_lock);
     g_free(rec);
+}
+
+void video_recorder_get_stats(const VideoRecorder *rec, VideoRecorderStats *stats) {
+    if (stats == NULL) {
+        return;
+    }
+    memset(stats, 0, sizeof(*stats));
+    if (rec == NULL) {
+        return;
+    }
+
+    g_mutex_lock((GMutex *)&rec->stats_lock);
+    stats->active = rec->enabled && !rec->failed && rec->fp != NULL && rec->mux != NULL;
+    stats->bytes_written = rec->bytes_written;
+    stats->media_duration_ns = gst_util_uint64_scale(rec->total_duration_90k, GST_SECOND, 90000);
+    if (rec->start_time_ns != 0) {
+        guint64 now_ns = (guint64)g_get_monotonic_time() * 1000u;
+        if (now_ns > rec->start_time_ns) {
+            stats->elapsed_ns = now_ns - rec->start_time_ns;
+        }
+    }
+    if (rec->output_path != NULL) {
+        g_strlcpy(stats->output_path, rec->output_path, sizeof(stats->output_path));
+    } else {
+        stats->output_path[0] = '\0';
+    }
+    g_mutex_unlock((GMutex *)&rec->stats_lock);
 }
