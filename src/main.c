@@ -26,6 +26,7 @@
 static volatile sig_atomic_t g_exit_flag = 0;
 static volatile sig_atomic_t g_toggle_osd_flag = 0;
 static volatile sig_atomic_t g_toggle_record_flag = 0;
+static sigset_t g_usr_signal_mask;
 
 static const char *g_instance_pid_path = "/tmp/pixel_pilot_rk.pid";
 
@@ -130,6 +131,66 @@ static void on_sigusr(int sig) {
     }
 }
 
+static gboolean block_user_toggle_signals(sigset_t *old_mask) {
+    if (sigprocmask(SIG_BLOCK, &g_usr_signal_mask, old_mask) != 0) {
+        LOGW("sigprocmask block failed: %s", strerror(errno));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void restore_user_toggle_signals(const sigset_t *old_mask, gboolean restore) {
+    if (restore && sigprocmask(SIG_SETMASK, old_mask, NULL) != 0) {
+        LOGW("sigprocmask restore failed: %s", strerror(errno));
+    }
+}
+
+static int setup_signal_handlers(void) {
+    sigemptyset(&g_usr_signal_mask);
+    sigaddset(&g_usr_signal_mask, SIGUSR1);
+    sigaddset(&g_usr_signal_mask, SIGUSR2);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGINT, &sa, NULL) != 0) {
+        LOGE("sigaction(SIGINT) failed: %s", strerror(errno));
+        return -1;
+    }
+
+    sa.sa_handler = on_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGTERM, &sa, NULL) != 0) {
+        LOGE("sigaction(SIGTERM) failed: %s", strerror(errno));
+        return -1;
+    }
+
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGCHLD, &sa, NULL) != 0) {
+        LOGE("sigaction(SIGCHLD) failed: %s", strerror(errno));
+        return -1;
+    }
+
+    sa.sa_handler = on_sigusr;
+    sa.sa_mask = g_usr_signal_mask;
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) {
+        LOGE("sigaction(SIGUSR1) failed: %s", strerror(errno));
+        return -1;
+    }
+    if (sigaction(SIGUSR2, &sa, NULL) != 0) {
+        LOGE("sigaction(SIGUSR2) failed: %s", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
 static long long ms_since(struct timespec newer, struct timespec older) {
     return (newer.tv_sec - older.tv_sec) * 1000LL + (newer.tv_nsec - older.tv_nsec) / 1000000LL;
 }
@@ -173,11 +234,9 @@ int main(int argc, char **argv) {
         }
     }
 
-    signal(SIGINT, on_sigint);
-    signal(SIGTERM, on_sigint);
-    signal(SIGCHLD, SIG_DFL);
-    signal(SIGUSR1, on_sigusr);
-    signal(SIGUSR2, on_sigusr);
+    if (setup_signal_handlers() != 0) {
+        return 1;
+    }
 
     int fd = open(cfg.card_path, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
@@ -251,15 +310,32 @@ int main(int argc, char **argv) {
         struct pollfd pfds[2];
         int nfds = 0;
         int ufd = cfg.use_udev ? um.fd : -1;
+        int udev_index = -1;
         if (ufd >= 0) {
+            udev_index = nfds;
             pfds[nfds++] = (struct pollfd){.fd = ufd, .events = POLLIN};
         }
         pfds[nfds++] = (struct pollfd){.fd = STDIN_FILENO, .events = 0};
 
         int tout = 200;
-        (void)poll(pfds, nfds, tout);
+        int prc;
+        do {
+            prc = poll(pfds, nfds, tout);
+        } while (prc < 0 && errno == EINTR);
 
-        if (ufd >= 0 && nfds > 0 && (pfds[0].revents & POLLIN)) {
+        if (prc < 0) {
+            LOGW("poll failed: %s", strerror(errno));
+            continue;
+        }
+        if (prc == 0) {
+            continue;
+        }
+
+        if (udev_index >= 0 && (pfds[udev_index].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            LOGW("udev monitor poll error: revents=0x%x", pfds[udev_index].revents);
+        }
+
+        if (udev_index >= 0 && (pfds[udev_index].revents & POLLIN)) {
             if (udev_monitor_did_hotplug(&um)) {
                 struct timespec now;
                 clock_gettime(CLOCK_MONOTONIC, &now);
@@ -320,8 +396,11 @@ int main(int argc, char **argv) {
         }
 
         if (g_toggle_osd_flag) {
+            sigset_t prev_mask;
+            gboolean blocked = block_user_toggle_signals(&prev_mask);
             sig_atomic_t toggles = g_toggle_osd_flag;
             g_toggle_osd_flag = 0;
+            restore_user_toggle_signals(&prev_mask, blocked);
             for (sig_atomic_t i = 0; i < toggles; ++i) {
                 cfg.osd_enable = cfg.osd_enable ? 0 : 1;
                 if (!cfg.osd_enable) {
@@ -361,8 +440,11 @@ int main(int argc, char **argv) {
         }
 
         if (g_toggle_record_flag) {
+            sigset_t prev_mask;
+            gboolean blocked = block_user_toggle_signals(&prev_mask);
             sig_atomic_t toggles = g_toggle_record_flag;
             g_toggle_record_flag = 0;
+            restore_user_toggle_signals(&prev_mask, blocked);
             for (sig_atomic_t i = 0; i < toggles; ++i) {
                 if (!cfg.record.enable) {
                     if (cfg.record.output_path[0] == '\0') {

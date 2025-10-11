@@ -15,9 +15,12 @@
 #include <unistd.h>
 
 typedef struct {
-    SseStreamer *streamer;
     int fd;
 } SseClientContext;
+
+static const guint kDefaultMaxClients = 8;
+static const size_t kMaxRequestBytes = 4096;
+static const int kHandshakeTimeoutSeconds = 5;
 
 static gboolean streamer_is_shutdown(const SseStreamer *streamer) {
     return g_atomic_int_get((volatile gint *)&streamer->shutdown_flag) != 0;
@@ -73,11 +76,14 @@ static int create_listen_socket(const char *bind_address, int port) {
     return fd;
 }
 
-static void set_socket_timeout(int fd, int seconds) {
+static void set_socket_timeouts(int fd, int seconds) {
     struct timeval tv = {0};
     tv.tv_sec = seconds;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0) {
         LOGW("SSE streamer: setsockopt(SO_RCVTIMEO) failed: %s", strerror(errno));
+    }
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) != 0) {
+        LOGW("SSE streamer: setsockopt(SO_SNDTIMEO) failed: %s", strerror(errno));
     }
 }
 
@@ -89,6 +95,9 @@ static ssize_t send_all(int fd, const char *data, size_t len) {
             if (errno == EINTR) {
                 continue;
             }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return -2;
+            }
             return -1;
         }
         if (rc == 0) {
@@ -97,6 +106,80 @@ static ssize_t send_all(int fd, const char *data, size_t len) {
         sent += (size_t)rc;
     }
     return (ssize_t)sent;
+}
+
+static gboolean read_http_request(int fd, char *method, size_t method_sz, char *path, size_t path_sz) {
+    size_t total = 0;
+    char buffer[kMaxRequestBytes + 1];
+    while (total < kMaxRequestBytes) {
+        ssize_t rc = recv(fd, buffer + total, kMaxRequestBytes - total, 0);
+        if (rc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return FALSE;
+            }
+            return FALSE;
+        }
+        if (rc == 0) {
+            return FALSE;
+        }
+        total += (size_t)rc;
+        buffer[total] = '\0';
+        if (strstr(buffer, "\r\n\r\n") != NULL) {
+            break;
+        }
+    }
+    if (total >= kMaxRequestBytes && strstr(buffer, "\r\n\r\n") == NULL) {
+        return FALSE;
+    }
+
+    char *line_end = strstr(buffer, "\r\n");
+    if (line_end == NULL) {
+        return FALSE;
+    }
+    *line_end = '\0';
+
+    char *space = strchr(buffer, ' ');
+    if (space == NULL) {
+        return FALSE;
+    }
+    *space = '\0';
+    if (g_strlcpy(method, buffer, method_sz) >= method_sz) {
+        return FALSE;
+    }
+
+    char *path_start = space + 1;
+    while (*path_start == ' ') {
+        path_start++;
+    }
+    char *path_end = strchr(path_start, ' ');
+    if (path_end == NULL) {
+        return FALSE;
+    }
+    *path_end = '\0';
+    if (g_strlcpy(path, path_start, path_sz) >= path_sz) {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static gboolean try_acquire_client_slot(SseStreamer *streamer) {
+    for (;;) {
+        gint current = g_atomic_int_get(&streamer->active_clients);
+        if (current >= (gint)streamer->max_clients) {
+            return FALSE;
+        }
+        if (g_atomic_int_compare_and_exchange(&streamer->active_clients, current, current + 1)) {
+            return TRUE;
+        }
+    }
+}
+
+static void release_client_slot(SseStreamer *streamer) {
+    g_atomic_int_add(&streamer->active_clients, -1);
 }
 
 static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot *snap, gboolean have_stats) {
@@ -144,26 +227,19 @@ static void sleep_interval(const SseStreamer *streamer) {
     }
 }
 
-static gpointer sse_client_thread(gpointer data) {
+static void sse_client_worker(gpointer data, gpointer user_data) {
     SseClientContext *ctx = data;
-    SseStreamer *streamer = ctx->streamer;
+    SseStreamer *streamer = user_data;
     int fd = ctx->fd;
-
-    char request[1024];
-    ssize_t req_len = recv(fd, request, sizeof(request) - 1, 0);
-    if (req_len <= 0) {
-        goto cleanup;
-    }
-    request[req_len] = '\0';
 
     char method[8] = {0};
     char path[128] = {0};
-    if (sscanf(request, "%7s %127s", method, path) != 2) {
+    if (!read_http_request(fd, method, sizeof(method), path, sizeof(path))) {
         send_all(fd, "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n", 44);
         goto cleanup;
     }
 
-    if (g_strcmp0(method, "GET") != 0) {
+    if (g_ascii_strcasecmp(method, "GET") != 0) {
         send_all(fd, "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n", 58);
         goto cleanup;
     }
@@ -178,7 +254,8 @@ static gpointer sse_client_thread(gpointer data) {
                                   "Cache-Control: no-cache\r\n"
                                   "Connection: keep-alive\r\n"
                                   "Access-Control-Allow-Origin: *\r\n\r\n";
-    if (send_all(fd, response_header, strlen(response_header)) < 0) {
+    ssize_t header_rc = send_all(fd, response_header, strlen(response_header));
+    if (header_rc < 0) {
         goto cleanup;
     }
 
@@ -200,7 +277,8 @@ static gpointer sse_client_thread(gpointer data) {
         if (event_len <= 0 || event_len >= (int)sizeof(event_buf)) {
             break;
         }
-        if (send_all(fd, event_buf, (size_t)event_len) < 0) {
+        ssize_t send_rc = send_all(fd, event_buf, (size_t)event_len);
+        if (send_rc < 0) {
             break;
         }
 
@@ -210,7 +288,7 @@ static gpointer sse_client_thread(gpointer data) {
 cleanup:
     close(fd);
     g_free(ctx);
-    return NULL;
+    release_client_slot(streamer);
 }
 
 static gpointer sse_accept_thread(gpointer data) {
@@ -251,24 +329,34 @@ static gpointer sse_accept_thread(gpointer data) {
             continue;
         }
 
-        set_socket_timeout(fd, 5);
+        set_socket_timeouts(fd, kHandshakeTimeoutSeconds);
+
+        if (!try_acquire_client_slot(streamer)) {
+            send_all(fd, "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n", 56);
+            close(fd);
+            continue;
+        }
 
         SseClientContext *ctx = g_new0(SseClientContext, 1);
         if (ctx == NULL) {
             LOGW("SSE streamer: failed to allocate client context");
+            release_client_slot(streamer);
             close(fd);
             continue;
         }
-        ctx->streamer = streamer;
         ctx->fd = fd;
-        GThread *client = g_thread_new("sse-client", sse_client_thread, ctx);
-        if (client == NULL) {
-            LOGW("SSE streamer: failed to spawn client thread");
+
+        GError *err = NULL;
+        if (!g_thread_pool_push(streamer->client_pool, ctx, &err)) {
+            LOGW("SSE streamer: failed to queue client: %s", err != NULL ? err->message : "unknown error");
+            if (err != NULL) {
+                g_error_free(err);
+            }
+            send_all(fd, "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n", 56);
             close(fd);
             g_free(ctx);
-            continue;
+            release_client_slot(streamer);
         }
-        g_thread_unref(client);
     }
     return NULL;
 }
@@ -282,6 +370,9 @@ void sse_streamer_init(SseStreamer *streamer) {
     streamer->listen_fd = -1;
     streamer->interval_ms = 1000;
     streamer->port = 0;
+    streamer->client_pool = NULL;
+    streamer->max_clients = kDefaultMaxClients;
+    streamer->active_clients = 0;
     g_mutex_init(&streamer->lock);
     streamer_clear_shutdown(streamer);
 }
@@ -312,6 +403,25 @@ int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
 
     streamer_clear_shutdown(streamer);
     streamer->running = TRUE;
+
+    if (streamer->client_pool == NULL) {
+        GError *err = NULL;
+        streamer->client_pool = g_thread_pool_new(sse_client_worker, streamer, (gint)streamer->max_clients, FALSE, &err);
+        if (streamer->client_pool == NULL) {
+            LOGE("SSE streamer: failed to create client pool: %s", err != NULL ? err->message : "unknown error");
+            if (err != NULL) {
+                g_error_free(err);
+            }
+            close(streamer->listen_fd);
+            streamer->listen_fd = -1;
+            streamer->running = FALSE;
+            streamer->configured = FALSE;
+            return -1;
+        }
+    }
+
+    g_atomic_int_set(&streamer->active_clients, 0);
+
     streamer->accept_thread = g_thread_new("sse-accept", sse_accept_thread, streamer);
     if (streamer->accept_thread == NULL) {
         LOGE("SSE streamer: failed to start accept thread");
@@ -319,6 +429,8 @@ int sse_streamer_start(SseStreamer *streamer, const AppCfg *cfg) {
         streamer->listen_fd = -1;
         streamer->running = FALSE;
         streamer->configured = FALSE;
+        g_thread_pool_free(streamer->client_pool, FALSE, TRUE);
+        streamer->client_pool = NULL;
         return -1;
     }
     LOGI("SSE streamer: listening on %s:%d (interval=%ums)",
@@ -374,6 +486,10 @@ void sse_streamer_stop(SseStreamer *streamer) {
     if (streamer->accept_thread != NULL) {
         g_thread_join(streamer->accept_thread);
         streamer->accept_thread = NULL;
+    }
+    if (streamer->client_pool != NULL) {
+        g_thread_pool_free(streamer->client_pool, FALSE, TRUE);
+        streamer->client_pool = NULL;
     }
     streamer->running = FALSE;
     streamer->configured = FALSE;

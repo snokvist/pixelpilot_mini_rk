@@ -38,9 +38,12 @@ typedef struct {
     char bind_address[64];
     int port;
     GThread *accept_thread;
+    GThreadPool *client_pool;
+    guint max_clients;
     GMutex lock;
     gboolean running;
     volatile gint shutdown_flag;
+    volatile gint active_clients;
     gboolean have_stats;
     SseStatsSnapshot stats;
 } SseStreamer;
