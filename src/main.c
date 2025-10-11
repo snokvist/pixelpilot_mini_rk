@@ -250,16 +250,28 @@ int main(int argc, char **argv) {
 
         struct pollfd pfds[2];
         int nfds = 0;
+        int ufd_index = -1;
         int ufd = cfg.use_udev ? um.fd : -1;
         if (ufd >= 0) {
+            ufd_index = nfds;
             pfds[nfds++] = (struct pollfd){.fd = ufd, .events = POLLIN};
         }
         pfds[nfds++] = (struct pollfd){.fd = STDIN_FILENO, .events = 0};
 
         int tout = 200;
-        (void)poll(pfds, nfds, tout);
+        int prc = poll(pfds, nfds, tout);
+        if (prc < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            LOGW("poll() failed while waiting for hotplug: %s", strerror(errno));
+            continue;
+        }
+        if (prc == 0) {
+            continue;
+        }
 
-        if (ufd >= 0 && nfds > 0 && (pfds[0].revents & POLLIN)) {
+        if (ufd_index >= 0 && (pfds[ufd_index].revents & POLLIN)) {
             if (udev_monitor_did_hotplug(&um)) {
                 struct timespec now;
                 clock_gettime(CLOCK_MONOTONIC, &now);
