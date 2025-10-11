@@ -221,23 +221,34 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
     }
 
     g_snprintf(buf, buf_sz,
-               "{\"have_stats\":true,\"total_packets\":%" G_GUINT64_FORMAT
-               ",\"video_packets\":%" G_GUINT64_FORMAT
-               ",\"audio_packets\":%" G_GUINT64_FORMAT
-               ",\"ignored_packets\":%" G_GUINT64_FORMAT
-               ",\"duplicate_packets\":%" G_GUINT64_FORMAT
-               ",\"lost_packets\":%" G_GUINT64_FORMAT
-               ",\"reordered_packets\":%" G_GUINT64_FORMAT
-               ",\"total_mbytes\":%" G_GUINT64_FORMAT
-               ",\"video_mbytes\":%" G_GUINT64_FORMAT
-               ",\"audio_mbytes\":%" G_GUINT64_FORMAT
-               ",\"frame_count\":%" G_GUINT64_FORMAT
-               ",\"incomplete_frames\":%" G_GUINT64_FORMAT
-               ",\"last_frame_kib\":%.2f,\"avg_frame_kib\":%.2f,\"bitrate_mbps\":%.3f,\"bitrate_avg_mbps\":%.3f,""
-               "\"jitter_ms\":%.3f,\"jitter_avg_ms\":%.3f,\"expected_sequence\":%u,\"idr_requests\":%" G_GUINT64_FORMAT
-               ",\"recording_enabled\":%s,\"recording_active\":%s,\"recording_duration_s\":%.3f,""
-               "\"recording_media_s\":%.3f,\"recording_mbytes\":%" G_GUINT64_FORMAT
-               ",\"recording_path\":\"%s\"}",
+               "{"
+               "\"have_stats\":true,"
+               "\"total_packets\":%" G_GUINT64_FORMAT ","
+               "\"video_packets\":%" G_GUINT64_FORMAT ","
+               "\"audio_packets\":%" G_GUINT64_FORMAT ","
+               "\"ignored_packets\":%" G_GUINT64_FORMAT ","
+               "\"duplicate_packets\":%" G_GUINT64_FORMAT ","
+               "\"lost_packets\":%" G_GUINT64_FORMAT ","
+               "\"reordered_packets\":%" G_GUINT64_FORMAT ","
+               "\"total_mbytes\":%" G_GUINT64_FORMAT ","
+               "\"video_mbytes\":%" G_GUINT64_FORMAT ","
+               "\"audio_mbytes\":%" G_GUINT64_FORMAT ","
+               "\"frame_count\":%" G_GUINT64_FORMAT ","
+               "\"incomplete_frames\":%" G_GUINT64_FORMAT ","
+               "\"last_frame_kib\":%.2f,"
+               "\"avg_frame_kib\":%.2f,"
+               "\"bitrate_mbps\":%.3f,"
+               "\"bitrate_avg_mbps\":%.3f,"
+               "\"jitter_ms\":%.3f,"
+               "\"jitter_avg_ms\":%.3f,"
+               "\"expected_sequence\":%u,"
+               "\"idr_requests\":%" G_GUINT64_FORMAT ","
+               "\"recording_enabled\":%s,"
+               "\"recording_active\":%s,"
+               "\"recording_duration_s\":%.3f,"
+               "\"recording_media_s\":%.3f,"
+               "\"recording_mbytes\":%" G_GUINT64_FORMAT ","
+               "\"recording_path\":\"%s\"}",
                snap->total_packets, snap->video_packets, snap->audio_packets, snap->ignored_packets,
                snap->duplicate_packets, snap->lost_packets, snap->reordered_packets, total_mbytes, video_mbytes,
                audio_mbytes, snap->frame_count, snap->incomplete_frames, last_frame_kib, frame_avg_kib,
