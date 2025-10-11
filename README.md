@@ -33,7 +33,8 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
-| `[pipeline].latency-ms` | Network jitter buffer target in milliseconds. This feeds the appsrc `latency` property as well as the OSD token `{pipeline.latency_ms}`. |
+| `[pipeline].packet-latency-ms` | Network RTP packet jitter buffer target in milliseconds. This feeds the appsrc `latency` property as well as the OSD token `{pipeline.packet_latency_ms}`. |
+| `[pipeline].max-buffers` | Maximum number of decoded video buffers that the appsink queues before dropping new frames. Set `0` to disable dropping and allow unbounded buffering. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
 | `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
 | `[idr].enable` | `true` enables the automatic IDR requester that fires HTTP recovery bursts when decode warnings appear. |
@@ -64,6 +65,19 @@ to the defaults listed in `src/config.c` when omitted.
 | `[osd.element.NAME].anchor` / `offset` / `size` / color keys | Control placement and styling for OSD widgets. See inline comments in the sample file for full semantics. |
 | `[osd.element.NAME].line` | For text widgets, each `line =` entry appends a formatted row supporting `{token}` placeholders. |
 | `[osd.element.NAME].metric` | For line/bar widgets, selects the metric token (e.g. `udp.bitrate.latest_mbps`) sampled each refresh. |
+
+### RTP pipeline flow and latency target
+
+The default receiver path instantiates the following GStreamer graph:
+
+1. `udp_receiver` wraps each UDP datagram in a `GstBuffer` and pushes it into a live `appsrc` named `udp_appsrc`.
+2. `rtph265depay` extracts the H.265 elementary stream from the RTP payload and forwards it through a leaky queue.
+3. An `input-selector` switches between the live UDP feed and the optional splash player, both feeding `h265parse` and a byte-stream capsfilter.
+4. The `appsink` at the end of the branch hands Annex-B access units to the DRM/KMS renderer and the recording path.
+
+The `[pipeline].packet-latency-ms` option is applied at the `udp_appsrc` (and matching audio `appsrc`) as both the `latency` property and the advertised min/max latency. Because each `GstBuffer` still represents a single RTP packet, the value expresses how long the source may queue packets internally before they are scheduled downstream. A small target such as `2` keeps end-to-end latency minimal but leaves little headroom for network jitter. Raising the target to `20` instructs the pipeline to absorb up to 20 ms of packet delay variation before the data is released, improving glitch resistance at the expense of additional buffering time.
+
+Frame queueing is governed by the `appsink` at the end of the pipeline. The `[pipeline].max-buffers` option sets how many decoded access units are allowed to accumulate before new frames are dropped. The default of `4` preserves the prior behaviour of prioritising real-time display, while larger values trade extra latency for smoother recovery from downstream hiccups. Setting the value to `0` disables dropping entirely and allows the queue to grow without bound, which can absorb longer stalls at the expense of additional frame delay.
 
 ## CPU affinity control
 

@@ -356,8 +356,12 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         snprintf(buf, buf_sz, "%d", cfg ? cfg->aud_pt : 0);
         return 0;
     }
-    if (strcmp(key, "pipeline.latency_ms") == 0) {
-        snprintf(buf, buf_sz, "%d", cfg ? cfg->latency_ms : 0);
+    if (strcmp(key, "pipeline.packet_latency_ms") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->packet_latency_ms : 0);
+        return 0;
+    }
+    if (strcmp(key, "pipeline.max_buffers") == 0) {
+        snprintf(buf, buf_sz, "%d", cfg ? cfg->max_buffers : 0);
         return 0;
     }
     if (strcmp(key, "pipeline.state") == 0) {
@@ -551,8 +555,12 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
         *out_value = (double)ctx->restart_count;
         return 1;
     }
-    if (metric && strcmp(metric, "pipeline.latency_ms") == 0) {
-        *out_value = (double)(ctx->cfg ? ctx->cfg->latency_ms : 0);
+    if (metric && strcmp(metric, "pipeline.packet_latency_ms") == 0) {
+        *out_value = (double)(ctx->cfg ? ctx->cfg->packet_latency_ms : 0);
+        return 1;
+    }
+    if (metric && strcmp(metric, "pipeline.max_buffers") == 0) {
+        *out_value = (double)(ctx->cfg ? ctx->cfg->max_buffers : 0);
         return 1;
     }
 

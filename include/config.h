@@ -69,7 +69,8 @@ typedef struct {
     int udp_port;
     int vid_pt;
     int aud_pt;
-    int latency_ms;
+    int packet_latency_ms;
+    int max_buffers;
     int udpsrc_pt97_filter;
     CustomSinkMode custom_sink;
     char aud_dev[128];

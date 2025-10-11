@@ -21,7 +21,8 @@ static void usage(const char *prog) {
             "  --udp-port N                 (default: 5600)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
-            "  --latency-ms N               (default: 8)\n"
+            "  --packet-latency-ms N        (default: 8)\n"
+            "  --max-buffers N              (default: 4, 0 disables dropping)\n"
             "  --custom-sink MODE           (receiver|udpsrc; default: receiver)\n"
             "  --aud-dev STR                (default: plughw:CARD=rockchiphdmi0,DEV=0)\n"
             "  --no-audio                   (drop audio branch entirely)\n"
@@ -138,7 +139,8 @@ void cfg_defaults(AppCfg *c) {
     c->udp_port = 5600;
     c->vid_pt = 97;
     c->aud_pt = 98;
-    c->latency_ms = 8;
+    c->packet_latency_ms = 8;
+    c->max_buffers = 4;
     c->udpsrc_pt97_filter = 1;
     c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
@@ -304,8 +306,13 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->vid_pt = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-pt") && i + 1 < argc) {
             cfg->aud_pt = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--latency-ms") && i + 1 < argc) {
-            cfg->latency_ms = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--packet-latency-ms") && i + 1 < argc) {
+            cfg->packet_latency_ms = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--max-buffers") && i + 1 < argc) {
+            cfg->max_buffers = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--max-buffers")) {
+            LOGE("--max-buffers requires an argument");
+            return -1;
         } else if (!strcmp(argv[i], "--custom-sink") && i + 1 < argc) {
             const char *mode_str = argv[++i];
             CustomSinkMode mode;

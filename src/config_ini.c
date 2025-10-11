@@ -733,8 +733,12 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         return -1;
     }
     if (strcasecmp(section, "pipeline") == 0) {
-        if (strcasecmp(key, "latency-ms") == 0) {
-            cfg->latency_ms = atoi(value);
+        if (strcasecmp(key, "packet-latency-ms") == 0) {
+            cfg->packet_latency_ms = atoi(value);
+            return 0;
+        }
+        if (strcasecmp(key, "max-buffers") == 0) {
+            cfg->max_buffers = atoi(value);
             return 0;
         }
         if (strcasecmp(key, "custom-sink") == 0) {

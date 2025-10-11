@@ -411,6 +411,32 @@ static GstCaps *build_appsrc_caps(const AppCfg *cfg, gboolean video_only) {
     return gst_caps_new_empty_simple("application/x-rtp");
 }
 
+static void configure_video_appsink(GstElement *appsink, const AppCfg *cfg) {
+    if (appsink == NULL) {
+        return;
+    }
+
+    // Allow the queue depth to be tuned via configuration. Positive values
+    // enable the drop path once the limit is reached; zero disables dropping
+    // entirely so the queue can grow without bound.
+    guint max_buffers = 4;
+    gboolean drop_enabled = TRUE;
+
+    if (cfg != NULL) {
+        if (cfg->max_buffers < 0) {
+            max_buffers = 4;
+            drop_enabled = TRUE;
+        } else {
+            max_buffers = (guint)cfg->max_buffers;
+            drop_enabled = cfg->max_buffers > 0;
+        }
+    }
+
+    g_object_set(appsink, "drop", drop_enabled, "max-buffers", max_buffers, "sync", FALSE, NULL);
+    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), max_buffers);
+    gst_app_sink_set_drop(GST_APP_SINK(appsink), drop_enabled);
+}
+
 static GstElement *create_udp_app_source(const AppCfg *cfg,
                                          gboolean video_only,
                                          UdpReceiver **receiver_out,
@@ -426,15 +452,37 @@ static GstElement *create_udp_app_source(const AppCfg *cfg,
         goto fail;
     }
 
-    g_object_set(appsrc_elem, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
-                 GST_APP_STREAM_TYPE_STREAM, "max-bytes", (guint64)(4 * 1024 * 1024),
-                 "do-timestamp", TRUE, NULL);
+    GstClockTime latency_ns = 0;
+    if (cfg != NULL && cfg->packet_latency_ms > 0) {
+        latency_ns = (GstClockTime)cfg->packet_latency_ms * GST_MSECOND;
+    }
+
+    // One GstBuffer is queued per incoming RTP datagram. Forward the configured
+    // latency so the live appsrc advertises how much jitter it will absorb
+    // before handing packets downstream. Small targets (for example 2 ms)
+    // minimise end-to-end delay but tolerate very little reordering, whereas
+    // larger values (for example 20 ms) trade extra buffering for resilience
+    // against network burstiness.
+    g_object_set(appsrc_elem,
+                 "is-live",
+                 TRUE,
+                 "format",
+                 GST_FORMAT_TIME,
+                 "stream-type",
+                 GST_APP_STREAM_TYPE_STREAM,
+                 "max-bytes",
+                 (guint64)(4 * 1024 * 1024),
+                 "do-timestamp",
+                 TRUE,
+                 "latency",
+                 latency_ns,
+                 NULL);
 
     GstAppSrc *appsrc = GST_APP_SRC(appsrc_elem);
     gst_app_src_set_caps(appsrc, caps);
     gst_caps_unref(caps);
     caps = NULL;
-    gst_app_src_set_latency(appsrc, 0, 0);
+    gst_app_src_set_latency(appsrc, latency_ns, latency_ns);
     gst_app_src_set_max_bytes(appsrc, 4 * 1024 * 1024);
 
     receiver = udp_receiver_create(cfg->udp_port, cfg->vid_pt, cfg->aud_pt, appsrc, requester);
@@ -514,9 +562,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     appsink = gst_element_factory_make("appsink", "out_appsink");
     CHECK_ELEM(appsink, "appsink");
 
-    g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
-    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
-    gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
+    configure_video_appsink(appsink, cfg);
 
     g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
     if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
@@ -599,9 +645,15 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         CHECK_ELEM(audio_queue_sink, "queue");
         CHECK_ELEM(audio_sink, "alsasink");
 
+        GstClockTime audio_latency_ns = 0;
+        if (cfg->packet_latency_ms > 0) {
+            audio_latency_ns = (GstClockTime)cfg->packet_latency_ms * GST_MSECOND;
+        }
+
         g_object_set(audio_appsrc, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
-                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, "max-bytes", (guint64)(1024 * 1024), NULL);
-        gst_app_src_set_latency(GST_APP_SRC(audio_appsrc), 0, 0);
+                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, "max-bytes", (guint64)(1024 * 1024),
+                     "latency", audio_latency_ns, NULL);
+        gst_app_src_set_latency(GST_APP_SRC(audio_appsrc), audio_latency_ns, audio_latency_ns);
         gst_app_src_set_max_bytes(GST_APP_SRC(audio_appsrc), 1024 * 1024);
 
         audio_caps = gst_caps_new_simple("application/x-rtp", "media", G_TYPE_STRING, "audio", "payload",
@@ -766,9 +818,7 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         return FALSE;
     }
 
-    g_object_set(appsink, "drop", TRUE, "max-buffers", 4, "sync", FALSE, NULL);
-    gst_app_sink_set_max_buffers(GST_APP_SINK(appsink), 4);
-    gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
+    configure_video_appsink(appsink, cfg);
 
     GstCaps *caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
                                         "alignment", G_TYPE_STRING, "au", NULL);
