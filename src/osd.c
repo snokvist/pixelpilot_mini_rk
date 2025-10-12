@@ -6,6 +6,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include <float.h>
@@ -229,6 +230,7 @@ typedef struct {
     int record_enabled;
     int have_record_stats;
     PipelineRecordingStats rec_stats;
+    const OsdExternalFeedSnapshot *external;
 } OsdRenderContext;
 
 static const char *osd_key_copy_lower(const char *src, char *dst, size_t dst_sz) {
@@ -280,6 +282,29 @@ static const char *osd_token_normalize(const char *token, char *buf, size_t buf_
     return buf;
 }
 
+static int osd_external_slot_from_key(const char *key, const char *prefix, int max_slots) {
+    if (!key || !prefix || max_slots <= 0) {
+        return -1;
+    }
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(key, prefix, prefix_len) != 0) {
+        return -1;
+    }
+    const char *p = key + prefix_len;
+    if (*p == '\0') {
+        return -1;
+    }
+    char *end = NULL;
+    long slot = strtol(p, &end, 10);
+    if (end == p || *end != '\0') {
+        return -1;
+    }
+    if (slot < 1 || slot > max_slots) {
+        return -1;
+    }
+    return (int)(slot - 1);
+}
+
 static void format_duration_hms(guint64 ns, char *buf, size_t buf_sz) {
     if (buf == NULL || buf_sz == 0) {
         return;
@@ -290,6 +315,8 @@ static void format_duration_hms(guint64 ns, char *buf, size_t buf_sz) {
     guint secs = (guint)(total_sec % 60);
     g_snprintf(buf, buf_sz, "%02u:%02u:%02u", hours, mins, secs);
 }
+
+static void osd_format_metric_value(const char *metric_key, double value, char *buf, size_t buf_sz);
 
 static const char *osd_pipeline_state_name(const PipelineState *ps) {
     if (!ps) {
@@ -470,6 +497,27 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         return 0;
     }
 
+    if (strcmp(key, "ext.status") == 0) {
+        const char *status = osd_external_status_name(ctx->external ? ctx->external->status : OSD_EXTERNAL_STATUS_DISABLED);
+        snprintf(buf, buf_sz, "%s", status);
+        return 0;
+    }
+    int ext_slot = osd_external_slot_from_key(key, "ext.text", OSD_EXTERNAL_MAX_TEXT);
+    if (ext_slot >= 0) {
+        if (ctx->external) {
+            snprintf(buf, buf_sz, "%s", ctx->external->text[ext_slot]);
+        } else {
+            buf[0] = '\0';
+        }
+        return 0;
+    }
+    ext_slot = osd_external_slot_from_key(key, "ext.value", OSD_EXTERNAL_MAX_VALUES);
+    if (ext_slot >= 0) {
+        double v = (ctx->external) ? ctx->external->value[ext_slot] : 0.0;
+        osd_format_metric_value(key, v, buf, buf_sz);
+        return 0;
+    }
+
     if (!ctx->have_stats) {
         if (strncmp(key, "udp.", 4) == 0) {
             snprintf(buf, buf_sz, "n/a");
@@ -579,6 +627,15 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
     const char *metric = osd_metric_normalize(key, normalized, sizeof(normalized));
 
     if (!ctx->have_stats && metric && strncmp(metric, "udp.", 4) == 0) {
+        return 0;
+    }
+
+    int ext_slot = osd_external_slot_from_key(metric, "ext.value", OSD_EXTERNAL_MAX_VALUES);
+    if (ext_slot >= 0) {
+        if (ctx->external) {
+            *out_value = ctx->external->value[ext_slot];
+            return 1;
+        }
         return 0;
     }
 
@@ -733,6 +790,11 @@ static void osd_format_metric_value(const char *metric_key, double value, char *
 
     char normalized[128];
     const char *key = osd_metric_normalize(metric_key, normalized, sizeof(normalized));
+
+    if (key && strncmp(key, "ext.value", 9) == 0) {
+        snprintf(buf, buf_sz, "%.3f", value);
+        return;
+    }
 
     if (key && (strstr(key, "mbps") || strstr(key, "ms"))) {
         snprintf(buf, buf_sz, "%.2f", value);
@@ -2539,7 +2601,8 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
 }
 
 void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
-                      int audio_disabled, int restart_count, OSD *o) {
+                      int audio_disabled, int restart_count, const OsdExternalFeedSnapshot *ext,
+                      OSD *o) {
     if (!o->enabled || !o->active) {
         return;
     }
@@ -2553,6 +2616,7 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         .have_stats = 0,
         .record_enabled = cfg ? cfg->record.enable : 0,
         .have_record_stats = 0,
+        .external = ext,
     };
     if (ps && pipeline_get_receiver_stats(ps, &ctx.stats) == 0) {
         ctx.have_stats = 1;

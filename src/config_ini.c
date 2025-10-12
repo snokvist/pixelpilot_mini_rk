@@ -822,6 +822,24 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "osd.external") == 0 || strcasecmp(section, "osd_external") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->osd_external.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "socket") == 0 || strcasecmp(key, "path") == 0) {
+            ini_copy_string(cfg->osd_external.socket_path, sizeof(cfg->osd_external.socket_path), value);
+            if (cfg->osd_external.socket_path[0] != '\0') {
+                cfg->osd_external.enable = 1;
+            }
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "record") == 0) {
         if (strcasecmp(key, "enable") == 0) {
             int v = 0;

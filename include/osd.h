@@ -7,6 +7,7 @@
 #include "drm_fb.h"
 #include "drm_modeset.h"
 #include "osd_layout.h"
+#include "osd_external.h"
 #include "pipeline.h"
 
 #define OSD_PLOT_MAX_SAMPLES 1024
@@ -120,7 +121,8 @@ typedef struct OSD {
 void osd_init(OSD *osd);
 int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plane_id, OSD *osd);
 void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
-                      int audio_disabled, int restart_count, OSD *osd);
+                      int audio_disabled, int restart_count, const OsdExternalFeedSnapshot *ext,
+                      OSD *osd);
 int osd_is_enabled(const OSD *osd);
 int osd_is_active(const OSD *osd);
 int osd_enable(int fd, OSD *osd);

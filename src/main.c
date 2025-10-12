@@ -7,6 +7,7 @@
 #include "drm_modeset.h"
 #include "logging.h"
 #include "osd.h"
+#include "osd_external.h"
 #include "pipeline.h"
 #include "sse_streamer.h"
 #include "udev_monitor.h"
@@ -244,11 +245,22 @@ int main(int argc, char **argv) {
     UdevMonitor um = {0};
     OSD osd;
     osd_init(&osd);
+    OsdExternalBridge ext_bridge;
+    osd_external_init(&ext_bridge);
     SseStreamer sse_streamer;
     sse_streamer_init(&sse_streamer);
     if (cfg.sse.enable) {
         if (sse_streamer_start(&sse_streamer, &cfg) != 0) {
             LOGW("Failed to start SSE streamer; continuing without SSE output");
+        }
+    }
+
+    if (cfg.osd_external.enable) {
+        if (cfg.osd_external.socket_path[0] == '\0') {
+            LOGW("External OSD feed enabled but no socket path configured; disabling listener");
+            cfg.osd_external.enable = 0;
+        } else if (osd_external_start(&ext_bridge, cfg.osd_external.socket_path) != 0) {
+            LOGW("Failed to start external OSD feed listener; continuing without external data");
         }
     }
 
@@ -473,7 +485,9 @@ int main(int argc, char **argv) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (ms_since(now, last_osd) >= cfg.osd_refresh_ms) {
-                osd_update_stats(fd, &cfg, &ms, &ps, audio_disabled, restart_count, &osd);
+                OsdExternalFeedSnapshot ext_snapshot;
+                osd_external_get_snapshot(&ext_bridge, &ext_snapshot);
+                osd_update_stats(fd, &cfg, &ms, &ps, audio_disabled, restart_count, &ext_snapshot, &osd);
                 last_osd = now;
             }
         }
@@ -532,6 +546,7 @@ int main(int argc, char **argv) {
     if (cfg.use_udev) {
         udev_monitor_close(&um);
     }
+    osd_external_stop(&ext_bridge);
     close(fd);
     PipelineRecordingStats rec_stats = {0};
     sse_streamer_publish(&sse_streamer, NULL, FALSE, cfg.record.enable ? TRUE : FALSE, &rec_stats);
