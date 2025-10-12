@@ -94,6 +94,7 @@ typedef struct {
 
     struct {
         int enable;
+        int enable_set;
         char socket_path[PATH_MAX];
     } osd_external;
 

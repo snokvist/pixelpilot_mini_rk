@@ -154,6 +154,7 @@ void cfg_defaults(AppCfg *c) {
     c->osd_plane_id = 0;
     c->osd_refresh_ms = 500;
     c->osd_external.enable = 0;
+    c->osd_external.enable_set = 0;
     c->osd_external.socket_path[0] = '\0';
 
     c->gst_log = 0;
@@ -347,12 +348,14 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->osd_refresh_ms = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--osd-external-socket") && i + 1 < argc) {
             cfg->osd_external.enable = 1;
+            cfg->osd_external.enable_set = 1;
             cli_copy_string(cfg->osd_external.socket_path, sizeof(cfg->osd_external.socket_path), argv[++i]);
         } else if (!strcmp(argv[i], "--osd-external-socket")) {
             LOGE("--osd-external-socket requires a path");
             return -1;
         } else if (!strcmp(argv[i], "--no-osd-external")) {
             cfg->osd_external.enable = 0;
+            cfg->osd_external.enable_set = 1;
             cfg->osd_external.socket_path[0] = '\0';
         } else if (!strcmp(argv[i], "--record-video")) {
             cfg->record.enable = 1;
