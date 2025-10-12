@@ -192,6 +192,7 @@ static void pipeline_restart_now(AppCfg *cfg,
         return;
     }
 
+    stats_cache_invalidate(stats_enabled_cached);
     pipeline_maybe_set_stats(ps, stats_enabled_cached, stats_consumers_active(osd, sse_streamer));
     if (window_start != NULL) {
         clock_gettime(CLOCK_MONOTONIC, window_start);
