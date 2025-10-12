@@ -203,6 +203,13 @@ static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
     }
 }
 
+static void osd_clear_rect(OSD *o, const OSDRect *r) {
+    if (!r || r->w <= 0 || r->h <= 0) {
+        return;
+    }
+    osd_fill_rect(o, r->x, r->y, r->w, r->h, 0x00000000u);
+}
+
 static void osd_store_rect(OSDRect *r, int x, int y, int w, int h) {
     if (!r) {
         return;
@@ -819,13 +826,6 @@ static void osd_format_metric_value(const char *metric_key, double value, char *
     } else {
         snprintf(buf, buf_sz, "%.0f", value);
     }
-}
-
-static void osd_clear_rect(OSD *o, const OSDRect *r) {
-    if (!r || r->w <= 0 || r->h <= 0) {
-        return;
-    }
-    osd_fill_rect(o, r->x, r->y, r->w, r->h, 0x00000000u);
 }
 
 static void osd_draw_hline(OSD *o, int x, int y, int w, uint32_t argb) {
