@@ -167,6 +167,10 @@ Packet loss or corruption around an IDR frame leaves the decoder without valid r
 
 Tune the behaviour through `[idr]` in the INI (or the matching `--idr-*` CLI flags): disable it entirely with `idr.enable = false`, override the port or path to match the camera firmware, or extend the timeout when proxies or long RTT links sit between the devices. Every trigger is logged with the cumulative total, and the `udp.idr_requests` counter exposes the same total in OSD templates, SSE payloads, and other telemetry sinks.
 
+When 64 consecutive HTTP bursts fail to clear the decoder warnings, the requester now gives up on further IDR spam and tells the main loop to rebuild the entire pipeline. This mirrors a manual restart: the pipeline tears down the UDP receiver, decoder, and sinks before bringing them back up with the existing configuration. The strategy avoids endless HTTP loops when the camera ignores triggers or the stream never delivers a usable key frame.
+
+Manual restarts follow the same path. Send the process a `SIGHUP` (for example `kill -HUP $(cat /tmp/pixel_pilot_rk.pid)`) to force an immediate teardown/restart cycle without dropping other runtime toggles such as audio fallbacks or active OSD overlays.
+
 ## Splash fallback playback
 
 When the primary UDP stream drops out it is often desirable to display a "waiting" slate rather than leaving the screen idle.

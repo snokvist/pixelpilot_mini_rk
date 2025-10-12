@@ -39,6 +39,7 @@ typedef struct {
     VideoDecoder *decoder;
     gboolean decoder_initialized;
     gboolean decoder_running;
+    gboolean reinit_requested;
     struct Splash *splash;
     GThread *splash_loop_thread;
     gboolean splash_loop_running;
@@ -74,5 +75,6 @@ gboolean pipeline_is_recording(const PipelineState *ps);
 int pipeline_enable_recording(PipelineState *ps, const RecordCfg *cfg);
 void pipeline_disable_recording(PipelineState *ps);
 int pipeline_get_recording_stats(const PipelineState *ps, PipelineRecordingStats *stats);
+gboolean pipeline_consume_reinit_request(PipelineState *ps);
 
 #endif // PIPELINE_H

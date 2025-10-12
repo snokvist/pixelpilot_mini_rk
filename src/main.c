@@ -26,6 +26,7 @@
 static volatile sig_atomic_t g_exit_flag = 0;
 static volatile sig_atomic_t g_toggle_osd_flag = 0;
 static volatile sig_atomic_t g_toggle_record_flag = 0;
+static volatile sig_atomic_t g_reinit_flag = 0;
 
 static const char *g_instance_pid_path = "/tmp/pixel_pilot_rk.pid";
 
@@ -130,6 +131,11 @@ static void on_sigusr(int sig) {
     }
 }
 
+static void on_sighup(int sig) {
+    (void)sig;
+    g_reinit_flag++;
+}
+
 static long long ms_since(struct timespec newer, struct timespec older) {
     return (newer.tv_sec - older.tv_sec) * 1000LL + (newer.tv_nsec - older.tv_nsec) / 1000000LL;
 }
@@ -155,6 +161,47 @@ static void pipeline_maybe_set_stats(PipelineState *ps, int *cached_state, gbool
     *cached_state = desired_int;
 }
 
+static void pipeline_restart_now(AppCfg *cfg,
+                                 ModesetResult *ms,
+                                 int fd,
+                                 int *audio_disabled,
+                                 PipelineState *ps,
+                                 OSD *osd,
+                                 SseStreamer *sse_streamer,
+                                 int *stats_enabled_cached,
+                                 struct timespec *window_start,
+                                 int *restart_count,
+                                 const char *reason) {
+    if (cfg == NULL || ms == NULL || audio_disabled == NULL || ps == NULL || stats_enabled_cached == NULL) {
+        return;
+    }
+
+    const char *why = (reason != NULL) ? reason : "unspecified";
+    LOGW("Pipeline restart requested (%s)", why);
+
+    if (ps->state != PIPELINE_STOPPED) {
+        pipeline_stop(ps, 700);
+    }
+
+    stats_cache_invalidate(stats_enabled_cached);
+    pipeline_maybe_set_stats(ps, stats_enabled_cached, stats_consumers_active(osd, sse_streamer));
+
+    if (pipeline_start(cfg, ms, fd, *audio_disabled, ps) != 0) {
+        LOGE("Failed to restart pipeline (%s)", why);
+        pipeline_maybe_set_stats(ps, stats_enabled_cached, stats_consumers_active(osd, sse_streamer));
+        return;
+    }
+
+    stats_cache_invalidate(stats_enabled_cached);
+    pipeline_maybe_set_stats(ps, stats_enabled_cached, stats_consumers_active(osd, sse_streamer));
+    if (window_start != NULL) {
+        clock_gettime(CLOCK_MONOTONIC, window_start);
+    }
+    if (restart_count != NULL) {
+        *restart_count = 0;
+    }
+}
+
 int main(int argc, char **argv) {
     AppCfg cfg;
     if (parse_cli(argc, argv, &cfg) != 0) {
@@ -178,6 +225,7 @@ int main(int argc, char **argv) {
     signal(SIGCHLD, SIG_DFL);
     signal(SIGUSR1, on_sigusr);
     signal(SIGUSR2, on_sigusr);
+    signal(SIGHUP, on_sighup);
 
     int fd = open(cfg.card_path, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
@@ -247,6 +295,38 @@ int main(int argc, char **argv) {
 
     while (!g_exit_flag) {
         pipeline_poll_child(&ps);
+
+        const char *pending_restart_reason = NULL;
+        if (pipeline_consume_reinit_request(&ps)) {
+            pending_restart_reason = "IDR recovery loop";
+        }
+        if (g_reinit_flag > 0) {
+            g_reinit_flag = 0;
+            if (pending_restart_reason == NULL) {
+                pending_restart_reason = "SIGHUP";
+            } else {
+                LOGW("SIGHUP received while a restart is already pending; combining requests");
+            }
+        }
+        if (pending_restart_reason != NULL) {
+            if (connected) {
+                pipeline_restart_now(&cfg,
+                                     &ms,
+                                     fd,
+                                     &audio_disabled,
+                                     &ps,
+                                     &osd,
+                                     &sse_streamer,
+                                     &stats_enabled_cached,
+                                     &window_start,
+                                     &restart_count,
+                                     pending_restart_reason);
+                backoff_ms = 0;
+            } else {
+                LOGW("Pipeline restart requested (%s) but no display is connected; ignoring.",
+                     pending_restart_reason);
+            }
+        }
 
         struct pollfd pfds[2];
         int nfds = 0;
