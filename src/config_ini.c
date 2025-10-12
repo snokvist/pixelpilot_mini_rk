@@ -111,6 +111,10 @@ static void builder_reset_line(OsdElementConfig *elem) {
     elem->data.line.metric[0] = '\0';
     elem->data.line.label[0] = '\0';
     elem->data.line.show_info_box = 1;
+    elem->data.line.has_y_min = 0;
+    elem->data.line.has_y_max = 0;
+    elem->data.line.y_min = 0.0;
+    elem->data.line.y_max = 0.0;
     elem->data.line.fg = 0xFFFFFFFFu;
     elem->data.line.grid = 0x20FFFFFFu;
     elem->data.line.bg = 0x20000000u;
@@ -125,6 +129,10 @@ static void builder_reset_bar(OsdElementConfig *elem) {
     elem->data.bar.metric[0] = '\0';
     elem->data.bar.label[0] = '\0';
     elem->data.bar.show_info_box = 1;
+    elem->data.bar.has_y_min = 0;
+    elem->data.bar.has_y_max = 0;
+    elem->data.bar.y_min = 0.0;
+    elem->data.bar.y_max = 0.0;
     elem->data.bar.fg = 0xFF4CAF50u;
     elem->data.bar.grid = 0x20FFFFFFu;
     elem->data.bar.bg = 0x20000000u;
@@ -561,6 +569,24 @@ static int parse_osd_element_line(OsdElementConfig *elem, const char *key, const
         elem->data.line.bg = color;
         return 0;
     }
+    if (strcasecmp(key, "y-min") == 0 || strcasecmp(key, "y_min") == 0 || strcasecmp(key, "ymin") == 0) {
+        double v = 0.0;
+        if (parse_double(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.line.has_y_min = 1;
+        elem->data.line.y_min = v;
+        return 0;
+    }
+    if (strcasecmp(key, "y-max") == 0 || strcasecmp(key, "y_max") == 0 || strcasecmp(key, "ymax") == 0) {
+        double v = 0.0;
+        if (parse_double(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.line.has_y_max = 1;
+        elem->data.line.y_max = v;
+        return 0;
+    }
     return -1;
 }
 
@@ -623,6 +649,24 @@ static int parse_osd_element_bar(OsdElementConfig *elem, const char *key, const 
             return -1;
         }
         elem->data.bar.bg = color;
+        return 0;
+    }
+    if (strcasecmp(key, "y-min") == 0 || strcasecmp(key, "y_min") == 0 || strcasecmp(key, "ymin") == 0) {
+        double v = 0.0;
+        if (parse_double(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.bar.has_y_min = 1;
+        elem->data.bar.y_min = v;
+        return 0;
+    }
+    if (strcasecmp(key, "y-max") == 0 || strcasecmp(key, "y_max") == 0 || strcasecmp(key, "ymax") == 0) {
+        double v = 0.0;
+        if (parse_double(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.bar.has_y_max = 1;
+        elem->data.bar.y_max = v;
         return 0;
     }
     return -1;
