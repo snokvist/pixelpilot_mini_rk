@@ -28,7 +28,7 @@ static volatile sig_atomic_t g_toggle_osd_flag = 0;
 static volatile sig_atomic_t g_toggle_record_flag = 0;
 static volatile sig_atomic_t g_reinit_flag = 0;
 
-static const char *g_instance_pid_path = "/tmp/pixel_pilot_rk.pid";
+static const char *g_instance_pid_path = "/tmp/pixelpilot_mini_rk.pid";
 
 static void remove_instance_pid(void) {
     if (unlink(g_instance_pid_path) != 0 && errno != ENOENT) {
@@ -106,7 +106,7 @@ static int ensure_single_instance(void) {
         if (existing_pid > 0) {
             errno = 0;
             if (kill(existing_pid, 0) == 0 || errno == EPERM) {
-                LOGE("An existing instance of pixel_pilot_rk is already running ... exiting ...");
+                LOGE("An existing instance of pixelpilot_mini_rk is already running ... exiting ...");
                 return -1;
             }
         }
