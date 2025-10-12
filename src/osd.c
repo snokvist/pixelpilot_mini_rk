@@ -2757,8 +2757,10 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
         if (o->scratch) {
             o->scratch_size = scratch_size;
             memset(o->scratch, 0, scratch_size);
+            o->scratch_valid = 1;
         } else {
             o->scratch_size = 0;
+            o->scratch_valid = 0;
         }
     }
 
@@ -2803,7 +2805,10 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     int using_scratch = 0;
     size_t row_span = (size_t)o->fb.pitch * o->h;
     if (o->scratch && o->scratch_size >= row_span && o->fb.map) {
-        memcpy(o->scratch, o->fb.map, row_span);
+        if (!o->scratch_valid) {
+            memcpy(o->scratch, o->fb.map, row_span);
+            o->scratch_valid = 1;
+        }
         o->draw_map = (uint32_t *)o->scratch;
         o->draw_pitch = o->fb.pitch;
         using_scratch = 1;
@@ -2813,6 +2818,9 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         o->draw_map = (uint32_t *)o->fb.map;
         o->draw_pitch = o->fb.pitch;
         o->damage_active = 0;
+        if (o->scratch) {
+            o->scratch_valid = 0;
+        }
     }
 
     OsdRenderContext ctx = {
@@ -2861,6 +2869,7 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         osd_damage_flush(o);
         o->damage_active = 0;
         osd_damage_reset(o);
+        o->scratch_valid = 1;
     }
 
     o->draw_map = original_draw_map;
