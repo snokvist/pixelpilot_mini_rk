@@ -95,6 +95,7 @@ typedef struct OSD {
     /* CPU-side shadow buffer to compose frames without tearing */
     uint8_t *scratch;
     size_t scratch_size;
+    int scratch_valid;
     uint32_t *draw_map;
     int draw_pitch;
 
