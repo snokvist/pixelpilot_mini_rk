@@ -7,9 +7,11 @@
 #include "drm_fb.h"
 #include "drm_modeset.h"
 #include "osd_layout.h"
+#include "osd_external.h"
 #include "pipeline.h"
 
 #define OSD_PLOT_MAX_SAMPLES 1024
+#define OSD_MAX_DAMAGE_RECTS 64
 
 typedef struct {
     int x;
@@ -90,6 +92,18 @@ typedef struct OSD {
     int refresh_ms;
     uint32_t crtc_id;
 
+    /* CPU-side shadow buffer to compose frames without tearing */
+    uint8_t *scratch;
+    size_t scratch_size;
+    uint32_t *draw_map;
+    int draw_pitch;
+
+    /* Damage tracking for incremental shadow flushes */
+    int damage_active;
+    int damage_full;
+    int damage_count;
+    OSDRect damage_rects[OSD_MAX_DAMAGE_RECTS];
+
     uint32_t p_fb_id, p_crtc_id, p_crtc_x, p_crtc_y, p_crtc_w, p_crtc_h;
     uint32_t p_src_x, p_src_y, p_src_w, p_src_h;
     uint32_t p_zpos;
@@ -120,7 +134,8 @@ typedef struct OSD {
 void osd_init(OSD *osd);
 int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plane_id, OSD *osd);
 void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
-                      int audio_disabled, int restart_count, OSD *osd);
+                      int audio_disabled, int restart_count, const OsdExternalFeedSnapshot *ext,
+                      OSD *osd);
 int osd_is_enabled(const OSD *osd);
 int osd_is_active(const OSD *osd);
 int osd_enable(int fd, OSD *osd);

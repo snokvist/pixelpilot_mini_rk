@@ -92,6 +92,12 @@ typedef struct {
 
     OsdLayout osd_layout;
 
+    struct {
+        int enable;
+        int enable_set;
+        char socket_path[PATH_MAX];
+    } osd_external;
+
     SplashCfg splash;
     RecordCfg record;
     SseCfg sse;
