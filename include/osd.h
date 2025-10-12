@@ -91,6 +91,12 @@ typedef struct OSD {
     int refresh_ms;
     uint32_t crtc_id;
 
+    /* CPU-side shadow buffer to compose frames without tearing */
+    uint8_t *scratch;
+    size_t scratch_size;
+    uint32_t *draw_map;
+    int draw_pitch;
+
     uint32_t p_fb_id, p_crtc_id, p_crtc_x, p_crtc_y, p_crtc_w, p_crtc_h;
     uint32_t p_src_x, p_src_y, p_src_w, p_src_h;
     uint32_t p_zpos;

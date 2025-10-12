@@ -38,6 +38,22 @@ void osd_init(OSD *o) {
     memset(o, 0, sizeof(*o));
 }
 
+static inline uint32_t *osd_active_map(OSD *o) {
+    return o->draw_map ? o->draw_map : (uint32_t *)o->fb.map;
+}
+
+static inline int osd_active_pitch_bytes(const OSD *o) {
+    if (o->draw_pitch > 0) {
+        return o->draw_pitch;
+    }
+    return o->fb.pitch;
+}
+
+static inline int osd_active_pitch_px(const OSD *o) {
+    int pitch_bytes = osd_active_pitch_bytes(o);
+    return (pitch_bytes > 0) ? (pitch_bytes / 4) : 0;
+}
+
 static int clampi(int v, int min_v, int max_v) {
     if (v < min_v) {
         return min_v;
@@ -49,13 +65,16 @@ static int clampi(int v, int min_v, int max_v) {
 }
 
 static void osd_clear(OSD *o, uint32_t argb) {
-    if (!o->fb.map) {
+    uint32_t *fb = osd_active_map(o);
+    int pitch_px = osd_active_pitch_px(o);
+    if (!fb || pitch_px <= 0) {
         return;
     }
-    uint32_t *px = (uint32_t *)o->fb.map;
-    size_t count = o->fb.size / 4;
-    for (size_t i = 0; i < count; ++i) {
-        px[i] = argb;
+    for (int y = 0; y < o->h; ++y) {
+        uint32_t *row = fb + (size_t)y * pitch_px;
+        for (int x = 0; x < pitch_px; ++x) {
+            row[x] = argb;
+        }
     }
 }
 
@@ -138,8 +157,11 @@ static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale
         c = (char)(c - 'a' + 'A');
     }
     const uint8_t *glyph = font8x8_basic[(unsigned char)c];
-    uint32_t *fb = (uint32_t *)o->fb.map;
-    int pitch = o->fb.pitch / 4;
+    uint32_t *fb = osd_active_map(o);
+    int pitch = osd_active_pitch_px(o);
+    if (!fb || pitch <= 0) {
+        return;
+    }
     for (int row = 0; row < 8; ++row) {
         uint8_t bits = glyph[row];
         if (!bits) {
@@ -183,7 +205,7 @@ static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, in
 }
 
 static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
-    if (!o->fb.map || w <= 0 || h <= 0) {
+    if (w <= 0 || h <= 0) {
         return;
     }
     int x0 = clampi(x, 0, o->w);
@@ -193,8 +215,11 @@ static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
     if (x0 >= x1 || y0 >= y1) {
         return;
     }
-    uint32_t *fb = (uint32_t *)o->fb.map;
-    int pitch = o->fb.pitch / 4;
+    uint32_t *fb = osd_active_map(o);
+    int pitch = osd_active_pitch_px(o);
+    if (!fb || pitch <= 0) {
+        return;
+    }
     for (int py = y0; py < y1; ++py) {
         uint32_t *row = fb + py * pitch;
         for (int px = x0; px < x1; ++px) {
@@ -837,7 +862,7 @@ static void osd_draw_vline(OSD *o, int x, int y, int h, uint32_t argb) {
 }
 
 static void osd_draw_line(OSD *o, int x0, int y0, int x1, int y1, uint32_t argb) {
-    if (!o->fb.map) {
+    if (!osd_active_map(o)) {
         return;
     }
     int dx = x1 > x0 ? (x1 - x0) : (x0 - x1);
@@ -2624,6 +2649,17 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
         return -1;
     }
 
+    size_t scratch_size = (size_t)o->fb.pitch * o->h;
+    if (scratch_size > 0) {
+        o->scratch = (uint8_t *)malloc(scratch_size);
+        if (o->scratch) {
+            o->scratch_size = scratch_size;
+            memset(o->scratch, 0, scratch_size);
+        } else {
+            o->scratch_size = 0;
+        }
+    }
+
     o->layout = cfg->osd_layout;
     if (o->layout.element_count > OSD_MAX_ELEMENTS) {
         o->layout.element_count = OSD_MAX_ELEMENTS;
@@ -2658,6 +2694,20 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
                       OSD *o) {
     if (!o->enabled || !o->active) {
         return;
+    }
+
+    uint32_t *original_draw_map = o->draw_map;
+    int original_draw_pitch = o->draw_pitch;
+    int using_scratch = 0;
+    size_t row_span = (size_t)o->fb.pitch * o->h;
+    if (o->scratch && o->scratch_size >= row_span && o->fb.map) {
+        memcpy(o->scratch, o->fb.map, row_span);
+        o->draw_map = (uint32_t *)o->scratch;
+        o->draw_pitch = o->fb.pitch;
+        using_scratch = 1;
+    } else {
+        o->draw_map = (uint32_t *)o->fb.map;
+        o->draw_pitch = o->fb.pitch;
     }
 
     OsdRenderContext ctx = {
@@ -2701,6 +2751,13 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     }
 
     osd_commit_touch(fd, o->crtc_id, o);
+
+    if (using_scratch) {
+        memcpy(o->fb.map, o->scratch, row_span);
+    }
+
+    o->draw_map = original_draw_map;
+    o->draw_pitch = original_draw_pitch;
 }
 
 int osd_is_enabled(const OSD *o) {
@@ -2742,6 +2799,13 @@ void osd_teardown(int fd, OSD *o) {
         osd_commit_disable(fd, o);
         o->active = 0;
     }
+    if (o->scratch) {
+        free(o->scratch);
+        o->scratch = NULL;
+    }
+    o->scratch_size = 0;
+    o->draw_map = NULL;
+    o->draw_pitch = 0;
     osd_destroy_fb(fd, o);
     memset(o, 0, sizeof(*o));
 }
