@@ -17,6 +17,7 @@
 #define IDR_BURST_INTERVAL_MS 50u
 #define IDR_MAX_INTERVAL_MS 500u
 #define IDR_QUIET_RESET_MS 750u
+#define IDR_REINIT_THRESHOLD 64u
 
 typedef struct {
     IdrRequester *owner;
@@ -50,6 +51,10 @@ struct IdrRequester {
     gboolean shutting_down;
 
     guint64 total_requests;
+
+    IdrReinitCallback reinit_cb;
+    gpointer reinit_user_data;
+    gboolean reinit_pending;
 };
 
 static guint64 monotonic_ms(void) {
@@ -251,6 +256,9 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
     req->request_in_flight = FALSE;
     req->shutting_down = FALSE;
     req->total_requests = 0;
+    req->reinit_cb = NULL;
+    req->reinit_user_data = NULL;
+    req->reinit_pending = FALSE;
 
     return req;
 }
@@ -291,6 +299,7 @@ void idr_requester_set_enabled(IdrRequester *req, gboolean enabled) {
         req->attempt_count = 0;
         req->next_interval_ms = 0;
         req->last_request_ms = 0;
+        req->reinit_pending = FALSE;
     }
     g_mutex_unlock(&req->lock);
 }
@@ -325,6 +334,7 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
         req->attempt_count = 0;
         req->next_interval_ms = 0;
         req->last_request_ms = 0;
+        req->reinit_pending = FALSE;
         changed = TRUE;
     }
     g_mutex_unlock(&req->lock);
@@ -346,9 +356,18 @@ void idr_requester_handle_warning(IdrRequester *req) {
     char host_copy[IDR_HOST_MAX];
     char path_copy[IDR_PATH_MAX];
     guint16 port_copy = 0;
+    gboolean trigger_reinit = FALSE;
+    IdrReinitCallback reinit_cb = NULL;
+    gpointer reinit_data = NULL;
 
     g_mutex_lock(&req->lock);
     if (req->shutting_down || !req->enabled || !req->have_source) {
+        g_mutex_unlock(&req->lock);
+        return;
+    }
+
+    if (req->reinit_pending) {
+        req->last_warning_ms = now_ms;
         g_mutex_unlock(&req->lock);
         return;
     }
@@ -387,7 +406,20 @@ void idr_requester_handle_warning(IdrRequester *req) {
         req->attempt_count++;
         attempt = req->attempt_count;
 
-        if (req->attempt_count < IDR_BURST_COUNT) {
+        if (req->attempt_count >= IDR_REINIT_THRESHOLD) {
+            trigger_reinit = TRUE;
+            reinit_cb = req->reinit_cb;
+            reinit_data = req->reinit_user_data;
+            req->reinit_pending = TRUE;
+            req->request_in_flight = FALSE;
+            req->active = FALSE;
+            req->attempt_count = 0;
+            req->next_interval_ms = 0;
+            req->last_request_ms = 0;
+            g_strlcpy(host_copy, req->source_host, sizeof(host_copy));
+            g_strlcpy(path_copy, req->http_path, sizeof(path_copy));
+            port_copy = req->http_port;
+        } else if (req->attempt_count < IDR_BURST_COUNT) {
             req->next_interval_ms = IDR_BURST_INTERVAL_MS;
         } else {
             guint step = req->attempt_count - IDR_BURST_COUNT + 1;
@@ -398,37 +430,51 @@ void idr_requester_handle_warning(IdrRequester *req) {
             req->next_interval_ms = (guint)interval;
         }
 
-        task = g_new0(IdrHttpTask, 1);
-        if (task != NULL) {
-            task->owner = req;
-            task->addr.sin_family = AF_INET;
-            task->addr.sin_addr = req->source_addr;
-            task->addr.sin_port = htons(req->http_port);
-            task->timeout_ms = req->http_timeout_ms;
-            g_strlcpy(task->host, req->source_host, sizeof(task->host));
-            g_strlcpy(task->path, req->http_path, sizeof(task->path));
+        if (!trigger_reinit) {
+            task = g_new0(IdrHttpTask, 1);
+            if (task != NULL) {
+                task->owner = req;
+                task->addr.sin_family = AF_INET;
+                task->addr.sin_addr = req->source_addr;
+                task->addr.sin_port = htons(req->http_port);
+                task->timeout_ms = req->http_timeout_ms;
+                g_strlcpy(task->host, req->source_host, sizeof(task->host));
+                g_strlcpy(task->path, req->http_path, sizeof(task->path));
 
-            g_strlcpy(host_copy, task->host, sizeof(host_copy));
-            g_strlcpy(path_copy, task->path, sizeof(path_copy));
-            port_copy = ntohs(task->addr.sin_port);
-            if (req->total_requests == G_MAXUINT64) {
-                pending_total = G_MAXUINT64;
+                g_strlcpy(host_copy, task->host, sizeof(host_copy));
+                g_strlcpy(path_copy, task->path, sizeof(path_copy));
+                port_copy = ntohs(task->addr.sin_port);
+                if (req->total_requests == G_MAXUINT64) {
+                    pending_total = G_MAXUINT64;
+                } else {
+                    pending_total = req->total_requests + 1u;
+                }
             } else {
-                pending_total = req->total_requests + 1u;
-            }
-        } else {
-            req->request_in_flight = FALSE;
-            if (req->attempt_count > 0) {
-                req->attempt_count--;
-            }
-            req->last_request_ms = 0;
-            if (req->cond_initialized) {
-                g_cond_broadcast(&req->cond);
+                req->request_in_flight = FALSE;
+                if (req->attempt_count > 0) {
+                    req->attempt_count--;
+                }
+                req->last_request_ms = 0;
+                if (req->cond_initialized) {
+                    g_cond_broadcast(&req->cond);
+                }
             }
         }
     }
 
     g_mutex_unlock(&req->lock);
+
+    if (trigger_reinit) {
+        LOGW("IDR requester: %s:%u%s exceeded %u attempts; requesting pipeline reinitialization",
+             host_copy[0] != '\0' ? host_copy : "(unknown)",
+             (unsigned int)port_copy,
+             path_copy[0] != '\0' ? path_copy : "",
+             (unsigned int)IDR_REINIT_THRESHOLD);
+        if (reinit_cb != NULL) {
+            reinit_cb(req, reinit_data);
+        }
+        return;
+    }
 
     if (task == NULL) {
         return;
@@ -489,5 +535,16 @@ guint64 idr_requester_get_request_count(const IdrRequester *req) {
     total = req->total_requests;
     g_mutex_unlock(lock);
     return total;
+}
+
+void idr_requester_set_reinit_callback(IdrRequester *req, IdrReinitCallback cb, gpointer user_data) {
+    if (req == NULL) {
+        return;
+    }
+
+    g_mutex_lock(&req->lock);
+    req->reinit_cb = cb;
+    req->reinit_user_data = user_data;
+    g_mutex_unlock(&req->lock);
 }
 

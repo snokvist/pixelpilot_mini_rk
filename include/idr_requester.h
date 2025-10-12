@@ -11,6 +11,7 @@ extern "C" {
 #endif
 
 typedef struct IdrRequester IdrRequester;
+typedef void (*IdrReinitCallback)(IdrRequester *req, gpointer user_data);
 
 IdrRequester *idr_requester_new(const IdrCfg *cfg);
 void idr_requester_free(IdrRequester *req);
@@ -18,6 +19,7 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
 void idr_requester_handle_warning(IdrRequester *req);
 void idr_requester_set_enabled(IdrRequester *req, gboolean enabled);
 guint64 idr_requester_get_request_count(const IdrRequester *req);
+void idr_requester_set_reinit_callback(IdrRequester *req, IdrReinitCallback cb, gpointer user_data);
 
 #ifdef __cplusplus
 }

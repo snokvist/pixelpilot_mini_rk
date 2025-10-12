@@ -89,6 +89,22 @@ static guint64 monotonic_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+static void pipeline_mark_reinit_requested(PipelineState *ps) {
+    if (ps == NULL || !ps->initialized) {
+        return;
+    }
+
+    g_mutex_lock(&ps->lock);
+    ps->reinit_requested = TRUE;
+    g_mutex_unlock(&ps->lock);
+}
+
+static void idr_requester_reinit_callback(IdrRequester *req, gpointer user_data) {
+    (void)req;
+    PipelineState *ps = (PipelineState *)user_data;
+    pipeline_mark_reinit_requested(ps);
+}
+
 static gpointer splash_loop_thread_func(gpointer data) {
     PipelineState *ps = (PipelineState *)data;
     Splash *splash = NULL;
@@ -1173,6 +1189,7 @@ static void cleanup_pipeline(PipelineState *ps) {
     ps->bus_thread_running = FALSE;
     ps->encountered_error = FALSE;
     ps->stop_requested = FALSE;
+    ps->reinit_requested = FALSE;
     g_mutex_unlock(&ps->lock);
 }
 
@@ -1205,6 +1222,9 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     ps->decoder_running = FALSE;
     ps->cfg = cfg;
     ps->bus_thread_cpu_slot = 0;
+    g_mutex_lock(&ps->lock);
+    ps->reinit_requested = FALSE;
+    g_mutex_unlock(&ps->lock);
 
     if (cfg->splash.idle_timeout_ms > 0) {
         ps->splash_idle_timeout_ms = (guint)cfg->splash.idle_timeout_ms;
@@ -1229,6 +1249,9 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         }
     } else {
         LOGI("IDR requester: disabled via configuration");
+    }
+    if (ps->idr_requester != NULL) {
+        idr_requester_set_reinit_callback(ps->idr_requester, idr_requester_reinit_callback, ps);
     }
 
     GstElement *pipeline = NULL;
@@ -1533,4 +1556,17 @@ int pipeline_get_recording_stats(const PipelineState *ps, PipelineRecordingStats
     }
     g_mutex_unlock((GMutex *)&ps->recorder_lock);
     return 0;
+}
+
+gboolean pipeline_consume_reinit_request(PipelineState *ps) {
+    if (ps == NULL || !ps->initialized) {
+        return FALSE;
+    }
+
+    gboolean requested = FALSE;
+    g_mutex_lock(&ps->lock);
+    requested = ps->reinit_requested;
+    ps->reinit_requested = FALSE;
+    g_mutex_unlock(&ps->lock);
+    return requested;
 }
