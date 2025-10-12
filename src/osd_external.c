@@ -411,10 +411,24 @@ static void *osd_external_thread(void *arg) {
     bridge->snapshot.status = OSD_EXTERNAL_STATUS_LISTENING;
     pthread_mutex_unlock(&bridge->lock);
     while (1) {
-        uint64_t now_ns = monotonic_ns();
+        int timeout_ms = 500;
         pthread_mutex_lock(&bridge->lock);
         int stop = bridge->stop_flag;
-        osd_external_expire_locked(bridge, now_ns);
+        uint64_t expiry_ns = bridge->expiry_ns;
+        if (expiry_ns > 0) {
+            uint64_t now_ns = monotonic_ns();
+            osd_external_expire_locked(bridge, now_ns);
+            expiry_ns = bridge->expiry_ns;
+            if (!stop && expiry_ns > now_ns) {
+                uint64_t delta_ns = expiry_ns - now_ns;
+                uint64_t delta_ms = (delta_ns + 999999ull) / 1000000ull;
+                if (delta_ms < (uint64_t)timeout_ms) {
+                    timeout_ms = (int)delta_ms;
+                }
+            }
+        } else {
+            bridge->snapshot.expiry_ns = 0;
+        }
         pthread_mutex_unlock(&bridge->lock);
         if (stop) {
             break;
@@ -423,7 +437,10 @@ static void *osd_external_thread(void *arg) {
             .fd = bridge->sock_fd,
             .events = POLLIN,
         };
-        int rc = poll(&pfd, 1, 500);
+        if (timeout_ms < 0) {
+            timeout_ms = 0;
+        }
+        int rc = poll(&pfd, 1, timeout_ms);
         if (rc < 0) {
             if (errno == EINTR) {
                 continue;
@@ -439,6 +456,16 @@ static void *osd_external_thread(void *arg) {
         }
         if (rc == 0) {
             continue;
+        }
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            uint64_t err_ns = monotonic_ns();
+            pthread_mutex_lock(&bridge->lock);
+            if (should_log_error(bridge, err_ns)) {
+                LOGW("OSD external feed: poll reported error events: revents=0x%x", pfd.revents);
+            }
+            bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
+            pthread_mutex_unlock(&bridge->lock);
+            break;
         }
         if (!(pfd.revents & POLLIN)) {
             continue;
@@ -595,9 +622,13 @@ void osd_external_get_snapshot(OsdExternalBridge *bridge, OsdExternalFeedSnapsho
     if (!bridge || !out) {
         return;
     }
-    uint64_t now_ns = monotonic_ns();
     pthread_mutex_lock(&bridge->lock);
-    osd_external_expire_locked(bridge, now_ns);
+    if (bridge->expiry_ns > 0) {
+        uint64_t now_ns = monotonic_ns();
+        osd_external_expire_locked(bridge, now_ns);
+    } else {
+        bridge->snapshot.expiry_ns = 0;
+    }
     *out = bridge->snapshot;
     pthread_mutex_unlock(&bridge->lock);
 }
