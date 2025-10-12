@@ -56,6 +56,10 @@ typedef struct {
     char metric[64];
     char label[32];
     int show_info_box;
+    int has_y_min;
+    int has_y_max;
+    double y_min;
+    double y_max;
     uint32_t fg;
     uint32_t grid;
     uint32_t bg;
@@ -69,6 +73,10 @@ typedef struct {
     char metric[64];
     char label[32];
     int show_info_box;
+    int has_y_min;
+    int has_y_max;
+    double y_min;
+    double y_max;
     uint32_t fg;
     uint32_t grid;
     uint32_t bg;

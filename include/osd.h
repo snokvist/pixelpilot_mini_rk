@@ -37,6 +37,10 @@ typedef struct {
     double scale_min;
     double scale_max;
     double step_px;
+    int has_fixed_min;
+    int has_fixed_max;
+    double fixed_min;
+    double fixed_max;
     int clear_on_next_draw;
     int background_ready;
     int prev_valid;
@@ -66,6 +70,10 @@ typedef struct {
     double scale_min;
     double scale_max;
     double step_px;
+    int has_fixed_min;
+    int has_fixed_max;
+    double fixed_min;
+    double fixed_max;
     int clear_on_next_draw;
     int background_ready;
     int rescale_countdown;

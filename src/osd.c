@@ -1196,10 +1196,23 @@ static void osd_line_reset(OSD *o, const AppCfg *cfg, int idx) {
     state->sum = 0.0;
     state->latest = 0.0;
     state->min_v = DBL_MAX;
-    state->max_v = 0.0;
+    state->max_v = -DBL_MAX;
     state->avg = 0.0;
-    state->scale_min = 0.0;
-    state->scale_max = 1.0;
+    state->has_fixed_min = elem_cfg->data.line.has_y_min;
+    state->has_fixed_max = elem_cfg->data.line.has_y_max;
+    state->fixed_min = elem_cfg->data.line.y_min;
+    state->fixed_max = elem_cfg->data.line.y_max;
+    state->scale_min = state->has_fixed_min ? state->fixed_min : 0.0;
+    state->scale_max = state->has_fixed_max ? state->fixed_max : 1.0;
+    if (state->scale_max <= state->scale_min) {
+        if (state->has_fixed_max && state->has_fixed_min) {
+            state->scale_max = state->scale_min + 0.1;
+        } else if (state->has_fixed_max && !state->has_fixed_min) {
+            state->scale_min = state->scale_max - 0.1;
+        } else {
+            state->scale_max = state->scale_min + 1.0;
+        }
+    }
     state->clear_on_next_draw = 0;
     state->background_ready = 0;
     state->prev_valid = 0;
@@ -1316,10 +1329,23 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     state->sum = 0.0;
     state->latest = 0.0;
     state->min_v = DBL_MAX;
-    state->max_v = 0.0;
+    state->max_v = -DBL_MAX;
     state->avg = 0.0;
-    state->scale_min = 0.0;
-    state->scale_max = 1.0;
+    state->has_fixed_min = elem_cfg->data.bar.has_y_min;
+    state->has_fixed_max = elem_cfg->data.bar.has_y_max;
+    state->fixed_min = elem_cfg->data.bar.y_min;
+    state->fixed_max = elem_cfg->data.bar.y_max;
+    state->scale_min = state->has_fixed_min ? state->fixed_min : 0.0;
+    state->scale_max = state->has_fixed_max ? state->fixed_max : 1.0;
+    if (state->scale_max <= state->scale_min) {
+        if (state->has_fixed_max && state->has_fixed_min) {
+            state->scale_max = state->scale_min + 0.1;
+        } else if (state->has_fixed_max && !state->has_fixed_min) {
+            state->scale_min = state->scale_max - 0.1;
+        } else {
+            state->scale_max = state->scale_min + 1.0;
+        }
+    }
     state->clear_on_next_draw = 0;
     state->background_ready = 0;
     state->rescale_countdown = 0;
@@ -1340,7 +1366,7 @@ static void osd_line_push(OsdLineState *state, double value) {
         state->size = 0;
         state->sum = 0.0;
         state->min_v = DBL_MAX;
-        state->max_v = 0.0;
+        state->max_v = -DBL_MAX;
         state->avg = 0.0;
         state->latest = 0.0;
     }
@@ -1363,26 +1389,37 @@ static void osd_line_push(OsdLineState *state, double value) {
 
 #define OSD_PLOT_RESCALE_DELAY 12
 
-static void osd_line_compute_scale(const OsdLineState *state, double *out_min, double *out_max) {
+static void osd_line_compute_scale(const OsdLineState *state, const OsdLineConfig *cfg, double *out_min,
+                                   double *out_max) {
     double min_v = 0.0;
     double max_v = 0.0;
+    int has_fixed_min = cfg ? cfg->has_y_min : 0;
+    int has_fixed_max = cfg ? cfg->has_y_max : 0;
 
-    if (state->size > 0) {
-        max_v = state->max_v;
-        if (max_v < 0.0) {
-            max_v = 0.0;
+    if (has_fixed_min) {
+        min_v = cfg->y_min;
+    }
+
+    if (has_fixed_max) {
+        max_v = cfg->y_max;
+    } else {
+        if (state->size > 0) {
+            max_v = state->max_v;
+            if (!has_fixed_min && max_v < 0.0) {
+                max_v = 0.0;
+            }
         }
-    }
 
-    if (max_v <= 0.0) {
-        max_v = 1.0;
-    }
+        if (max_v <= min_v) {
+            max_v = (has_fixed_min ? min_v : 0.0) + 1.0;
+        }
 
-    double pad = max_v * 0.1;
-    if (pad < 0.05) {
-        pad = 0.05;
+        double pad = max_v * 0.1;
+        if (pad < 0.05) {
+            pad = 0.05;
+        }
+        max_v += pad;
     }
-    max_v += pad;
 
     if (max_v <= min_v) {
         max_v = min_v + 0.1;
@@ -1405,7 +1442,7 @@ static void osd_bar_push(OsdBarState *state, double value) {
         state->size = 0;
         state->sum = 0.0;
         state->min_v = DBL_MAX;
-        state->max_v = 0.0;
+        state->max_v = -DBL_MAX;
         state->avg = 0.0;
         state->latest = 0.0;
     }
@@ -1426,26 +1463,36 @@ static void osd_bar_push(OsdBarState *state, double value) {
     state->latest = value;
 }
 
-static void osd_bar_compute_scale(const OsdBarState *state, double *out_min, double *out_max) {
+static void osd_bar_compute_scale(const OsdBarState *state, const OsdBarConfig *cfg, double *out_min, double *out_max) {
     double min_v = 0.0;
     double max_v = 0.0;
+    int has_fixed_min = cfg ? cfg->has_y_min : 0;
+    int has_fixed_max = cfg ? cfg->has_y_max : 0;
 
-    if (state->size > 0) {
-        max_v = state->max_v;
-        if (max_v < 0.0) {
-            max_v = 0.0;
+    if (has_fixed_min) {
+        min_v = cfg->y_min;
+    }
+
+    if (has_fixed_max) {
+        max_v = cfg->y_max;
+    } else {
+        if (state->size > 0) {
+            max_v = state->max_v;
+            if (!has_fixed_min && max_v < 0.0) {
+                max_v = 0.0;
+            }
         }
-    }
 
-    if (max_v <= 0.0) {
-        max_v = 1.0;
-    }
+        if (max_v <= min_v) {
+            max_v = (has_fixed_min ? min_v : 0.0) + 1.0;
+        }
 
-    double pad = max_v * 0.1;
-    if (pad < 0.05) {
-        pad = 0.05;
+        double pad = max_v * 0.1;
+        if (pad < 0.05) {
+            pad = 0.05;
+        }
+        max_v += pad;
     }
-    max_v += pad;
 
     if (max_v <= min_v) {
         max_v = min_v + 0.1;
@@ -1638,9 +1685,6 @@ static void osd_draw_scale_legend(OSD *o, int base_x, int base_y, int plot_w, in
     }
 
     if (scale_max != scale_max) {
-        scale_max = 0.0;
-    }
-    if (scale_max < 0.0) {
         scale_max = 0.0;
     }
 
@@ -1937,16 +1981,23 @@ static void osd_line_draw(OSD *o, int idx) {
     double scale_max = state->scale_max;
     double new_min = scale_min;
     double new_max = scale_max;
-    osd_line_compute_scale(state, &new_min, &new_max);
+    osd_line_compute_scale(state, cfg, &new_min, &new_max);
 
     int need_background = (!state->background_ready || state->clear_on_next_draw);
     if (state->size > 0) {
         double actual_min = (state->min_v != DBL_MAX) ? state->min_v : new_min;
         double actual_max = state->max_v;
         if (!need_background) {
-            if (actual_min < scale_min || actual_max > scale_max) {
+            int bounds_violated = 0;
+            if (!state->has_fixed_min && actual_min < scale_min) {
+                bounds_violated = 1;
+            }
+            if (!state->has_fixed_max && actual_max > scale_max) {
+                bounds_violated = 1;
+            }
+            if (bounds_violated) {
                 need_background = 1;
-            } else {
+            } else if (!state->has_fixed_min && !state->has_fixed_max) {
                 double span = scale_max - scale_min;
                 double used = actual_max - actual_min;
                 if (span > 0.0 && used >= 0.0) {
@@ -2255,7 +2306,7 @@ static void osd_bar_draw(OSD *o, int idx) {
 
     double scale_min = state->scale_min;
     double scale_max = state->scale_max;
-    osd_bar_compute_scale(state, &scale_min, &scale_max);
+    osd_bar_compute_scale(state, cfg, &scale_min, &scale_max);
 
     osd_bar_draw_background(o, idx, scale_max);
 

@@ -23,6 +23,10 @@ static void line_defaults(OsdLineConfig *cfg) {
     cfg->metric[0] = '\0';
     cfg->label[0] = '\0';
     cfg->show_info_box = 1;
+    cfg->has_y_min = 0;
+    cfg->has_y_max = 0;
+    cfg->y_min = 0.0;
+    cfg->y_max = 0.0;
     cfg->fg = 0xFFFFFFFFu;
     cfg->grid = 0x20FFFFFFu;
     cfg->bg = 0x20000000u;
