@@ -29,6 +29,52 @@ static uint64_t monotonic_ns(void) {
     return timespec_to_ns(&ts);
 }
 
+static int mkdir_p(const char *path, mode_t mode) {
+    if (!path || path[0] == '\0') {
+        return 0;
+    }
+    char tmp[UNIX_PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    size_t len = strnlen(tmp, sizeof(tmp));
+    if (len == 0) {
+        return 0;
+    }
+    if (tmp[len - 1] == '/') {
+        tmp[len - 1] = '\0';
+    }
+    for (char *p = tmp + 1; *p; ++p) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
+                *p = '/';
+                return -1;
+            }
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
+        return -1;
+    }
+    return 0;
+}
+
+static int ensure_socket_directory(const char *socket_path) {
+    if (!socket_path || socket_path[0] == '\0') {
+        return 0;
+    }
+    char dir[UNIX_PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", socket_path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) {
+        return 0;
+    }
+    if (slash == dir) {
+        return 0;
+    }
+    *slash = '\0';
+    return mkdir_p(dir, 0755);
+}
+
 static void osd_external_reset_locked(OsdExternalBridge *bridge) {
     if (!bridge) {
         return;
@@ -128,8 +174,7 @@ static const char *parse_string_array(const char *p, OsdExternalMessage *msg) {
             return NULL;
         }
         if (idx < OSD_EXTERNAL_MAX_TEXT) {
-            strncpy(msg->text[idx], tmp, sizeof(msg->text[idx]) - 1);
-            msg->text[idx][sizeof(msg->text[idx]) - 1] = '\0';
+            snprintf(msg->text[idx], sizeof(msg->text[idx]), "%s", tmp);
             idx++;
         }
         p = skip_ws(next);
@@ -317,9 +362,12 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
         if (msg->text_count == 0) {
             memset(bridge->snapshot.text, 0, sizeof(bridge->snapshot.text));
         } else {
-            for (int i = 0; i < msg->text_count && i < OSD_EXTERNAL_MAX_TEXT; ++i) {
-                strncpy(bridge->snapshot.text[i], msg->text[i], sizeof(bridge->snapshot.text[i]) - 1);
-                bridge->snapshot.text[i][sizeof(bridge->snapshot.text[i]) - 1] = '\0';
+            int i = 0;
+            for (; i < msg->text_count && i < OSD_EXTERNAL_MAX_TEXT; ++i) {
+                snprintf(bridge->snapshot.text[i], sizeof(bridge->snapshot.text[i]), "%s", msg->text[i]);
+            }
+            for (; i < OSD_EXTERNAL_MAX_TEXT; ++i) {
+                bridge->snapshot.text[i][0] = '\0';
             }
         }
     }
@@ -481,6 +529,14 @@ int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
     unlink(addr.sun_path);
+    if (ensure_socket_directory(socket_path) != 0) {
+        LOGW("OSD external feed: unable to create parent directory for %s", socket_path);
+        close(fd);
+        pthread_mutex_lock(&bridge->lock);
+        bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
+        pthread_mutex_unlock(&bridge->lock);
+        return -1;
+    }
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         LOGW("OSD external feed: bind(%s) failed: %s", socket_path, strerror(errno));
         close(fd);
