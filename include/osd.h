@@ -11,6 +11,7 @@
 #include "pipeline.h"
 
 #define OSD_PLOT_MAX_SAMPLES 1024
+#define OSD_MAX_DAMAGE_RECTS 64
 
 typedef struct {
     int x;
@@ -96,6 +97,12 @@ typedef struct OSD {
     size_t scratch_size;
     uint32_t *draw_map;
     int draw_pitch;
+
+    /* Damage tracking for incremental shadow flushes */
+    int damage_active;
+    int damage_full;
+    int damage_count;
+    OSDRect damage_rects[OSD_MAX_DAMAGE_RECTS];
 
     uint32_t p_fb_id, p_crtc_id, p_crtc_x, p_crtc_y, p_crtc_w, p_crtc_h;
     uint32_t p_src_x, p_src_y, p_src_w, p_src_h;

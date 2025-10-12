@@ -228,14 +228,113 @@ static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
     }
 }
 
+static void osd_damage_reset(OSD *o) {
+    if (!o) {
+        return;
+    }
+    o->damage_count = 0;
+    o->damage_full = 0;
+}
+
+static void osd_damage_add_rect(OSD *o, int x, int y, int w, int h) {
+    if (!o || !o->damage_active || o->damage_full) {
+        return;
+    }
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    int x0 = clampi(x, 0, o->w);
+    int y0 = clampi(y, 0, o->h);
+    int x1 = clampi(x + w, 0, o->w);
+    int y1 = clampi(y + h, 0, o->h);
+    if (x0 >= x1 || y0 >= y1) {
+        return;
+    }
+
+    int rect_w = x1 - x0;
+    int rect_h = y1 - y0;
+
+    for (int i = 0; i < o->damage_count; ++i) {
+        OSDRect *existing = &o->damage_rects[i];
+        if (existing->x == x0 && existing->y == y0 && existing->w == rect_w && existing->h == rect_h) {
+            return;
+        }
+    }
+
+    if (o->damage_count >= OSD_MAX_DAMAGE_RECTS) {
+        o->damage_full = 1;
+        return;
+    }
+
+    o->damage_rects[o->damage_count].x = x0;
+    o->damage_rects[o->damage_count].y = y0;
+    o->damage_rects[o->damage_count].w = rect_w;
+    o->damage_rects[o->damage_count].h = rect_h;
+    o->damage_count++;
+}
+
+static void osd_damage_add_from_rect(OSD *o, const OSDRect *r) {
+    if (!r) {
+        return;
+    }
+    osd_damage_add_rect(o, r->x, r->y, r->w, r->h);
+}
+
+static void osd_damage_track_change(OSD *o, const OSDRect *prev, const OSDRect *next) {
+    if (!o || !o->damage_active) {
+        return;
+    }
+    if (prev && prev->w > 0 && prev->h > 0) {
+        osd_damage_add_from_rect(o, prev);
+    }
+    if (next && next->w > 0 && next->h > 0) {
+        osd_damage_add_from_rect(o, next);
+    }
+}
+
+static void osd_damage_flush(OSD *o) {
+    if (!o || !o->damage_active || !o->scratch || !o->fb.map) {
+        return;
+    }
+
+    if (o->damage_full) {
+        size_t span = (size_t)o->fb.pitch * o->h;
+        memcpy(o->fb.map, o->scratch, span);
+        return;
+    }
+
+    if (o->damage_count <= 0) {
+        return;
+    }
+
+    uint8_t *dst_base = (uint8_t *)o->fb.map;
+    uint8_t *src_base = o->scratch;
+    for (int i = 0; i < o->damage_count; ++i) {
+        const OSDRect *r = &o->damage_rects[i];
+        if (r->w <= 0 || r->h <= 0) {
+            continue;
+        }
+        size_t row_bytes = (size_t)r->w * 4u;
+        size_t x_offset = (size_t)r->x * 4u;
+        size_t y_offset = (size_t)r->y * o->fb.pitch;
+        for (int y = 0; y < r->h; ++y) {
+            uint8_t *src_row = src_base + y_offset + (size_t)y * o->fb.pitch + x_offset;
+            uint8_t *dst_row = dst_base + y_offset + (size_t)y * o->fb.pitch + x_offset;
+            memcpy(dst_row, src_row, row_bytes);
+        }
+    }
+}
+
 static void osd_clear_rect(OSD *o, const OSDRect *r) {
     if (!r || r->w <= 0 || r->h <= 0) {
         return;
     }
     osd_fill_rect(o, r->x, r->y, r->w, r->h, 0x00000000u);
+    osd_damage_add_from_rect(o, r);
 }
 
-static void osd_store_rect(OSDRect *r, int x, int y, int w, int h) {
+static void osd_store_rect(OSD *o, OSDRect *r, int x, int y, int w, int h) {
     if (!r) {
         return;
     }
@@ -245,10 +344,13 @@ static void osd_store_rect(OSDRect *r, int x, int y, int w, int h) {
     if (h < 0) {
         h = 0;
     }
+    OSDRect prev = *r;
     r->x = x;
     r->y = y;
     r->w = w;
     r->h = h;
+    OSDRect next = *r;
+    osd_damage_track_change(o, &prev, &next);
 }
 
 static int osd_rect_equal(const OSDRect *a, const OSDRect *b) {
@@ -1056,10 +1158,10 @@ static void osd_line_reset(OSD *o, const AppCfg *cfg, int idx) {
     state->width = width;
     state->height = height;
     osd_compute_placement(o, width, height, &elem_cfg->placement, &state->x, &state->y);
-    osd_store_rect(&state->plot_rect, 0, 0, 0, 0);
-    osd_store_rect(&state->header_rect, 0, 0, 0, 0);
-    osd_store_rect(&state->label_rect, 0, 0, 0, 0);
-    osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+    osd_store_rect(o, &state->plot_rect, 0, 0, 0, 0);
+    osd_store_rect(o, &state->header_rect, 0, 0, 0, 0);
+    osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
+    osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
 
     int stride = elem_cfg->data.line.sample_stride_px;
     if (stride <= 0) {
@@ -1161,10 +1263,10 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     state->width = width;
     state->height = height;
     osd_compute_placement(o, width, height, &elem_cfg->placement, &state->x, &state->y);
-    osd_store_rect(&state->plot_rect, 0, 0, 0, 0);
-    osd_store_rect(&state->header_rect, 0, 0, 0, 0);
-    osd_store_rect(&state->label_rect, 0, 0, 0, 0);
-    osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+    osd_store_rect(o, &state->plot_rect, 0, 0, 0, 0);
+    osd_store_rect(o, &state->header_rect, 0, 0, 0, 0);
+    osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
+    osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
 
     int stride = elem_cfg->data.bar.sample_stride_px;
     if (stride <= 0) {
@@ -1531,7 +1633,7 @@ static void osd_draw_scale_legend(OSD *o, int base_x, int base_y, int plot_w, in
 
     if (plot_w <= 0 || plot_h <= 0) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(rect, 0, 0, 0, 0);
+        osd_store_rect(o, rect, 0, 0, 0, 0);
         return;
     }
 
@@ -1546,7 +1648,7 @@ static void osd_draw_scale_legend(OSD *o, int base_x, int base_y, int plot_w, in
     osd_format_metric_value(metric_key, scale_max, value_buf, sizeof(value_buf));
     if (value_buf[0] == '\0') {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(rect, 0, 0, 0, 0);
+        osd_store_rect(o, rect, 0, 0, 0, 0);
         return;
     }
 
@@ -1559,7 +1661,7 @@ static void osd_draw_scale_legend(OSD *o, int base_x, int base_y, int plot_w, in
 
     int len = (int)strlen(text);
     if (len <= 0) {
-        osd_store_rect(rect, 0, 0, 0, 0);
+        osd_store_rect(o, rect, 0, 0, 0, 0);
         return;
     }
 
@@ -1573,7 +1675,7 @@ static void osd_draw_scale_legend(OSD *o, int base_x, int base_y, int plot_w, in
 
     if (box_w <= 0 || box_h <= 0) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(rect, 0, 0, 0, 0);
+        osd_store_rect(o, rect, 0, 0, 0, 0);
         return;
     }
 
@@ -1612,7 +1714,7 @@ static void osd_draw_scale_legend(OSD *o, int base_x, int base_y, int plot_w, in
     osd_fill_rect(o, box_x, box_y, box_w, box_h, bg);
     osd_draw_rect(o, box_x, box_y, box_w, box_h, border);
     osd_draw_text(o, box_x + pad, box_y + pad, text, text_color, o->scale);
-    osd_store_rect(rect, box_x, box_y, box_w, box_h);
+    osd_store_rect(o, rect, box_x, box_y, box_w, box_h);
 }
 
 static void osd_line_draw_background(OSD *o, int idx, double scale_max) {
@@ -1634,7 +1736,7 @@ static void osd_line_draw_background(OSD *o, int idx, double scale_max) {
 
     osd_fill_rect(o, base_x, base_y, plot_w, plot_h, bg);
     osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
-    osd_store_rect(&state->plot_rect, base_x, base_y, plot_w, plot_h);
+    osd_store_rect(o, &state->plot_rect, base_x, base_y, plot_w, plot_h);
 
     int grid_lines = 4;
     for (int i = 1; i < grid_lines; ++i) {
@@ -1720,7 +1822,7 @@ static void osd_bar_draw_background(OSD *o, int idx, double scale_max) {
 
     osd_fill_rect(o, base_x, base_y, plot_w, plot_h, bg);
     osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
-    osd_store_rect(&state->plot_rect, base_x, base_y, plot_w, plot_h);
+    osd_store_rect(o, &state->plot_rect, base_x, base_y, plot_w, plot_h);
 
     int grid_lines = 4;
     for (int i = 1; i < grid_lines; ++i) {
@@ -1890,13 +1992,13 @@ static void osd_line_draw_label(OSD *o, int idx, const OsdLineConfig *cfg) {
     OSDRect prev = state->label_rect;
     if (!cfg || !cfg->show_info_box) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
         return;
     }
     const char *text = cfg->label;
     if (text == NULL || text[0] == '\0') {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
         return;
     }
     int scale = o->scale > 0 ? o->scale : 1;
@@ -1924,7 +2026,7 @@ static void osd_line_draw_label(OSD *o, int idx, const OsdLineConfig *cfg) {
     osd_fill_rect(o, x, y, box_w, box_h, bg);
     osd_draw_rect(o, x, y, box_w, box_h, border);
     osd_draw_text(o, x + pad, y + pad, text, text_color, o->scale);
-    osd_store_rect(&state->label_rect, x, y, box_w, box_h);
+    osd_store_rect(o, &state->label_rect, x, y, box_w, box_h);
 }
 
 static void osd_line_draw_footer(OSD *o, int idx, const char **lines, int line_count) {
@@ -1932,7 +2034,7 @@ static void osd_line_draw_footer(OSD *o, int idx, const char **lines, int line_c
     OSDRect prev = state->footer_rect;
     if (lines == NULL || line_count <= 0) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
         return;
     }
     int scale = o->scale > 0 ? o->scale : 1;
@@ -1951,7 +2053,7 @@ static void osd_line_draw_footer(OSD *o, int idx, const char **lines, int line_c
     }
     if (max_line_w <= 0) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
         return;
     }
     int box_w = max_line_w + 2 * pad;
@@ -1977,7 +2079,7 @@ static void osd_line_draw_footer(OSD *o, int idx, const char **lines, int line_c
         osd_draw_text(o, x + pad, draw_y, lines[i], text_color, o->scale);
         draw_y += line_advance;
     }
-    osd_store_rect(&state->footer_rect, x, y, box_w, box_h);
+    osd_store_rect(o, &state->footer_rect, x, y, box_w, box_h);
 }
 
 static void osd_bar_draw_label(OSD *o, int idx, const OsdBarConfig *cfg) {
@@ -1985,13 +2087,13 @@ static void osd_bar_draw_label(OSD *o, int idx, const OsdBarConfig *cfg) {
     OSDRect prev = state->label_rect;
     if (!cfg || !cfg->show_info_box) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
         return;
     }
     const char *text = cfg->label;
     if (text == NULL || text[0] == '\0') {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&state->label_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
         return;
     }
     int scale = o->scale > 0 ? o->scale : 1;
@@ -2019,7 +2121,7 @@ static void osd_bar_draw_label(OSD *o, int idx, const OsdBarConfig *cfg) {
     osd_fill_rect(o, x, y, box_w, box_h, bg);
     osd_draw_rect(o, x, y, box_w, box_h, border);
     osd_draw_text(o, x + pad, y + pad, text, text_color, o->scale);
-    osd_store_rect(&state->label_rect, x, y, box_w, box_h);
+    osd_store_rect(o, &state->label_rect, x, y, box_w, box_h);
 }
 
 static void osd_bar_draw_footer(OSD *o, int idx, const char **lines, int line_count) {
@@ -2027,7 +2129,7 @@ static void osd_bar_draw_footer(OSD *o, int idx, const char **lines, int line_co
     OSDRect prev = state->footer_rect;
     if (lines == NULL || line_count <= 0) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
         return;
     }
     int scale = o->scale > 0 ? o->scale : 1;
@@ -2046,7 +2148,7 @@ static void osd_bar_draw_footer(OSD *o, int idx, const char **lines, int line_co
     }
     if (max_line_w <= 0) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&state->footer_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
         return;
     }
     int box_w = max_line_w + 2 * pad;
@@ -2072,7 +2174,7 @@ static void osd_bar_draw_footer(OSD *o, int idx, const char **lines, int line_co
         osd_draw_text(o, x + pad, draw_y, lines[i], text_color, o->scale);
         draw_y += line_advance;
     }
-    osd_store_rect(&state->footer_rect, x, y, box_w, box_h);
+    osd_store_rect(o, &state->footer_rect, x, y, box_w, box_h);
 }
 
 static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx) {
@@ -2082,7 +2184,7 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
 
     if (text_cfg->line_count <= 0) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
+        osd_store_rect(o, &o->elements[idx].rect, 0, 0, 0, 0);
         return;
     }
 
@@ -2097,7 +2199,7 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
 
     if (actual_lines <= 0) {
         osd_clear_rect_if_changed(o, &prev, NULL);
-        osd_store_rect(&o->elements[idx].rect, 0, 0, 0, 0);
+        osd_store_rect(o, &o->elements[idx].rect, 0, 0, 0, 0);
         return;
     }
 
@@ -2140,7 +2242,7 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
         text_y += line_advance;
     }
 
-    osd_store_rect(&o->elements[idx].rect, draw_x, draw_y, box_w, box_h);
+    osd_store_rect(o, &o->elements[idx].rect, draw_x, draw_y, box_w, box_h);
     o->elements[idx].data.text.last_line_count = actual_lines;
 }
 
@@ -2221,7 +2323,7 @@ static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx
     } else {
         osd_line_draw_footer(o, idx, NULL, 0);
     }
-    osd_store_rect(&o->elements[idx].rect, state->x, state->y, state->width, state->height);
+    osd_store_rect(o, &o->elements[idx].rect, state->x, state->y, state->width, state->height);
 }
 
 static void osd_render_bar_element(OSD *o, int idx, const OsdRenderContext *ctx) {
@@ -2272,7 +2374,7 @@ static void osd_render_bar_element(OSD *o, int idx, const OsdRenderContext *ctx)
         osd_bar_draw_footer(o, idx, NULL, 0);
     }
 
-    osd_store_rect(&o->elements[idx].rect, state->x, state->y, state->width, state->height);
+    osd_store_rect(o, &o->elements[idx].rect, state->x, state->y, state->width, state->height);
 }
 
 typedef struct {
@@ -2667,7 +2769,7 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     o->element_count = o->layout.element_count;
     for (int i = 0; i < o->element_count; ++i) {
         o->elements[i].type = o->layout.elements[i].type;
-        osd_store_rect(&o->elements[i].rect, 0, 0, 0, 0);
+        osd_store_rect(o, &o->elements[i].rect, 0, 0, 0, 0);
         if (o->elements[i].type == OSD_WIDGET_LINE) {
             osd_line_reset(o, cfg, i);
         } else if (o->elements[i].type == OSD_WIDGET_BAR) {
@@ -2705,9 +2807,12 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         o->draw_map = (uint32_t *)o->scratch;
         o->draw_pitch = o->fb.pitch;
         using_scratch = 1;
+        o->damage_active = 1;
+        osd_damage_reset(o);
     } else {
         o->draw_map = (uint32_t *)o->fb.map;
         o->draw_pitch = o->fb.pitch;
+        o->damage_active = 0;
     }
 
     OsdRenderContext ctx = {
@@ -2745,7 +2850,7 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
             break;
         default:
             osd_clear_rect(o, &o->elements[i].rect);
-            osd_store_rect(&o->elements[i].rect, 0, 0, 0, 0);
+            osd_store_rect(o, &o->elements[i].rect, 0, 0, 0, 0);
             break;
         }
     }
@@ -2753,7 +2858,9 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
     osd_commit_touch(fd, o->crtc_id, o);
 
     if (using_scratch) {
-        memcpy(o->fb.map, o->scratch, row_span);
+        osd_damage_flush(o);
+        o->damage_active = 0;
+        osd_damage_reset(o);
     }
 
     o->draw_map = original_draw_map;
