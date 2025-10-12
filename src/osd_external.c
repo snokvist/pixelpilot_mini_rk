@@ -360,7 +360,7 @@ static void *osd_external_thread(void *arg) {
         return NULL;
     }
     pthread_mutex_lock(&bridge->lock);
-    bridge->status = OSD_EXTERNAL_STATUS_LISTENING;
+    bridge->snapshot.status = OSD_EXTERNAL_STATUS_LISTENING;
     pthread_mutex_unlock(&bridge->lock);
     while (1) {
         uint64_t now_ns = monotonic_ns();
@@ -385,7 +385,7 @@ static void *osd_external_thread(void *arg) {
             if (should_log_error(bridge, err_ns)) {
                 LOGW("OSD external feed: poll failed: %s", strerror(errno));
             }
-            bridge->status = OSD_EXTERNAL_STATUS_ERROR;
+            bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
             pthread_mutex_unlock(&bridge->lock);
             break;
         }
@@ -406,7 +406,7 @@ static void *osd_external_thread(void *arg) {
             if (should_log_error(bridge, err_ns)) {
                 LOGW("OSD external feed: recv failed: %s", strerror(errno));
             }
-            bridge->status = OSD_EXTERNAL_STATUS_ERROR;
+            bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
             pthread_mutex_unlock(&bridge->lock);
             break;
         }
@@ -426,7 +426,7 @@ static void *osd_external_thread(void *arg) {
     pthread_mutex_lock(&bridge->lock);
     bridge->thread_started = 0;
     bridge->stop_flag = 0;
-    bridge->status = (bridge->sock_fd >= 0) ? bridge->status : OSD_EXTERNAL_STATUS_DISABLED;
+    bridge->snapshot.status = (bridge->sock_fd >= 0) ? bridge->snapshot.status : OSD_EXTERNAL_STATUS_DISABLED;
     pthread_mutex_unlock(&bridge->lock);
     return NULL;
 }
@@ -438,7 +438,7 @@ void osd_external_init(OsdExternalBridge *bridge) {
     memset(bridge, 0, sizeof(*bridge));
     bridge->sock_fd = -1;
     pthread_mutex_init(&bridge->lock, NULL);
-    bridge->status = OSD_EXTERNAL_STATUS_DISABLED;
+    bridge->snapshot.status = OSD_EXTERNAL_STATUS_DISABLED;
 }
 
 static void close_socket(OsdExternalBridge *bridge) {
@@ -472,7 +472,7 @@ int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
     if (fd < 0) {
         LOGW("OSD external feed: socket() failed: %s", strerror(errno));
         pthread_mutex_lock(&bridge->lock);
-        bridge->status = OSD_EXTERNAL_STATUS_ERROR;
+        bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
         pthread_mutex_unlock(&bridge->lock);
         return -1;
     }
@@ -485,7 +485,7 @@ int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
         LOGW("OSD external feed: bind(%s) failed: %s", socket_path, strerror(errno));
         close(fd);
         pthread_mutex_lock(&bridge->lock);
-        bridge->status = OSD_EXTERNAL_STATUS_ERROR;
+        bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
         pthread_mutex_unlock(&bridge->lock);
         return -1;
     }
@@ -494,13 +494,13 @@ int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
     strncpy(bridge->socket_path, socket_path, sizeof(bridge->socket_path) - 1);
     bridge->socket_path[sizeof(bridge->socket_path) - 1] = '\0';
     bridge->stop_flag = 0;
-    bridge->status = OSD_EXTERNAL_STATUS_LISTENING;
+    bridge->snapshot.status = OSD_EXTERNAL_STATUS_LISTENING;
     pthread_mutex_unlock(&bridge->lock);
     if (pthread_create(&bridge->thread, NULL, osd_external_thread, bridge) != 0) {
         LOGW("OSD external feed: pthread_create failed: %s", strerror(errno));
         close_socket(bridge);
         pthread_mutex_lock(&bridge->lock);
-        bridge->status = OSD_EXTERNAL_STATUS_ERROR;
+        bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
         pthread_mutex_unlock(&bridge->lock);
         return -1;
     }
@@ -526,7 +526,7 @@ void osd_external_stop(OsdExternalBridge *bridge) {
     }
     close_socket(bridge);
     pthread_mutex_lock(&bridge->lock);
-    bridge->status = OSD_EXTERNAL_STATUS_DISABLED;
+    bridge->snapshot.status = OSD_EXTERNAL_STATUS_DISABLED;
     bridge->thread_started = 0;
     bridge->stop_flag = 0;
     bridge->expiry_ns = 0;
@@ -543,7 +543,6 @@ void osd_external_get_snapshot(OsdExternalBridge *bridge, OsdExternalFeedSnapsho
     pthread_mutex_lock(&bridge->lock);
     osd_external_expire_locked(bridge, now_ns);
     *out = bridge->snapshot;
-    out->status = bridge->status;
     pthread_mutex_unlock(&bridge->lock);
 }
 
