@@ -136,6 +136,11 @@ static void builder_reset_bar(OsdElementConfig *elem) {
     elem->data.bar.fg = 0xFF4CAF50u;
     elem->data.bar.grid = 0x20FFFFFFu;
     elem->data.bar.bg = 0x20000000u;
+    elem->data.bar.mode = OSD_BAR_MODE_HISTORY;
+    elem->data.bar.series_count = 0;
+    for (int i = 0; i < OSD_BAR_MAX_SERIES; ++i) {
+        elem->data.bar.metrics[i][0] = '\0';
+    }
 }
 
 static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
@@ -590,9 +595,70 @@ static int parse_osd_element_line(OsdElementConfig *elem, const char *key, const
     return -1;
 }
 
+static void bar_config_parse_metrics(OsdBarConfig *cfg, const char *value) {
+    if (!cfg) {
+        return;
+    }
+
+    for (int i = 0; i < OSD_BAR_MAX_SERIES; ++i) {
+        cfg->metrics[i][0] = '\0';
+    }
+    cfg->series_count = 0;
+
+    if (!value) {
+        cfg->metric[0] = '\0';
+        return;
+    }
+
+    const char *p = value;
+    while (*p && cfg->series_count < OSD_BAR_MAX_SERIES) {
+        while (*p && (*p == ',' || isspace((unsigned char)*p))) {
+            p++;
+        }
+        const char *start = p;
+        while (*p && *p != ',') {
+            p++;
+        }
+        const char *end = p;
+        while (end > start && isspace((unsigned char)*(end - 1))) {
+            end--;
+        }
+        while (start < end && isspace((unsigned char)*start)) {
+            start++;
+        }
+        size_t len = (size_t)(end - start);
+        if (len > 0) {
+            if (len >= sizeof(cfg->metrics[0])) {
+                len = sizeof(cfg->metrics[0]) - 1;
+            }
+            memcpy(cfg->metrics[cfg->series_count], start, len);
+            cfg->metrics[cfg->series_count][len] = '\0';
+            cfg->series_count++;
+        }
+        if (*p == ',') {
+            p++;
+        }
+    }
+
+    if (cfg->series_count == 0) {
+        ini_copy_string(cfg->metric, sizeof(cfg->metric), value);
+        if (cfg->metric[0] != '\0') {
+            ini_copy_string(cfg->metrics[0], sizeof(cfg->metrics[0]), cfg->metric);
+            cfg->series_count = 1;
+        }
+        return;
+    }
+
+    ini_copy_string(cfg->metric, sizeof(cfg->metric), cfg->metrics[0]);
+}
+
 static int parse_osd_element_bar(OsdElementConfig *elem, const char *key, const char *value) {
     if (strcasecmp(key, "metric") == 0) {
-        ini_copy_string(elem->data.bar.metric, sizeof(elem->data.bar.metric), value);
+        bar_config_parse_metrics(&elem->data.bar, value);
+        return 0;
+    }
+    if (strcasecmp(key, "metrics") == 0) {
+        bar_config_parse_metrics(&elem->data.bar, value);
         return 0;
     }
     if (strcasecmp(key, "label") == 0) {
@@ -650,6 +716,19 @@ static int parse_osd_element_bar(OsdElementConfig *elem, const char *key, const 
         }
         elem->data.bar.bg = color;
         return 0;
+    }
+    if (strcasecmp(key, "mode") == 0) {
+        if (strcasecmp(value, "instant") == 0 || strcasecmp(value, "instantaneous") == 0 ||
+            strcasecmp(value, "static") == 0 || strcasecmp(value, "single") == 0) {
+            elem->data.bar.mode = OSD_BAR_MODE_INSTANT;
+            return 0;
+        }
+        if (strcasecmp(value, "history") == 0 || strcasecmp(value, "scroll") == 0 ||
+            strcasecmp(value, "trailing") == 0) {
+            elem->data.bar.mode = OSD_BAR_MODE_HISTORY;
+            return 0;
+        }
+        return -1;
     }
     if (strcasecmp(key, "y-min") == 0 || strcasecmp(key, "y_min") == 0 || strcasecmp(key, "ymin") == 0) {
         double v = 0.0;

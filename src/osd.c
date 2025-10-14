@@ -1237,6 +1237,26 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     OsdBarState *state = &o->elements[idx].data.bar;
     memset(state, 0, sizeof(*state));
 
+    state->mode = elem_cfg->data.bar.mode;
+    if (state->mode != OSD_BAR_MODE_INSTANT) {
+        state->mode = OSD_BAR_MODE_HISTORY;
+    }
+    int configured_series = elem_cfg->data.bar.series_count;
+    if (configured_series <= 0) {
+        configured_series = (elem_cfg->data.bar.metric[0] != '\0') ? 1 : 0;
+    }
+    if (configured_series > OSD_BAR_MAX_SERIES) {
+        configured_series = OSD_BAR_MAX_SERIES;
+    }
+    if (state->mode != OSD_BAR_MODE_INSTANT && configured_series > 1) {
+        configured_series = 1;
+    }
+    if (configured_series < 1) {
+        configured_series = 1;
+    }
+    state->series_count = configured_series;
+    state->active_series = 0;
+
     int width = elem_cfg->data.bar.width;
     int height = elem_cfg->data.bar.height;
     if (width <= 0) {
@@ -1281,15 +1301,7 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
     osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
 
-    int stride = elem_cfg->data.bar.sample_stride_px;
-    if (stride <= 0) {
-        stride = 12;
-    }
-    stride *= scale;
-    if (stride < scale) {
-        stride = scale;
-    }
-
+    int bar_width_configured = (elem_cfg->data.bar.bar_width_px > 0);
     int bar_width = elem_cfg->data.bar.bar_width_px;
     if (bar_width <= 0) {
         bar_width = 8;
@@ -1302,28 +1314,68 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
         bar_width = width;
     }
 
-    if (stride < bar_width) {
-        stride = bar_width;
-    }
-
-    int capacity = 0;
-    if (width > 0 && stride > 0) {
-        if (width <= bar_width) {
-            capacity = 1;
-        } else {
-            capacity = ((width - bar_width) / stride) + 1;
+    if (state->mode == OSD_BAR_MODE_INSTANT) {
+        int count = state->series_count;
+        if (count < 1) {
+            count = 1;
         }
-    }
-    if (capacity < 1) {
-        capacity = 1;
-    }
-    if (capacity > OSD_PLOT_MAX_SAMPLES) {
-        capacity = OSD_PLOT_MAX_SAMPLES;
-    }
+        if (count > OSD_BAR_MAX_SERIES) {
+            count = OSD_BAR_MAX_SERIES;
+        }
+        double step = (count > 0) ? ((double)width / (double)count) : (double)width;
+        if (step < 1.0) {
+            step = 1.0;
+        }
+        if (!bar_width_configured) {
+            bar_width = (int)(step * 0.75);
+        }
+        if (bar_width > (int)step) {
+            bar_width = (int)step;
+        }
+        if (bar_width < scale) {
+            bar_width = scale;
+        }
+        state->capacity = count;
+        if (state->capacity < 1) {
+            state->capacity = 1;
+        }
+        if (state->capacity > OSD_PLOT_MAX_SAMPLES) {
+            state->capacity = OSD_PLOT_MAX_SAMPLES;
+        }
+        state->step_px = step;
+        state->bar_width = bar_width;
+    } else {
+        int stride = elem_cfg->data.bar.sample_stride_px;
+        if (stride <= 0) {
+            stride = 12;
+        }
+        stride *= scale;
+        if (stride < scale) {
+            stride = scale;
+        }
+        if (stride < bar_width) {
+            stride = bar_width;
+        }
 
-    state->capacity = capacity;
-    state->step_px = (double)stride;
-    state->bar_width = bar_width;
+        int capacity = 0;
+        if (width > 0 && stride > 0) {
+            if (width <= bar_width) {
+                capacity = 1;
+            } else {
+                capacity = ((width - bar_width) / stride) + 1;
+            }
+        }
+        if (capacity < 1) {
+            capacity = 1;
+        }
+        if (capacity > OSD_PLOT_MAX_SAMPLES) {
+            capacity = OSD_PLOT_MAX_SAMPLES;
+        }
+
+        state->capacity = capacity;
+        state->step_px = (double)stride;
+        state->bar_width = bar_width;
+    }
     state->size = 0;
     state->cursor = 0;
     state->sum = 0.0;
@@ -1385,6 +1437,54 @@ static void osd_line_push(OsdLineState *state, double value) {
     }
     state->avg = state->size > 0 ? (state->sum / (double)state->size) : 0.0;
     state->latest = value;
+}
+
+static void osd_bar_set_instant_series(OsdBarState *state, const double *values, int count) {
+    if (!state) {
+        return;
+    }
+    if (count < 0) {
+        count = 0;
+    }
+    if (count > state->capacity) {
+        count = state->capacity;
+    }
+
+    state->cursor = count;
+    state->size = count;
+    state->active_series = count;
+    state->sum = 0.0;
+    state->avg = 0.0;
+    state->latest = 0.0;
+    state->min_v = DBL_MAX;
+    state->max_v = -DBL_MAX;
+
+    for (int i = 0; i < count; ++i) {
+        double v = values ? values[i] : 0.0;
+        state->samples[i] = v;
+        state->latest_series[i] = v;
+        if (v < state->min_v) {
+            state->min_v = v;
+        }
+        if (v > state->max_v) {
+            state->max_v = v;
+        }
+        state->sum += v;
+    }
+    for (int i = count; i < state->capacity && i < OSD_BAR_MAX_SERIES; ++i) {
+        state->latest_series[i] = 0.0;
+    }
+
+    if (count > 0) {
+        state->latest = values[count - 1];
+        state->avg = state->sum / (double)count;
+    } else {
+        state->min_v = DBL_MAX;
+        state->max_v = -DBL_MAX;
+        state->active_series = 0;
+        state->size = 0;
+        state->cursor = 0;
+    }
 }
 
 #define OSD_PLOT_RESCALE_DELAY 12
@@ -2392,34 +2492,99 @@ static void osd_render_bar_element(OSD *o, int idx, const OsdRenderContext *ctx)
         state->clear_on_next_draw = 1;
     }
 
-    double value = 0.0;
-    int have_value = osd_metric_sample(ctx, elem_cfg->data.bar.metric, &value);
-    if (have_value) {
-        osd_bar_push(state, value);
+    int have_value = 0;
+    if (state->mode == OSD_BAR_MODE_INSTANT) {
+        double values[OSD_BAR_MAX_SERIES] = {0};
+        int requested = elem_cfg->data.bar.series_count;
+        if (requested <= 0) {
+            requested = state->series_count;
+        }
+        if (requested < 1) {
+            requested = 1;
+        }
+        if (requested > OSD_BAR_MAX_SERIES) {
+            requested = OSD_BAR_MAX_SERIES;
+        }
+
+        int available = 0;
+        for (int i = 0; i < requested; ++i) {
+            const char *metric_key = elem_cfg->data.bar.metrics[i];
+            if (!metric_key || metric_key[0] == '\0') {
+                metric_key = elem_cfg->data.bar.metric;
+            }
+            double v = 0.0;
+            if (osd_metric_sample(ctx, metric_key, &v)) {
+                available++;
+            }
+            values[i] = v;
+        }
+        have_value = (available > 0);
+        osd_bar_set_instant_series(state, values, requested);
+    } else {
+        double value = 0.0;
+        have_value = osd_metric_sample(ctx, elem_cfg->data.bar.metric, &value);
+        if (have_value) {
+            osd_bar_push(state, value);
+        }
     }
 
     osd_bar_draw(o, idx);
     osd_bar_draw_label(o, idx, &elem_cfg->data.bar);
 
     if (elem_cfg->data.bar.show_info_box) {
-        char footer_line[128];
-        const char *footer_ptrs[1];
+        char footer_lines[OSD_BAR_MAX_SERIES][128];
+        const char *footer_ptrs[OSD_BAR_MAX_SERIES];
         int footer_count = 0;
-        if (state->size > 0) {
+        char status_line[128];
+
+        if (state->mode == OSD_BAR_MODE_INSTANT && state->active_series > 0 && have_value) {
+            int lines = state->active_series;
+            int configured = elem_cfg->data.bar.series_count;
+            if (configured > 0 && configured < lines) {
+                lines = configured;
+            }
+            if (lines > OSD_BAR_MAX_SERIES) {
+                lines = OSD_BAR_MAX_SERIES;
+            }
+            for (int i = 0; i < lines; ++i) {
+                const char *metric_key = elem_cfg->data.bar.metrics[i];
+                if (!metric_key || metric_key[0] == '\0') {
+                    metric_key = elem_cfg->data.bar.metric;
+                }
+                char latest_buf[32];
+                osd_format_metric_value(metric_key, state->latest_series[i], latest_buf, sizeof(latest_buf));
+                snprintf(footer_lines[i], sizeof(footer_lines[i]), "%s", latest_buf);
+                footer_ptrs[footer_count++] = footer_lines[i];
+            }
+            if (footer_count == 0 && state->size > 0) {
+                char latest_buf[32];
+                osd_format_metric_value(elem_cfg->data.bar.metric, state->latest, latest_buf, sizeof(latest_buf));
+                snprintf(footer_lines[0], sizeof(footer_lines[0]), "%s", latest_buf);
+                footer_ptrs[0] = footer_lines[0];
+                footer_count = 1;
+            }
+        } else if (state->mode != OSD_BAR_MODE_INSTANT && state->size > 0) {
             char latest_buf[32];
             osd_format_metric_value(elem_cfg->data.bar.metric, state->latest, latest_buf, sizeof(latest_buf));
-            snprintf(footer_line, sizeof(footer_line), "%s", latest_buf);
-            footer_ptrs[0] = footer_line;
-            footer_count = 1;
-        } else {
-            char normalized[128];
-            const char *metric = osd_metric_normalize(elem_cfg->data.bar.metric, normalized, sizeof(normalized));
-            int waiting_for_stats = (!ctx->have_stats) && metric && strncmp(metric, "udp.", 4) == 0;
-            const char *msg = waiting_for_stats ? "Waiting for stats..." : (have_value ? "Collecting samples..." : "Metric unavailable");
-            snprintf(footer_line, sizeof(footer_line), "%s", msg);
-            footer_ptrs[0] = footer_line;
+            snprintf(footer_lines[0], sizeof(footer_lines[0]), "%s", latest_buf);
+            footer_ptrs[0] = footer_lines[0];
             footer_count = 1;
         }
+
+        if (footer_count == 0) {
+            const char *metric_key = elem_cfg->data.bar.metric;
+            if (state->mode == OSD_BAR_MODE_INSTANT && elem_cfg->data.bar.metrics[0][0] != '\0') {
+                metric_key = elem_cfg->data.bar.metrics[0];
+            }
+            char normalized[128];
+            const char *metric = osd_metric_normalize(metric_key, normalized, sizeof(normalized));
+            int waiting_for_stats = (!ctx->have_stats) && metric && strncmp(metric, "udp.", 4) == 0;
+            const char *msg = waiting_for_stats ? "Waiting for stats..." : (have_value ? "Collecting samples..." : "Metric unavailable");
+            snprintf(status_line, sizeof(status_line), "%s", msg);
+            footer_ptrs[0] = status_line;
+            footer_count = 1;
+        }
+
         osd_bar_draw_footer(o, idx, footer_ptrs, footer_count);
     } else {
         osd_bar_draw_footer(o, idx, NULL, 0);

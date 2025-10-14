@@ -65,6 +65,13 @@ typedef struct {
     uint32_t bg;
 } OsdLineConfig;
 
+#define OSD_BAR_MAX_SERIES 8
+
+typedef enum {
+    OSD_BAR_MODE_HISTORY = 0,
+    OSD_BAR_MODE_INSTANT = 1,
+} OsdBarMode;
+
 typedef struct {
     int width;
     int height;
@@ -80,6 +87,9 @@ typedef struct {
     uint32_t fg;
     uint32_t grid;
     uint32_t bg;
+    OsdBarMode mode;
+    int series_count;
+    char metrics[OSD_BAR_MAX_SERIES][64];
 } OsdBarConfig;
 
 typedef struct {
