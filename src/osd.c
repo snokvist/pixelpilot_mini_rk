@@ -1437,8 +1437,6 @@ static void osd_line_push(OsdLineState *state, double value) {
     }
     state->avg = state->size > 0 ? (state->sum / (double)state->size) : 0.0;
     state->latest = value;
-    state->active_series = 1;
-    state->latest_series[0] = value;
 }
 
 static void osd_bar_set_instant_series(OsdBarState *state, const double *values, int count) {
