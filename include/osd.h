@@ -82,6 +82,10 @@ typedef struct {
     int bar_width;
     int x;
     int y;
+    int mode;
+    int series_count;
+    int active_series;
+    double latest_series[OSD_BAR_MAX_SERIES];
     OSDRect plot_rect;
     OSDRect header_rect;
     OSDRect label_rect;
