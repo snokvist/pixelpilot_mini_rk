@@ -18,6 +18,7 @@
 #include <ctype.h>
 
 static volatile sig_atomic_t g_stop = 0;
+static bool g_verbose = false;
 static void on_sigint(int sig) { (void)sig; g_stop = 1; }
 
 static uint64_t now_ms(void) {
@@ -28,11 +29,12 @@ static uint64_t now_ms(void) {
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-        "Usage: %s [-s SOCKET] [-p PORT] [-b ADDR] [-T TTL_MS]\n"
+        "Usage: %s [-s SOCKET] [-p PORT] [-b ADDR] [-T TTL_MS] [-v]\n"
         "  -s, --socket   Path to UNIX DGRAM socket (default: /run/pixelpilot/osd.sock)\n"
         "  -p, --port     UDP port to listen on (default: 5005)\n"
         "  -b, --bind     UDP bind address (default: 0.0.0.0)\n"
-        "  -T, --ttl      Include ttl_ms in JSON (default: 0 = omit)\n",
+        "  -T, --ttl      Include ttl_ms in JSON (default: 0 = omit)\n"
+        "  -v, --verbose  Enable verbose logging to stdout\n",
         argv0);
 }
 
@@ -282,8 +284,10 @@ static int ensure_unix_connection(int *fd, const char *sock_path)
     }
 
     *fd = new_fd;
-    fprintf(stdout, "Connected to UNIX socket %s\n", sock_path);
-    fflush(stdout);
+    if (g_verbose) {
+        fprintf(stdout, "Connected to UNIX socket %s\n", sock_path);
+        fflush(stdout);
+    }
     return 0;
 }
 
@@ -299,19 +303,21 @@ int main(int argc, char **argv)
         {"port",   required_argument, 0, 'p'},
         {"bind",   required_argument, 0, 'b'},
         {"ttl",    required_argument, 0, 'T'},
+        {"verbose",no_argument,       0, 'v'},
         {"help",   no_argument,       0, 'h'},
         {0,0,0,0}
     };
 
     for (;;) {
         int opt, idx=0;
-        opt = getopt_long(argc, argv, "s:p:b:T:h", long_opts, &idx);
+        opt = getopt_long(argc, argv, "s:p:b:T:vh", long_opts, &idx);
         if (opt == -1) break;
         switch (opt) {
             case 's': sock_path = optarg; break;
             case 'p': udp_port = atoi(optarg); break;
             case 'b': bind_addr = optarg; break;
             case 'T': ttl_ms = atoi(optarg); break;
+            case 'v': g_verbose = true; break;
             case 'h': usage(argv[0]); return 0;
             default:  usage(argv[0]); return 1;
         }
@@ -345,8 +351,10 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    fprintf(stdout, "Listening on %s:%d for UDP metrics\n", bind_addr, udp_port);
-    fflush(stdout);
+    if (g_verbose) {
+        fprintf(stdout, "Listening on %s:%d for UDP metrics\n", bind_addr, udp_port);
+        fflush(stdout);
+    }
 
     struct metric_entry entries[MAX_ENTRIES] = {0};
     struct snapshot_entry last_sent[MAX_ENTRIES] = {0};
@@ -532,8 +540,10 @@ int main(int argc, char **argv)
         last_send_ms = now;
         update_counter = next_count;
 
-        fprintf(stdout, "Forwarded: %s", json_buf);
-        fflush(stdout);
+        if (g_verbose) {
+            fprintf(stdout, "Forwarded: %s", json_buf);
+            fflush(stdout);
+        }
 
         if (fallback_active) {
             last_fallback_send_ms = now;
