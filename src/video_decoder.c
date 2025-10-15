@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <string.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
@@ -244,12 +245,47 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         vd->src_h = src_h;
     }
 
+    int dst_x = 0;
+    int dst_y = 0;
+    int dst_w = vd->mode_w;
+    int dst_h = vd->mode_h;
+
+    if (src_w > 0 && src_h > 0 && vd->mode_w > 0 && vd->mode_h > 0) {
+        double src_ar = (double)src_w / (double)src_h;
+        double mode_ar = (double)vd->mode_w / (double)vd->mode_h;
+
+        if (src_ar > 0.0 && mode_ar > 0.0) {
+            if (src_ar > mode_ar) {
+                dst_w = vd->mode_w;
+                dst_h = (int)lround((double)vd->mode_w / src_ar);
+                if (dst_h > vd->mode_h) {
+                    dst_h = vd->mode_h;
+                }
+                dst_y = (vd->mode_h - dst_h) / 2;
+            } else {
+                dst_h = vd->mode_h;
+                dst_w = (int)lround((double)vd->mode_h * src_ar);
+                if (dst_w > vd->mode_w) {
+                    dst_w = vd->mode_w;
+                }
+                dst_x = (vd->mode_w - dst_w) / 2;
+            }
+        }
+
+        if (dst_w <= 0) {
+            dst_w = 1;
+        }
+        if (dst_h <= 0) {
+            dst_h = 1;
+        }
+    }
+
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_fb_id, fb_id);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_id, vd->crtc_id);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_x, 0);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_y, 0);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_w, vd->mode_w);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_h, vd->mode_h);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_x, dst_x);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_y, dst_y);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_w, dst_w);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_h, dst_h);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_x, 0);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_y, 0);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_w, (uint64_t)src_w << 16);
