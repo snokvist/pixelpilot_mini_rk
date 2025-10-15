@@ -49,6 +49,19 @@ static int send_json(int fd, const char *sock_path, const char *json)
 
 #define MAX_ENTRIES 8
 
+static void copy_label(char *dst, size_t dst_len, const char *src) {
+    if (!dst || dst_len == 0) {
+        return;
+    }
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    size_t len = strnlen(src, dst_len - 1);
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
+
 struct metric_entry {
     char label[64];
     double value;
@@ -152,8 +165,7 @@ static size_t extract_text_value_arrays(const char *payload, char labels[][64], 
     size_t value_count = parse_number_array(payload, "value", tmp_values, max);
     size_t count = text_count < value_count ? text_count : value_count;
     for (size_t i = 0; i < count; ++i) {
-        strncpy(labels[i], tmp_labels[i], 63);
-        labels[i][63] = '\0';
+        copy_label(labels[i], sizeof(labels[i]), tmp_labels[i]);
         values[i] = tmp_values[i];
     }
     return count;
@@ -181,8 +193,7 @@ static size_t extract_known_metrics(const char *payload, char labels[][64], doub
                 }
             }
             if (duplicate) continue;
-            strncpy(labels[count], fallback_keys[i].label, 63);
-            labels[count][63] = '\0';
+            copy_label(labels[count], sizeof(labels[count]), fallback_keys[i].label);
             values[count] = value;
             count++;
         }
@@ -390,8 +401,7 @@ int main(int argc, char **argv)
                 if (parsed_count > 0) {
                     entry_count = parsed_count;
                     for (size_t i = 0; i < entry_count; ++i) {
-                        strncpy(entries[i].label, parsed_labels[i], sizeof(entries[i].label) - 1);
-                        entries[i].label[sizeof(entries[i].label) - 1] = '\0';
+                        copy_label(entries[i].label, sizeof(entries[i].label), parsed_labels[i]);
                         entries[i].value = parsed_values[i];
                     }
                     for (size_t i = entry_count; i < MAX_ENTRIES; ++i) {
@@ -530,8 +540,7 @@ int main(int argc, char **argv)
         }
 
         for (size_t i = 0; i < emit_count; ++i) {
-            strncpy(last_sent[i].label, entries[i].label, sizeof(last_sent[i].label) - 1);
-            last_sent[i].label[sizeof(last_sent[i].label) - 1] = '\0';
+            copy_label(last_sent[i].label, sizeof(last_sent[i].label), entries[i].label);
             last_sent[i].value = values_arr[i];
             last_sent[i].present = true;
         }
