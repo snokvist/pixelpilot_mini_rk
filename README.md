@@ -2,6 +2,24 @@
 
 PixelPilot Mini RK is a lightweight receiver that ingests RTP video/audio over UDP and drives a KMS plane on Rockchip-based devices. The application wraps a GStreamer pipeline with DRM/KMS, OSD, and udev helpers.
 
+## Systemd service integration
+
+The project ships with systemd units for both the primary `pixelpilot_mini_rk` pipeline and the companion `osd_external_feed` helper. On Debian 11 (or other systemd-based distributions) install and enable them with:
+
+```sh
+sudo make install
+```
+
+This copies the binaries to `/usr/local/bin`, installs the unit files into `/etc/systemd/system`, reloads the systemd daemon, and enables both services so they start automatically on the next boot. The install target also writes a default `/etc/pixelpilot_mini.ini` configuration and places the bundled idle spinner at `/usr/local/share/pixelpilot_mini_rk/spinner_ai_1080p30.h265`. Adjust the INI after installation to tune the pipeline.
+
+To remove the services and binaries later, run:
+
+```sh
+sudo make uninstall
+```
+
+The uninstall target disables the services, removes the installed files (including the default INI and spinner asset), and reloads the systemd daemon to pick up the changes.
+
 ## Configuration via INI
 
 All command-line options can be provided in an INI file and loaded with `--config /path/to/file.ini`. The parser merges the INI
