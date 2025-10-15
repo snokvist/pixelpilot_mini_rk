@@ -86,7 +86,7 @@ else
 LDFLAGS += -lrockchip_mpp
 endif
 
-LDFLAGS += -lpthread
+LDFLAGS += -lpthread -lm
 
 TARGET := pixelpilot_mini_rk
 COMPANION := osd_ext_feed
