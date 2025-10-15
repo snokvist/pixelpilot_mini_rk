@@ -88,19 +88,29 @@ endif
 
 LDFLAGS += -lpthread
 
-SRC := $(wildcard src/*.c)
-OBJ := $(SRC:.c=.o)
 TARGET := pixelpilot_mini_rk
+COMPANION := osd_ext_feed
 
-all: $(TARGET)
+SRC := $(wildcard src/*.c)
+APP_SRC := $(filter-out src/osd_ext_feed.c,$(SRC))
+APP_OBJ := $(APP_SRC:.c=.o)
+COMPANION_SRC := src/osd_ext_feed.c
+COMPANION_OBJ := $(COMPANION_SRC:.c=.o)
 
-$(TARGET): $(OBJ)
-	$(CC) $(OBJ) -o $@ $(LDFLAGS)
+COMPANION_LDFLAGS := -lm
+
+all: $(TARGET) $(COMPANION)
+
+$(TARGET): $(APP_OBJ)
+	$(CC) $(APP_OBJ) -o $@ $(LDFLAGS)
+
+$(COMPANION): $(COMPANION_OBJ)
+	$(CC) $(CFLAGS) $(COMPANION_OBJ) -o $@ $(COMPANION_LDFLAGS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -f $(APP_OBJ) $(COMPANION_OBJ) $(TARGET) $(COMPANION)
 
 .PHONY: all clean
