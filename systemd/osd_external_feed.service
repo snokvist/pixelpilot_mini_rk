@@ -1,0 +1,13 @@
+[Unit]
+Description=PixelPilot OSD External Feed
+Requires=pixelpilot_mini_rk.service
+After=pixelpilot_mini_rk.service
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/osd_ext_feed
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

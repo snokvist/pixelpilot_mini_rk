@@ -1,0 +1,12 @@
+[Unit]
+Description=PixelPilot Mini RK video pipeline
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=@BINDIR@/pixelpilot_mini_rk --config @SYSCONFDIR@/pixelpilot_mini.ini
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
