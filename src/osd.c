@@ -1771,7 +1771,7 @@ static void osd_plot_position_box(OSD *o, int plot_x, int plot_y, int plot_w, in
 }
 
 static void osd_draw_scale_legend(OSD *o, int base_x, int base_y, int plot_w, int plot_h, double scale_max,
-                                  const char *metric_key, const char *label, OSDRect *rect) {
+                                  const char *metric_key, const char *label, int show_legend, OSDRect *rect) {
     if (!rect) {
         return;
     }
@@ -1779,6 +1779,12 @@ static void osd_draw_scale_legend(OSD *o, int base_x, int base_y, int plot_w, in
     OSDRect prev = *rect;
 
     if (plot_w <= 0 || plot_h <= 0) {
+        osd_clear_rect_if_changed(o, &prev, NULL);
+        osd_store_rect(o, rect, 0, 0, 0, 0);
+        return;
+    }
+
+    if (!show_legend) {
         osd_clear_rect_if_changed(o, &prev, NULL);
         osd_store_rect(o, rect, 0, 0, 0, 0);
         return;
@@ -1865,9 +1871,9 @@ static void osd_line_draw_background(OSD *o, int idx, double scale_max) {
     OsdLineState *state = &o->elements[idx].data.line;
     const OsdLineConfig *cfg = &o->layout.elements[idx].data.line;
     uint32_t bg = cfg->bg ? cfg->bg : 0x40202020u;
-    uint32_t border = 0x60FFFFFFu;
     uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
-    uint32_t grid = cfg->grid ? cfg->grid : 0x30909090u;
+    uint32_t grid = axis;
+    uint32_t border = axis;
 
     int base_x = state->x;
     int base_y = state->y;
@@ -1904,7 +1910,7 @@ static void osd_line_draw_background(OSD *o, int idx, double scale_max) {
     osd_draw_vline(o, base_x, base_y, plot_h, axis);
 
     osd_draw_scale_legend(o, base_x, base_y, plot_w, plot_h, scale_max, cfg->metric, cfg->label,
-                          &state->header_rect);
+                          cfg->show_info_box, &state->header_rect);
 }
 
 static void osd_line_draw_all(OSD *o, int idx, uint32_t color) {
@@ -1951,9 +1957,9 @@ static void osd_bar_draw_background(OSD *o, int idx, double scale_max) {
     OsdBarState *state = &o->elements[idx].data.bar;
     const OsdBarConfig *cfg = &o->layout.elements[idx].data.bar;
     uint32_t bg = cfg->bg ? cfg->bg : 0x40202020u;
-    uint32_t border = 0x60FFFFFFu;
     uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
-    uint32_t grid = cfg->grid ? cfg->grid : 0x30909090u;
+    uint32_t grid = axis;
+    uint32_t border = axis;
 
     int base_x = state->x;
     int base_y = state->y;
@@ -1990,7 +1996,7 @@ static void osd_bar_draw_background(OSD *o, int idx, double scale_max) {
     osd_draw_vline(o, base_x, base_y, plot_h, axis);
 
     osd_draw_scale_legend(o, base_x, base_y, plot_w, plot_h, scale_max, cfg->metric, cfg->label,
-                          &state->header_rect);
+                          cfg->show_info_box, &state->header_rect);
 }
 
 static void osd_bar_draw_all(OSD *o, int idx, uint32_t color) {
