@@ -31,6 +31,17 @@ active and the translation/rotation clamps used when interpreting per-frame
 parameters. Refer to `src/config.c` and `src/config_ini.c` for the available
 keys.
 
+Typical command line enablement looks like:
+
+```sh
+./pixelpilot_mini_rk --stabilizer-enable --stabilizer-strength 1.15 \
+    --stabilizer-max-translation 24 --stabilizer-max-rotation 3
+```
+
+For INI-driven deployments copy `config/stabilizer-demo.ini` and tweak the
+translation strength/clamps to suit the expected motion profile before passing
+it to `--config`.
+
 ## Testing
 
 Run `make test` to build and execute `tests/video_stabilizer_test`. The smoke

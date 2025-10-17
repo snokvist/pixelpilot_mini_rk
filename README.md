@@ -67,6 +67,10 @@ to the defaults listed in `src/config.c` when omitted.
 | `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
+| `[stabilizer].enable` | `true` copies decoded frames through the RGA-backed stabiliser. Requires librga at build time. |
+| `[stabilizer].strength` | Multiplier applied to per-frame translation values before clamping. Mirrors `--stabilizer-strength`. |
+| `[stabilizer].max-translation` | Maximum translation (in pixels) applied horizontally/vertically. Mirrors `--stabilizer-max-translation`. |
+| `[stabilizer].max-rotation` | Rotation clamp in degrees accepted from per-frame metadata. Mirrors `--stabilizer-max-rotation`. |
 | `[record].enable` | `true` to persist the H.265 video elementary stream to MP4 via minimp4. |
 | `[record].path` | Optional output path or directory for the MP4 file. If omitted, files land in `/media` with a timestamped name (video only, no audio). |
 | `[record].mode` | Selects the minimp4 writer mode: `standard` (seekable, updates MP4 metadata at the end), `sequential` (append-only, avoids seeks), or `fragmented` (stream-friendly MP4 fragments). |
@@ -82,6 +86,27 @@ to the defaults listed in `src/config.c` when omitted.
 | `[osd.element.NAME].anchor` / `offset` / `size` / color keys | Control placement and styling for OSD widgets. See inline comments in the sample file for full semantics. |
 | `[osd.element.NAME].line` | For text widgets, each `line =` entry appends a formatted row supporting `{token}` placeholders. |
 | `[osd.element.NAME].metric` | For line/bar widgets, selects the metric token (e.g. `udp.bitrate.latest_mbps`) sampled each refresh. |
+
+### Video stabiliser quick start
+
+Builds produced with `PIXELPILOT_HAVE_RGA=1` expose CLI toggles for the RGA-backed
+post-processing path:
+
+```sh
+./pixelpilot_mini_rk --stabilizer-enable --stabilizer-strength 1.25 \
+    --stabilizer-max-translation 24 --stabilizer-max-rotation 3
+```
+
+The same values can be persisted via `[stabilizer]` keys inside an INI file. The
+new `config/stabilizer-demo.ini` sample enables the module with conservative
+translation clamps and can be used directly:
+
+```sh
+./pixelpilot_mini_rk --config config/stabilizer-demo.ini
+```
+
+Update `config/pixelpilot_mini.ini` (installed to `/etc/pixelpilot_mini.ini` by
+`make install`) to keep the stabiliser enabled on boot.
 
 ## CPU affinity control
 
