@@ -262,6 +262,8 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
              height);
         return -EINVAL;
     }
+    const int max_crop_x = hor_stride > width ? (hor_stride - width) : 0;
+    const int max_crop_y = ver_stride > height ? (ver_stride - height) : 0;
     int crop_x = 0;
     int crop_y = 0;
     gboolean using_demo = FALSE;
@@ -303,10 +305,10 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
                 ty = -(int)stabilizer->config.max_translation_px;
             }
         }
-        crop_x = CLAMP(tx, -hor_stride / 4, hor_stride / 4);
-        crop_y = CLAMP(ty, -ver_stride / 4, ver_stride / 4);
-        crop_x = CLAMP(crop_x, 0, hor_stride - width);
-        crop_y = CLAMP(crop_y, 0, ver_stride - height);
+        tx = CLAMP(tx, -max_crop_x, max_crop_x);
+        ty = CLAMP(ty, -max_crop_y, max_crop_y);
+        crop_x = CLAMP(tx, 0, max_crop_x);
+        crop_y = CLAMP(ty, 0, max_crop_y);
         have_transform = TRUE;
     }
 
@@ -322,10 +324,19 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
         int ty = (int)lround(amp * cos(2.0 * M_PI * freq * t));
         tx = CLAMP(tx, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
         ty = CLAMP(ty, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
-        crop_x = CLAMP(tx, 0, hor_stride - width);
-        crop_y = CLAMP(ty, 0, ver_stride - height);
+        tx = CLAMP(tx, -max_crop_x, max_crop_x);
+        ty = CLAMP(ty, -max_crop_y, max_crop_y);
+        crop_x = CLAMP(tx, 0, max_crop_x);
+        crop_y = CLAMP(ty, 0, max_crop_y);
         using_demo = TRUE;
         have_transform = TRUE;
+    }
+
+    if ((crop_x & 1) != 0) {
+        crop_x &= ~1;
+    }
+    if ((crop_y & 1) != 0) {
+        crop_y &= ~1;
     }
 
     if (rga_set_rect(&src.rect, crop_x, crop_y, width, height, hor_stride, ver_stride,
