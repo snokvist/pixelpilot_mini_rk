@@ -13,6 +13,9 @@
 #if PIXELPILOT_HAVE_RGA
 #include <rga/RgaApi.h>
 #include <rga/rga.h>
+#ifndef HAVE_RGA_SET_RECT_PROTO
+extern int rga_set_rect(rga_rect_t *rect, int x, int y, int w, int h, int sw, int sh, int format);
+#endif
 #endif
 
 struct VideoStabilizer {
@@ -203,27 +206,27 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     memset(&src, 0, sizeof(src));
     memset(&dst, 0, sizeof(dst));
 
+    const int width = (int)stabilizer->width;
+    const int height = (int)stabilizer->height;
+    const int hor_stride = (int)stabilizer->hor_stride;
+    const int ver_stride = (int)stabilizer->ver_stride;
+    if (hor_stride < width || ver_stride < height) {
+        LOGW("Video stabilizer: invalid strides %d x %d for %d x %d frame", hor_stride, ver_stride, width,
+             height);
+        return -EINVAL;
+    }
+    int crop_x = 0;
+    int crop_y = 0;
+
     src.fd = in_fd;
     src.mmuFlag = 1;
     src.format = RK_FORMAT_YCbCr_420_SP;
     src.blend = 0;
-    src.rect.x = 0;
-    src.rect.y = 0;
-    src.rect.w = (int)stabilizer->width;
-    src.rect.h = (int)stabilizer->height;
-    src.rect.wstride = (int)stabilizer->hor_stride;
-    src.rect.hstride = (int)stabilizer->ver_stride;
 
     dst.fd = out_fd;
     dst.mmuFlag = 1;
     dst.format = RK_FORMAT_YCbCr_420_SP;
     dst.blend = 0;
-    dst.rect.x = 0;
-    dst.rect.y = 0;
-    dst.rect.w = (int)stabilizer->width;
-    dst.rect.h = (int)stabilizer->height;
-    dst.rect.wstride = (int)stabilizer->hor_stride;
-    dst.rect.hstride = (int)stabilizer->ver_stride;
 
     if (stabilizer_apply_transform(params)) {
         if (params && params->has_transform) {
@@ -250,10 +253,20 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
                 ty = -(int)stabilizer->config.max_translation_px;
             }
         }
-        src.rect.x = CLAMP(tx, -(int)stabilizer->hor_stride / 4, (int)stabilizer->hor_stride / 4);
-        src.rect.y = CLAMP(ty, -(int)stabilizer->ver_stride / 4, (int)stabilizer->ver_stride / 4);
-        src.rect.x = CLAMP(src.rect.x, 0, (int)stabilizer->hor_stride - (int)stabilizer->width);
-        src.rect.y = CLAMP(src.rect.y, 0, (int)stabilizer->ver_stride - (int)stabilizer->height);
+        crop_x = CLAMP(tx, -hor_stride / 4, hor_stride / 4);
+        crop_y = CLAMP(ty, -ver_stride / 4, ver_stride / 4);
+        crop_x = CLAMP(crop_x, 0, hor_stride - width);
+        crop_y = CLAMP(crop_y, 0, ver_stride - height);
+    }
+
+    if (rga_set_rect(&src.rect, crop_x, crop_y, width, height, hor_stride, ver_stride,
+                     RK_FORMAT_YCbCr_420_SP) != 0) {
+        LOGW("Video stabilizer: failed to set source rect (stride=%d/%d)", hor_stride, ver_stride);
+        return -EINVAL;
+    }
+    if (rga_set_rect(&dst.rect, 0, 0, width, height, hor_stride, ver_stride, RK_FORMAT_YCbCr_420_SP) != 0) {
+        LOGW("Video stabilizer: failed to set destination rect (stride=%d/%d)", hor_stride, ver_stride);
+        return -EINVAL;
     }
 
     int ret = c_RkRgaBlit(&src, &dst, NULL);
