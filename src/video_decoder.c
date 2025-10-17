@@ -19,6 +19,12 @@
 #include <rockchip/rk_mpi.h>
 #include <rockchip/mpp_err.h>
 
+#if defined(__GNUC__)
+extern int mpp_frame_get_fd(MppFrame frame) __attribute__((weak));
+#else
+extern int mpp_frame_get_fd(MppFrame frame);
+#endif
+
 #if defined(PIXELPILOT_DISABLE_NEON)
 #define PIXELPILOT_NEON_AVAILABLE 0
 #elif defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(PIXELPILOT_HAS_NEON)
@@ -618,7 +624,10 @@ static gpointer frame_thread_func(gpointer data) {
                                 }
 
                                 if (params.enable) {
-                                    int acquire_fd = mpp_frame_get_fd(frame);
+                                    int acquire_fd = -1;
+                                    if (mpp_frame_get_fd) {
+                                        acquire_fd = mpp_frame_get_fd(frame);
+                                    }
                                     if (acquire_fd >= 0 && acquire_fd != info.fd) {
                                         params.acquire_fence_fd = dup(acquire_fd);
                                         if (params.acquire_fence_fd < 0) {

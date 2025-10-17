@@ -152,6 +152,7 @@ static int wait_for_fence(int fence_fd) {
     return 0;
 }
 
+#if PIXELPILOT_HAVE_RGA
 static int stabilizer_apply_transform(const StabilizerParams *params) {
     if (params == NULL) {
         return 0;
@@ -164,6 +165,7 @@ static int stabilizer_apply_transform(const StabilizerParams *params) {
     }
     return 0;
 }
+#endif
 
 int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
                              const StabilizerParams *params, int *release_fence_fd) {
