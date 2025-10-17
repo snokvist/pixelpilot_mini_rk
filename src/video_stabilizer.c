@@ -71,6 +71,13 @@ static void stabilizer_copy_defaults(StabilizerConfig *cfg) {
     if (cfg->demo_frequency_hz <= 0.0f) {
         cfg->demo_frequency_hz = 0.5f;
     }
+    cfg->manual_enable = cfg->manual_enable ? 1 : 0;
+    if (!isfinite(cfg->manual_offset_x_px)) {
+        cfg->manual_offset_x_px = 0.0f;
+    }
+    if (!isfinite(cfg->manual_offset_y_px)) {
+        cfg->manual_offset_y_px = 0.0f;
+    }
 }
 
 int video_stabilizer_init(VideoStabilizer *stabilizer, const StabilizerConfig *config) {
@@ -267,6 +274,7 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     int crop_x = 0;
     int crop_y = 0;
     gboolean using_demo = FALSE;
+    gboolean using_manual = FALSE;
     gboolean had_params = params && params->enable;
     gboolean have_transform = FALSE;
 
@@ -309,6 +317,19 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
         ty = CLAMP(ty, -max_crop_y, max_crop_y);
         crop_x = CLAMP(tx, 0, max_crop_x);
         crop_y = CLAMP(ty, 0, max_crop_y);
+        have_transform = TRUE;
+    }
+
+    if (!have_transform && stabilizer->config.manual_enable) {
+        int tx = (int)lroundf(stabilizer->config.manual_offset_x_px);
+        int ty = (int)lroundf(stabilizer->config.manual_offset_y_px);
+        tx = CLAMP(tx, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
+        ty = CLAMP(ty, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
+        tx = CLAMP(tx, -max_crop_x, max_crop_x);
+        ty = CLAMP(ty, -max_crop_y, max_crop_y);
+        crop_x = CLAMP(tx, 0, max_crop_x);
+        crop_y = CLAMP(ty, 0, max_crop_y);
+        using_manual = TRUE;
         have_transform = TRUE;
     }
 
@@ -359,9 +380,9 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     if (stabilizer->config.diagnostics) {
         if (have_transform) {
             if (stabilizer->frames_processed == 1 || stabilizer->frames_processed % 60 == 0) {
-                LOGI("Video stabilizer applied crop=(%d,%d) demo=%s params=%s frame=%" G_GUINT64_FORMAT,
-                     crop_x, crop_y, using_demo ? "yes" : "no", had_params ? "yes" : "no",
-                     stabilizer->frames_processed);
+                LOGI("Video stabilizer applied crop=(%d,%d) demo=%s manual=%s params=%s frame=%" G_GUINT64_FORMAT,
+                     crop_x, crop_y, using_demo ? "yes" : "no", using_manual ? "yes" : "no",
+                     had_params ? "yes" : "no", stabilizer->frames_processed);
             }
             stabilizer->diag_logged_no_params = FALSE;
         } else if (!stabilizer->diag_logged_no_params) {

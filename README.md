@@ -73,6 +73,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[stabilizer].max-rotation` | Rotation clamp in degrees accepted from per-frame metadata. Mirrors `--stabilizer-max-rotation`. |
 | `[stabilizer].diagnostics` | `true` prints periodic info logs confirming the stabiliser is active. Mirrors `--stabilizer-diagnostics`. |
 | `[stabilizer].demo-enable` / `demo-amplitude` / `demo-frequency` | Enables the built-in verification waveform and controls its pixel amplitude and oscillation rate. Mirrors `--stabilizer-demo-*`. |
+| `[stabilizer].manual-enable` / `manual-offset-x` / `manual-offset-y` | Applies a fixed translation when no per-frame parameters are available. Mirrors `--stabilizer-manual-*`. |
 | `[record].enable` | `true` to persist the H.265 video elementary stream to MP4 via minimp4. |
 | `[record].path` | Optional output path or directory for the MP4 file. If omitted, files land in `/media` with a timestamped name (video only, no audio). |
 | `[record].mode` | Selects the minimp4 writer mode: `standard` (seekable, updates MP4 metadata at the end), `sequential` (append-only, avoids seeks), or `fragmented` (stream-friendly MP4 fragments). |
@@ -113,6 +114,11 @@ the effect immediately:
 Watch the log for `Video stabilizer applied crop=...` messages to confirm that
 the RGA path is actively processing frames. A single bypass message is printed
 if the module cannot run (for example, when librga support is missing).
+
+When you want to validate the pipeline without the oscillating demo waveform,
+point `--config` at `config/stabilizer-manual.ini`. It enables diagnostics,
+keeps the waveform disabled, and applies a static horizontal crop so the
+stabilised buffer always differs from the decoder output.
 
 Update `config/pixelpilot_mini.ini` (installed to `/etc/pixelpilot_mini.ini` by
 `make install`) to keep the stabiliser enabled on boot.

@@ -55,6 +55,10 @@ static void usage(const char *prog) {
             "  --stabilizer-demo-disable    (disable built-in demo motion path)\n"
             "  --stabilizer-demo-amplitude PX (demo motion amplitude in pixels)\n"
             "  --stabilizer-demo-frequency HZ (demo motion frequency; default: 0.5)\n"
+            "  --stabilizer-manual-enable   (force a fixed translation when no params provided)\n"
+            "  --stabilizer-manual-disable  (disable manual translation override)\n"
+            "  --stabilizer-manual-offset-x PX (horizontal manual translation in pixels)\n"
+            "  --stabilizer-manual-offset-y PX (vertical manual translation in pixels)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -211,6 +215,9 @@ void cfg_defaults(AppCfg *c) {
     c->stabilizer.demo_enable = 0;
     c->stabilizer.demo_amplitude_px = 0.0f;
     c->stabilizer.demo_frequency_hz = 0.5f;
+    c->stabilizer.manual_enable = 0;
+    c->stabilizer.manual_offset_x_px = 0.0f;
+    c->stabilizer.manual_offset_y_px = 0.0f;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -491,6 +498,20 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             }
         } else if (!strcmp(argv[i], "--stabilizer-demo-frequency")) {
             LOGE("--stabilizer-demo-frequency requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-manual-enable")) {
+            cfg->stabilizer.manual_enable = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-manual-disable")) {
+            cfg->stabilizer.manual_enable = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-manual-offset-x") && i + 1 < argc) {
+            cfg->stabilizer.manual_offset_x_px = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-manual-offset-x")) {
+            LOGE("--stabilizer-manual-offset-x requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-manual-offset-y") && i + 1 < argc) {
+            cfg->stabilizer.manual_offset_y_px = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-manual-offset-y")) {
+            LOGE("--stabilizer-manual-offset-y requires a numeric argument");
             return -1;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;

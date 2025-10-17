@@ -17,6 +17,9 @@ typedef struct {
     int demo_enable;
     float demo_amplitude_px;
     float demo_frequency_hz;
+    int manual_enable;
+    float manual_offset_x_px;
+    float manual_offset_y_px;
 } StabilizerConfig;
 
 typedef struct {

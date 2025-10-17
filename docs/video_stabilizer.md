@@ -40,6 +40,11 @@ keys. Of note:
   nudges the crop window even when no motion vectors are supplied. This makes
   it obvious on-screen that the stabiliser path is active and also exercises
   the diagnostic logging.
+* `--stabilizer-manual-enable`, `--stabilizer-manual-offset-x`, and
+  `--stabilizer-manual-offset-y` apply a fixed translation whenever no
+  per-frame parameters are provided. This is useful on hardware without motion
+  metadata because it keeps the RGA copy path active even with the demo wave
+  disabled.
 
 Typical command line enablement looks like:
 
@@ -53,10 +58,16 @@ translation strength/clamps to suit the expected motion profile before passing
 it to `--config`. The demo file ships with diagnostics and the internal demo
 waveform enabled, so you can observe the stabiliser at work immediately.
 
+If you prefer to keep the source frame aligned while still exercising the
+stabiliser, use `config/stabilizer-manual.ini`. It enables diagnostics, turns
+off the waveform, and requests a static 12 pixel horizontal crop so the output
+frame visibly differs from the raw decoder buffer. Adjust the offsets to match
+your test scenario.
+
 With diagnostics enabled the log will periodically emit entries such as:
 
 ```
-Video stabilizer applied crop=(6,2) demo=yes params=no frame=60
+Video stabilizer applied crop=(6,2) demo=yes manual=no params=no frame=60
 ```
 
 If the module cannot run you will see a one-off bypass reason (for example when
