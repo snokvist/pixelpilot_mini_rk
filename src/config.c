@@ -44,6 +44,11 @@ static void usage(const char *prog) {
             "  --idr-port N                 (HTTP port for IDR requests; default: 80)\n"
             "  --idr-path PATH              (HTTP path for IDR trigger; default: /request/idr)\n"
             "  --idr-timeout-ms N           (per-request timeout; default: 200)\n"
+            "  --stabilizer-enable          (enable RGA-backed video stabilizer)\n"
+            "  --stabilizer-disable         (disable video stabilizer processing)\n"
+            "  --stabilizer-strength F      (translation gain multiplier; default: 1.0)\n"
+            "  --stabilizer-max-translation PX (max translation clamp; default: 32)\n"
+            "  --stabilizer-max-rotation DEG (max rotation clamp; default: 5)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -191,6 +196,11 @@ void cfg_defaults(AppCfg *c) {
     c->idr.http_port = 80;
     c->idr.http_timeout_ms = 200;
     strcpy(c->idr.http_path, "/request/idr");
+
+    c->stabilizer.enable = 0;
+    c->stabilizer.strength = 1.0f;
+    c->stabilizer.max_translation_px = 32.0f;
+    c->stabilizer.max_rotation_deg = 5.0f;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -416,6 +426,36 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg->idr.http_timeout_ms = (unsigned int)timeout;
+        } else if (!strcmp(argv[i], "--stabilizer-enable")) {
+            cfg->stabilizer.enable = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-disable")) {
+            cfg->stabilizer.enable = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-strength") && i + 1 < argc) {
+            cfg->stabilizer.strength = (float)atof(argv[++i]);
+            if (cfg->stabilizer.strength <= 0.0f) {
+                LOGW("--stabilizer-strength must be positive; clamping to 0.1");
+                cfg->stabilizer.strength = 0.1f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-strength")) {
+            LOGE("--stabilizer-strength requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-max-translation") && i + 1 < argc) {
+            cfg->stabilizer.max_translation_px = (float)atof(argv[++i]);
+            if (cfg->stabilizer.max_translation_px <= 0.0f) {
+                LOGW("--stabilizer-max-translation must be positive; clamping to 1");
+                cfg->stabilizer.max_translation_px = 1.0f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-max-translation")) {
+            LOGE("--stabilizer-max-translation requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-max-rotation") && i + 1 < argc) {
+            cfg->stabilizer.max_rotation_deg = (float)atof(argv[++i]);
+            if (cfg->stabilizer.max_rotation_deg < 0.0f) {
+                cfg->stabilizer.max_rotation_deg = 0.0f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-max-rotation")) {
+            LOGE("--stabilizer-max-rotation requires a numeric argument");
+            return -1;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {

@@ -1053,6 +1053,38 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "stabilizer") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "strength") == 0) {
+            cfg->stabilizer.strength = strtof(value, NULL);
+            if (cfg->stabilizer.strength <= 0.0f) {
+                cfg->stabilizer.strength = 0.1f;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "max-translation") == 0 || strcasecmp(key, "translation") == 0) {
+            cfg->stabilizer.max_translation_px = strtof(value, NULL);
+            if (cfg->stabilizer.max_translation_px <= 0.0f) {
+                cfg->stabilizer.max_translation_px = 1.0f;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "max-rotation") == 0 || strcasecmp(key, "rotation") == 0) {
+            cfg->stabilizer.max_rotation_deg = strtof(value, NULL);
+            if (cfg->stabilizer.max_rotation_deg < 0.0f) {
+                cfg->stabilizer.max_rotation_deg = 0.0f;
+            }
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "gst") == 0) {
         if (strcasecmp(key, "log") == 0) {
             int v = 0;
