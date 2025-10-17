@@ -71,6 +71,8 @@ to the defaults listed in `src/config.c` when omitted.
 | `[stabilizer].strength` | Multiplier applied to per-frame translation values before clamping. Mirrors `--stabilizer-strength`. |
 | `[stabilizer].max-translation` | Maximum translation (in pixels) applied horizontally/vertically. Mirrors `--stabilizer-max-translation`. |
 | `[stabilizer].max-rotation` | Rotation clamp in degrees accepted from per-frame metadata. Mirrors `--stabilizer-max-rotation`. |
+| `[stabilizer].diagnostics` | `true` prints periodic info logs confirming the stabiliser is active. Mirrors `--stabilizer-diagnostics`. |
+| `[stabilizer].demo-enable` / `demo-amplitude` / `demo-frequency` | Enables the built-in verification waveform and controls its pixel amplitude and oscillation rate. Mirrors `--stabilizer-demo-*`. |
 | `[record].enable` | `true` to persist the H.265 video elementary stream to MP4 via minimp4. |
 | `[record].path` | Optional output path or directory for the MP4 file. If omitted, files land in `/media` with a timestamped name (video only, no audio). |
 | `[record].mode` | Selects the minimp4 writer mode: `standard` (seekable, updates MP4 metadata at the end), `sequential` (append-only, avoids seeks), or `fragmented` (stream-friendly MP4 fragments). |
@@ -94,16 +96,23 @@ post-processing path:
 
 ```sh
 ./pixelpilot_mini_rk --stabilizer-enable --stabilizer-strength 1.25 \
-    --stabilizer-max-translation 24 --stabilizer-max-rotation 3
+    --stabilizer-max-translation 24 --stabilizer-max-rotation 3 \
+    --stabilizer-diagnostics --stabilizer-demo-enable \
+    --stabilizer-demo-amplitude 12 --stabilizer-demo-frequency 0.75
 ```
 
 The same values can be persisted via `[stabilizer]` keys inside an INI file. The
 new `config/stabilizer-demo.ini` sample enables the module with conservative
-translation clamps and can be used directly:
+translation clamps, diagnostics, and the built-in demo waveform so you can see
+the effect immediately:
 
 ```sh
 ./pixelpilot_mini_rk --config config/stabilizer-demo.ini
 ```
+
+Watch the log for `Video stabilizer applied crop=...` messages to confirm that
+the RGA path is actively processing frames. A single bypass message is printed
+if the module cannot run (for example, when librga support is missing).
 
 Update `config/pixelpilot_mini.ini` (installed to `/etc/pixelpilot_mini.ini` by
 `make install`) to keep the stabiliser enabled on boot.

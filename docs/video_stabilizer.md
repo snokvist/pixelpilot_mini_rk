@@ -29,7 +29,17 @@ propagating the stabiliser's release fence to the KMS plane via the
 `--stabilizer-*` options. These settings control whether the stabiliser is
 active and the translation/rotation clamps used when interpreting per-frame
 parameters. Refer to `src/config.c` and `src/config_ini.c` for the available
-keys.
+keys. Of note:
+
+* `--stabilizer-diagnostics` (or `diagnostics = true` in the INI) prints an
+  info log on the first processed frame and every 60th frame afterwards,
+  confirming whether the module is cropping based on external parameters or
+  the demo wave. A bypass reason is logged once if the module cannot run.
+* `--stabilizer-demo-enable`, `--stabilizer-demo-amplitude`, and
+  `--stabilizer-demo-frequency` enable a built-in sine/cosine waveform that
+  nudges the crop window even when no motion vectors are supplied. This makes
+  it obvious on-screen that the stabiliser path is active and also exercises
+  the diagnostic logging.
 
 Typical command line enablement looks like:
 
@@ -40,7 +50,17 @@ Typical command line enablement looks like:
 
 For INI-driven deployments copy `config/stabilizer-demo.ini` and tweak the
 translation strength/clamps to suit the expected motion profile before passing
-it to `--config`.
+it to `--config`. The demo file ships with diagnostics and the internal demo
+waveform enabled, so you can observe the stabiliser at work immediately.
+
+With diagnostics enabled the log will periodically emit entries such as:
+
+```
+Video stabilizer applied crop=(6,2) demo=yes params=no frame=60
+```
+
+If the module cannot run you will see a one-off bypass reason (for example when
+RGA support is unavailable or when per-frame metadata disables the transform).
 
 ## Testing
 

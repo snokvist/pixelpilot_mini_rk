@@ -60,6 +60,10 @@ int main(void) {
     cfg.strength = 1.0f;
     cfg.max_translation_px = 16.0f;
     cfg.max_rotation_deg = 5.0f;
+    cfg.diagnostics = 0;
+    cfg.demo_enable = 0;
+    cfg.demo_amplitude_px = 0.0f;
+    cfg.demo_frequency_hz = 0.5f;
 
     VideoStabilizer *stabilizer = video_stabilizer_new();
     assert(stabilizer != NULL);
@@ -76,6 +80,9 @@ int main(void) {
     assert(release_fd == -1);
 
     cfg.enable = 1;
+    cfg.demo_enable = 1;
+    cfg.demo_amplitude_px = 2.0f;
+    cfg.demo_frequency_hz = 1.0f;
     video_stabilizer_update(stabilizer, &cfg);
 
     if (!video_stabilizer_is_available(stabilizer)) {
@@ -137,6 +144,27 @@ int main(void) {
     ret = video_stabilizer_process(stabilizer, src_prime, dst_prime, &params, &release_fd);
     if (ret != 0) {
         printf("video_stabilizer_process failed (%d)\n", ret);
+        if (release_fd >= 0) {
+            close(release_fd);
+        }
+        destroy_buffer(drm_fd, dst_handle, dst_prime);
+        destroy_buffer(drm_fd, src_handle, src_prime);
+        close(drm_fd);
+        video_stabilizer_free(stabilizer);
+        return 1;
+    }
+    if (release_fd >= 0) {
+        close(release_fd);
+    }
+
+    memset(&params, 0, sizeof(params));
+    params.enable = FALSE;
+    params.acquire_fence_fd = -1;
+
+    release_fd = -1;
+    ret = video_stabilizer_process(stabilizer, src_prime, dst_prime, &params, &release_fd);
+    if (ret != 0) {
+        printf("demo-mode stabilizer_process failed (%d)\n", ret);
         if (release_fd >= 0) {
             close(release_fd);
         }

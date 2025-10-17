@@ -1083,6 +1083,36 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             }
             return 0;
         }
+        if (strcasecmp(key, "diagnostics") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.diagnostics = v;
+            return 0;
+        }
+        if (strcasecmp(key, "demo-enable") == 0 || strcasecmp(key, "demo") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.demo_enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "demo-amplitude") == 0) {
+            cfg->stabilizer.demo_amplitude_px = strtof(value, NULL);
+            if (cfg->stabilizer.demo_amplitude_px < 0.0f) {
+                cfg->stabilizer.demo_amplitude_px = 0.0f;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "demo-frequency") == 0) {
+            cfg->stabilizer.demo_frequency_hz = strtof(value, NULL);
+            if (cfg->stabilizer.demo_frequency_hz <= 0.0f) {
+                cfg->stabilizer.demo_frequency_hz = 0.1f;
+            }
+            return 0;
+        }
         return -1;
     }
     if (strcasecmp(section, "gst") == 0) {

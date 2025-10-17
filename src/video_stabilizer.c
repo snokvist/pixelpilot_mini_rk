@@ -10,6 +10,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #if PIXELPILOT_HAVE_RGA
 #include <rga/RgaApi.h>
 #include <rga/rga.h>
@@ -27,6 +31,11 @@ struct VideoStabilizer {
     uint32_t height;
     uint32_t hor_stride;
     uint32_t ver_stride;
+    guint64 frames_processed;
+    guint64 demo_start_us;
+    gboolean diag_logged_disabled;
+    gboolean diag_logged_unconfigured;
+    gboolean diag_logged_no_params;
 };
 
 VideoStabilizer *video_stabilizer_new(void) {
@@ -53,6 +62,14 @@ static void stabilizer_copy_defaults(StabilizerConfig *cfg) {
     }
     if (cfg->max_rotation_deg <= 0.0f) {
         cfg->max_rotation_deg = 5.0f;
+    }
+    cfg->diagnostics = cfg->diagnostics ? 1 : 0;
+    cfg->demo_enable = cfg->demo_enable ? 1 : 0;
+    if (cfg->demo_amplitude_px < 0.0f) {
+        cfg->demo_amplitude_px = 0.0f;
+    }
+    if (cfg->demo_frequency_hz <= 0.0f) {
+        cfg->demo_frequency_hz = 0.5f;
     }
 }
 
@@ -92,6 +109,11 @@ void video_stabilizer_shutdown(VideoStabilizer *stabilizer) {
     stabilizer->height = 0;
     stabilizer->hor_stride = 0;
     stabilizer->ver_stride = 0;
+    stabilizer->frames_processed = 0;
+    stabilizer->demo_start_us = 0;
+    stabilizer->diag_logged_disabled = FALSE;
+    stabilizer->diag_logged_unconfigured = FALSE;
+    stabilizer->diag_logged_no_params = FALSE;
 }
 
 int video_stabilizer_update(VideoStabilizer *stabilizer, const StabilizerConfig *config) {
@@ -115,6 +137,9 @@ int video_stabilizer_update(VideoStabilizer *stabilizer, const StabilizerConfig 
     }
     stabilizer->available = FALSE;
 #endif
+    stabilizer->diag_logged_disabled = FALSE;
+    stabilizer->diag_logged_unconfigured = FALSE;
+    stabilizer->diag_logged_no_params = FALSE;
     return 0;
 }
 
@@ -131,7 +156,14 @@ int video_stabilizer_configure(VideoStabilizer *stabilizer, uint32_t width, uint
     stabilizer->hor_stride = hor_stride;
     stabilizer->ver_stride = ver_stride;
     stabilizer->configured = TRUE;
+    stabilizer->frames_processed = 0;
+    stabilizer->demo_start_us = 0;
+    stabilizer->diag_logged_no_params = FALSE;
     return 0;
+}
+
+static guint64 stabilizer_now_us(void) {
+    return (guint64)g_get_monotonic_time();
 }
 
 static int wait_for_fence(int fence_fd) {
@@ -179,13 +211,28 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
         return -EINVAL;
     }
     if (!stabilizer->config.enable || !stabilizer->available) {
+        if (stabilizer->config.diagnostics && !stabilizer->diag_logged_disabled) {
+            LOGI("Video stabilizer bypassed (enable=%d available=%d)", stabilizer->config.enable,
+                 stabilizer->available);
+            stabilizer->diag_logged_disabled = TRUE;
+        }
         return 1; // bypass
     }
     if (!stabilizer->configured) {
         LOGW("Video stabilizer invoked without frame configuration");
+        if (stabilizer->config.diagnostics && !stabilizer->diag_logged_unconfigured) {
+            LOGI("Video stabilizer diagnostics: waiting for configure() before processing");
+            stabilizer->diag_logged_unconfigured = TRUE;
+        }
         return -EINVAL;
     }
-    if (params && !params->enable) {
+    gboolean force_demo =
+        stabilizer->config.demo_enable && stabilizer->config.demo_amplitude_px > 0.0f;
+    if (params && !params->enable && !force_demo) {
+        if (stabilizer->config.diagnostics && !stabilizer->diag_logged_no_params) {
+            LOGI("Video stabilizer bypassed: per-frame parameters disabled");
+            stabilizer->diag_logged_no_params = TRUE;
+        }
         return 1;
     }
     int fence_fd = params ? params->acquire_fence_fd : -1;
@@ -217,6 +264,9 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     }
     int crop_x = 0;
     int crop_y = 0;
+    gboolean using_demo = FALSE;
+    gboolean had_params = params && params->enable;
+    gboolean have_transform = FALSE;
 
     src.fd = in_fd;
     src.mmuFlag = 1;
@@ -228,7 +278,7 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     dst.format = RK_FORMAT_YCbCr_420_SP;
     dst.blend = 0;
 
-    if (stabilizer_apply_transform(params)) {
+    if (params && params->enable && stabilizer_apply_transform(params)) {
         if (params && params->has_transform) {
             LOGW("Video stabilizer: affine matrix transforms not implemented; falling back to translation-only");
         }
@@ -257,6 +307,25 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
         crop_y = CLAMP(ty, -ver_stride / 4, ver_stride / 4);
         crop_x = CLAMP(crop_x, 0, hor_stride - width);
         crop_y = CLAMP(crop_y, 0, ver_stride - height);
+        have_transform = TRUE;
+    }
+
+    if (!have_transform && force_demo) {
+        if (stabilizer->demo_start_us == 0) {
+            stabilizer->demo_start_us = stabilizer_now_us();
+        }
+        guint64 now = stabilizer_now_us();
+        double t = (double)(now - stabilizer->demo_start_us) / 1000000.0;
+        double freq = stabilizer->config.demo_frequency_hz > 0.0f ? stabilizer->config.demo_frequency_hz : 0.5f;
+        double amp = (double)stabilizer->config.demo_amplitude_px;
+        int tx = (int)lround(amp * sin(2.0 * M_PI * freq * t));
+        int ty = (int)lround(amp * cos(2.0 * M_PI * freq * t));
+        tx = CLAMP(tx, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
+        ty = CLAMP(ty, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
+        crop_x = CLAMP(tx, 0, hor_stride - width);
+        crop_y = CLAMP(ty, 0, ver_stride - height);
+        using_demo = TRUE;
+        have_transform = TRUE;
     }
 
     if (rga_set_rect(&src.rect, crop_x, crop_y, width, height, hor_stride, ver_stride,
@@ -275,6 +344,20 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
         return -EIO;
     }
     c_RkRgaFlush();
+    stabilizer->frames_processed++;
+    if (stabilizer->config.diagnostics) {
+        if (have_transform) {
+            if (stabilizer->frames_processed == 1 || stabilizer->frames_processed % 60 == 0) {
+                LOGI("Video stabilizer applied crop=(%d,%d) demo=%s params=%s frame=%" G_GUINT64_FORMAT,
+                     crop_x, crop_y, using_demo ? "yes" : "no", had_params ? "yes" : "no",
+                     stabilizer->frames_processed);
+            }
+            stabilizer->diag_logged_no_params = FALSE;
+        } else if (!stabilizer->diag_logged_no_params) {
+            LOGI("Video stabilizer diagnostics: no transform provided; output matches input");
+            stabilizer->diag_logged_no_params = TRUE;
+        }
+    }
     if (release_fence_fd) {
         *release_fence_fd = -1;
     }

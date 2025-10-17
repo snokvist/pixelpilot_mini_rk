@@ -13,6 +13,10 @@ typedef struct {
     float strength;
     float max_translation_px;
     float max_rotation_deg;
+    int diagnostics;
+    int demo_enable;
+    float demo_amplitude_px;
+    float demo_frequency_hz;
 } StabilizerConfig;
 
 typedef struct {

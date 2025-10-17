@@ -49,6 +49,12 @@ static void usage(const char *prog) {
             "  --stabilizer-strength F      (translation gain multiplier; default: 1.0)\n"
             "  --stabilizer-max-translation PX (max translation clamp; default: 32)\n"
             "  --stabilizer-max-rotation DEG (max rotation clamp; default: 5)\n"
+            "  --stabilizer-diagnostics     (log when stabilizer is bypassed/applied)\n"
+            "  --stabilizer-no-diagnostics  (suppress stabilizer diagnostics logging)\n"
+            "  --stabilizer-demo-enable     (enable built-in demo motion path)\n"
+            "  --stabilizer-demo-disable    (disable built-in demo motion path)\n"
+            "  --stabilizer-demo-amplitude PX (demo motion amplitude in pixels)\n"
+            "  --stabilizer-demo-frequency HZ (demo motion frequency; default: 0.5)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -201,6 +207,10 @@ void cfg_defaults(AppCfg *c) {
     c->stabilizer.strength = 1.0f;
     c->stabilizer.max_translation_px = 32.0f;
     c->stabilizer.max_rotation_deg = 5.0f;
+    c->stabilizer.diagnostics = 0;
+    c->stabilizer.demo_enable = 0;
+    c->stabilizer.demo_amplitude_px = 0.0f;
+    c->stabilizer.demo_frequency_hz = 0.5f;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -455,6 +465,32 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             }
         } else if (!strcmp(argv[i], "--stabilizer-max-rotation")) {
             LOGE("--stabilizer-max-rotation requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-diagnostics")) {
+            cfg->stabilizer.diagnostics = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-no-diagnostics")) {
+            cfg->stabilizer.diagnostics = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-demo-enable")) {
+            cfg->stabilizer.demo_enable = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-demo-disable")) {
+            cfg->stabilizer.demo_enable = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-demo-amplitude") && i + 1 < argc) {
+            cfg->stabilizer.demo_amplitude_px = (float)atof(argv[++i]);
+            if (cfg->stabilizer.demo_amplitude_px < 0.0f) {
+                LOGW("--stabilizer-demo-amplitude must be non-negative; clamping to 0");
+                cfg->stabilizer.demo_amplitude_px = 0.0f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-demo-amplitude")) {
+            LOGE("--stabilizer-demo-amplitude requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-demo-frequency") && i + 1 < argc) {
+            cfg->stabilizer.demo_frequency_hz = (float)atof(argv[++i]);
+            if (cfg->stabilizer.demo_frequency_hz <= 0.0f) {
+                LOGW("--stabilizer-demo-frequency must be positive; clamping to 0.1");
+                cfg->stabilizer.demo_frequency_hz = 0.1f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-demo-frequency")) {
+            LOGE("--stabilizer-demo-frequency requires a numeric argument");
             return -1;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
