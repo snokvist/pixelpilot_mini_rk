@@ -235,7 +235,8 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     }
     gboolean force_demo =
         stabilizer->config.demo_enable && stabilizer->config.demo_amplitude_px > 0.0f;
-    if (params && !params->enable && !force_demo) {
+    gboolean manual_override = stabilizer->config.manual_enable;
+    if (params && !params->enable && !force_demo && !manual_override) {
         if (stabilizer->config.diagnostics && !stabilizer->diag_logged_no_params) {
             LOGI("Video stabilizer bypassed: per-frame parameters disabled");
             stabilizer->diag_logged_no_params = TRUE;
