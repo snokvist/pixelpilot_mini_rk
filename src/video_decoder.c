@@ -3,19 +3,29 @@
 #include "drm_props.h"
 #include "idr_requester.h"
 #include "logging.h"
+#include "video_stabilizer.h"
+#include "video_motion_estimator.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
+#include <poll.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <gst/gst.h>
 #include <rockchip/rk_mpi.h>
 #include <rockchip/mpp_err.h>
+
+#if defined(__GNUC__)
+extern int mpp_frame_get_fd(MppFrame frame) __attribute__((weak));
+#else
+extern int mpp_frame_get_fd(MppFrame frame);
+#endif
 
 #if defined(PIXELPILOT_DISABLE_NEON)
 #define PIXELPILOT_NEON_AVAILABLE 0
@@ -40,6 +50,11 @@ struct FrameSlot {
     int prime_fd;
     uint32_t fb_id;
     uint32_t handle;
+    int processed_prime_fd;
+    uint32_t processed_fb_id;
+    uint32_t processed_handle;
+    void *map_addr;
+    size_t map_size;
 };
 
 struct VideoDecoder {
@@ -69,6 +84,8 @@ struct VideoDecoder {
     uint32_t prop_src_y;
     uint32_t prop_src_w;
     uint32_t prop_src_h;
+    uint32_t prop_in_fence_fd;
+    uint32_t prop_out_fence_ptr;
 
     MppCtx ctx;
     MppApi *mpi;
@@ -83,11 +100,23 @@ struct VideoDecoder {
     GCond cond;
     uint32_t pending_fb;
     uint64_t pending_pts;
+    int pending_in_fence_fd;
+    uint32_t pending_src_w;
+    uint32_t pending_src_h;
 
     GThread *frame_thread;
     GThread *display_thread;
 
     IdrRequester *idr_requester;
+    VideoStabilizer *stabilizer;
+    StabilizerConfig stabilizer_cfg;
+    gboolean stabilizer_ready;
+    StabilizerParams pending_stabilizer_params;
+    gboolean stabilizer_params_valid;
+    int last_out_fence_fd;
+    VideoMotionEstimator *estimator;
+    MotionEstimatorConfig estimator_cfg;
+    gboolean estimator_ready;
 };
 
 VideoDecoder *video_decoder_new(void) {
@@ -106,6 +135,43 @@ static inline guint64 get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (guint64)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
+}
+
+static MotionEstimatorConfig derive_estimator_cfg(const StabilizerConfig *cfg) {
+    MotionEstimatorConfig out = {0};
+    if (cfg == NULL) {
+        return out;
+    }
+    if (cfg->estimator_enable < 0) {
+        out.enable = cfg->enable ? 1 : 0;
+    } else {
+        out.enable = cfg->estimator_enable ? 1 : 0;
+    }
+    int diag = cfg->estimator_diagnostics;
+    if (diag < 0) {
+        diag = cfg->diagnostics;
+    }
+    out.diagnostics = diag ? 1 : 0;
+    if (cfg->estimator_search_radius_px > 0) {
+        out.search_radius_px = cfg->estimator_search_radius_px;
+    } else {
+        float max_tx = cfg->max_translation_px > 0.0f ? cfg->max_translation_px : 16.0f;
+        out.search_radius_px = (int)ceilf(max_tx);
+    }
+    if (cfg->estimator_downsample_factor > 0) {
+        out.downsample_factor = cfg->estimator_downsample_factor;
+    } else {
+        out.downsample_factor = 4;
+    }
+    if (isfinite(cfg->estimator_smoothing_factor) && cfg->estimator_smoothing_factor >= 0.0f) {
+        out.smoothing_factor = cfg->estimator_smoothing_factor;
+    } else {
+        out.smoothing_factor = 0.6f;
+    }
+    if (out.smoothing_factor > 0.98f) {
+        out.smoothing_factor = 0.98f;
+    }
+    return out;
 }
 
 static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size) {
@@ -145,6 +211,24 @@ static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size)
 #endif
 }
 
+static int wait_for_fence_fd(int fence_fd) {
+    if (fence_fd < 0) {
+        return 0;
+    }
+    struct pollfd pfd = {.fd = fence_fd, .events = POLLIN};
+    while (TRUE) {
+        int ret = poll(&pfd, 1, -1);
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -errno;
+        }
+        break;
+    }
+    return 0;
+}
+
 static void log_decoder_neon_status_once(void) {
     static gsize once_init = 0;
     if (g_once_init_enter(&once_init)) {
@@ -164,6 +248,11 @@ static void reset_frame_map(VideoDecoder *vd) {
         vd->frame_map[i].prime_fd = -1;
         vd->frame_map[i].fb_id = 0;
         vd->frame_map[i].handle = 0;
+        vd->frame_map[i].processed_prime_fd = -1;
+        vd->frame_map[i].processed_fb_id = 0;
+        vd->frame_map[i].processed_handle = 0;
+        vd->frame_map[i].map_addr = NULL;
+        vd->frame_map[i].map_size = 0;
     }
 }
 
@@ -180,10 +269,28 @@ static void release_frame_group(VideoDecoder *vd) {
             close(vd->frame_map[i].prime_fd);
             vd->frame_map[i].prime_fd = -1;
         }
+        if (vd->frame_map[i].map_addr) {
+            munmap(vd->frame_map[i].map_addr, vd->frame_map[i].map_size);
+            vd->frame_map[i].map_addr = NULL;
+            vd->frame_map[i].map_size = 0;
+        }
         if (vd->frame_map[i].handle) {
             struct drm_mode_destroy_dumb dmd = {.handle = vd->frame_map[i].handle};
             ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
             vd->frame_map[i].handle = 0;
+        }
+        if (vd->frame_map[i].processed_fb_id) {
+            drmModeRmFB(vd->drm_fd, vd->frame_map[i].processed_fb_id);
+            vd->frame_map[i].processed_fb_id = 0;
+        }
+        if (vd->frame_map[i].processed_prime_fd >= 0) {
+            close(vd->frame_map[i].processed_prime_fd);
+            vd->frame_map[i].processed_prime_fd = -1;
+        }
+        if (vd->frame_map[i].processed_handle) {
+            struct drm_mode_destroy_dumb dmd_out = {.handle = vd->frame_map[i].processed_handle};
+            ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_out);
+            vd->frame_map[i].processed_handle = 0;
         }
     }
     mpp_buffer_group_clear(vd->frm_grp);
@@ -191,6 +298,11 @@ static void release_frame_group(VideoDecoder *vd) {
     vd->frm_grp = NULL;
     vd->src_w = 0;
     vd->src_h = 0;
+    vd->stabilizer_ready = FALSE;
+    vd->estimator_ready = FALSE;
+    if (vd->estimator) {
+        motion_estimator_reset(vd->estimator);
+    }
 }
 
 static void set_control_verbose(MppApi *mpi, MppCtx ctx, MpiCmd control, RK_U32 enable) {
@@ -228,10 +340,15 @@ static void set_mpp_decoding_parameters(VideoDecoder *vd) {
     set_control_verbose(vd->mpi, vd->ctx, MPP_DEC_SET_ENABLE_FAST_PLAY, 0xffff);
 }
 
-static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32_t src_h) {
+static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32_t src_h, int in_fence_fd,
+                        int *out_fence_fd) {
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req) {
         return -1;
+    }
+
+    if (out_fence_fd) {
+        *out_fence_fd = -1;
     }
 
     if (src_w == 0) {
@@ -291,6 +408,21 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_w, (uint64_t)src_w << 16);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_h, (uint64_t)src_h << 16);
 
+    if (vd->prop_in_fence_fd != 0 && in_fence_fd >= 0) {
+        drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_in_fence_fd, (uint64_t)in_fence_fd);
+    } else if (in_fence_fd >= 0) {
+        int wait_ret = wait_for_fence_fd(in_fence_fd);
+        if (wait_ret != 0) {
+            LOGW("Video decoder: wait on input fence failed: %s", g_strerror(-wait_ret));
+        }
+    }
+
+    int local_out_fence_fd = -1;
+    if (vd->prop_out_fence_ptr != 0 && out_fence_fd != NULL) {
+        drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_out_fence_ptr,
+                                 (uint64_t)(uintptr_t)&local_out_fence_fd);
+    }
+
     int ret = drmModeAtomicCommit(vd->drm_fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
     if (ret != 0 && errno == EBUSY) {
         ret = drmModeAtomicCommit(vd->drm_fd, req, 0, NULL);
@@ -298,7 +430,18 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     if (ret != 0) {
         LOGW("Atomic commit failed: %s", g_strerror(errno));
     }
+    if (vd->prop_in_fence_fd != 0 && in_fence_fd >= 0) {
+        close(in_fence_fd);
+    } else if (vd->prop_in_fence_fd == 0 && in_fence_fd >= 0) {
+        close(in_fence_fd);
+    }
+
     drmModeAtomicFree(req);
+    if (ret == 0 && vd->prop_out_fence_ptr != 0 && out_fence_fd != NULL) {
+        *out_fence_fd = local_out_fence_fd;
+    } else if (out_fence_fd) {
+        *out_fence_fd = -1;
+    }
     return ret;
 }
 
@@ -323,6 +466,15 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
 
     reset_frame_map(vd);
 
+    gboolean need_stabilizer = FALSE;
+    gboolean stabilizer_buffers_ok = TRUE;
+    if (vd->stabilizer && vd->stabilizer_cfg.enable) {
+        need_stabilizer = video_stabilizer_is_available(vd->stabilizer);
+        if (!need_stabilizer) {
+            LOGI("Video stabilizer not available; continuing without post-processing");
+        }
+    }
+
     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
         struct drm_mode_create_dumb dmcd;
         memset(&dmcd, 0, sizeof(dmcd));
@@ -339,6 +491,23 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
             continue;
         }
         vd->frame_map[i].handle = dmcd.handle;
+        vd->frame_map[i].map_addr = NULL;
+        vd->frame_map[i].map_size = 0;
+
+        struct drm_mode_map_dumb dmmap;
+        memset(&dmmap, 0, sizeof(dmmap));
+        dmmap.handle = dmcd.handle;
+        if (ioctl(vd->drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &dmmap) == 0) {
+            void *addr = mmap(NULL, dmcd.size, PROT_READ | PROT_WRITE, MAP_SHARED, vd->drm_fd, dmmap.offset);
+            if (addr != MAP_FAILED) {
+                vd->frame_map[i].map_addr = addr;
+                vd->frame_map[i].map_size = dmcd.size;
+            } else {
+                LOGW("Video decoder: mmap failed for frame slot %d: %s", i, g_strerror(errno));
+            }
+        } else {
+            LOGW("Video decoder: MAP_DUMB failed: %s", g_strerror(errno));
+        }
 
         struct drm_prime_handle dph;
         memset(&dph, 0, sizeof(dph));
@@ -384,6 +553,64 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
             LOGW("drmModeAddFB2 failed: %s", g_strerror(errno));
             continue;
         }
+
+        if (need_stabilizer) {
+            struct drm_mode_create_dumb dmcd_out;
+            memset(&dmcd_out, 0, sizeof(dmcd_out));
+            dmcd_out.bpp = dmcd.bpp;
+            dmcd_out.width = hor_stride;
+            dmcd_out.height = ver_stride * 2;
+
+            do {
+                ret = ioctl(vd->drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dmcd_out);
+            } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+            if (ret != 0) {
+                LOGW("DRM_IOCTL_MODE_CREATE_DUMB (processed) failed: %s", g_strerror(errno));
+                stabilizer_buffers_ok = FALSE;
+                continue;
+            }
+            vd->frame_map[i].processed_handle = dmcd_out.handle;
+
+            struct drm_prime_handle dph_out;
+            memset(&dph_out, 0, sizeof(dph_out));
+            dph_out.handle = dmcd_out.handle;
+            dph_out.fd = -1;
+            do {
+                ret = ioctl(vd->drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &dph_out);
+            } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+            if (ret != 0) {
+                LOGW("PRIME_HANDLE_TO_FD (processed) failed: %s", g_strerror(errno));
+                struct drm_mode_destroy_dumb dmd_out = {.handle = dmcd_out.handle};
+                ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_out);
+                vd->frame_map[i].processed_handle = 0;
+                stabilizer_buffers_ok = FALSE;
+                continue;
+            }
+            vd->frame_map[i].processed_prime_fd = dph_out.fd;
+
+            uint32_t proc_handles[4] = {0};
+            uint32_t proc_pitches[4] = {0};
+            uint32_t proc_offsets[4] = {0};
+            proc_handles[0] = vd->frame_map[i].processed_handle;
+            proc_handles[1] = vd->frame_map[i].processed_handle;
+            proc_pitches[0] = dmcd_out.pitch;
+            proc_pitches[1] = dmcd_out.pitch;
+            proc_offsets[0] = 0;
+            proc_offsets[1] = dmcd_out.pitch * ver_stride;
+
+            ret = drmModeAddFB2(vd->drm_fd, width, height, DRM_FORMAT_NV12, proc_handles, proc_pitches, proc_offsets,
+                                &vd->frame_map[i].processed_fb_id, 0);
+            if (ret != 0) {
+                LOGW("drmModeAddFB2 (processed) failed: %s", g_strerror(errno));
+                close(vd->frame_map[i].processed_prime_fd);
+                vd->frame_map[i].processed_prime_fd = -1;
+                struct drm_mode_destroy_dumb dmd_out = {.handle = dmcd_out.handle};
+                ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_out);
+                vd->frame_map[i].processed_handle = 0;
+                stabilizer_buffers_ok = FALSE;
+                continue;
+            }
+        }
     }
 
     vd->mpi->control(vd->ctx, MPP_DEC_SET_EXT_BUF_GROUP, vd->frm_grp);
@@ -391,7 +618,27 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
 
     vd->src_w = width;
     vd->src_h = height;
-    commit_plane(vd, vd->frame_map[0].fb_id, width, height);
+    if (need_stabilizer && stabilizer_buffers_ok && vd->stabilizer) {
+        if (video_stabilizer_configure(vd->stabilizer, width, height, hor_stride, ver_stride) == 0) {
+            vd->stabilizer_ready = TRUE;
+        } else {
+            LOGW("Video stabilizer: failed to configure geometry; disabling");
+            vd->stabilizer_ready = FALSE;
+        }
+    } else {
+        vd->stabilizer_ready = FALSE;
+    }
+    vd->estimator_ready = FALSE;
+    if (vd->estimator) {
+        motion_estimator_update(vd->estimator, &vd->estimator_cfg);
+        if (motion_estimator_configure(vd->estimator, width, height, hor_stride, ver_stride) == 0) {
+            vd->estimator_ready = TRUE;
+        } else {
+            LOGW("Motion estimator: failed to configure geometry; disabling");
+        }
+    }
+
+    commit_plane(vd, vd->frame_map[0].fb_id, width, height, -1, NULL);
     return 0;
 }
 
@@ -434,9 +681,86 @@ static gpointer frame_thread_func(gpointer data) {
                 if (mpp_buffer_info_get(buffer, &info) == MPP_OK) {
                     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
                         if (vd->frame_map[i].prime_fd == info.fd) {
+                            uint32_t fb_to_signal = vd->frame_map[i].fb_id;
+                            int in_fence_fd = -1;
+
+                            if (vd->stabilizer && vd->stabilizer_ready && vd->frame_map[i].processed_prime_fd >= 0 &&
+                                vd->frame_map[i].processed_fb_id != 0) {
+                                StabilizerParams params = {0};
+                                params.enable = vd->stabilizer_cfg.enable ? TRUE : FALSE;
+                                params.acquire_fence_fd = -1;
+                                params.has_transform = FALSE;
+                                params.translate_x = 0.0f;
+                                params.translate_y = 0.0f;
+                                params.rotate_deg = 0.0f;
+
+                                gboolean external_params = FALSE;
+                                g_mutex_lock(&vd->lock);
+                                if (vd->stabilizer_params_valid) {
+                                    params = vd->pending_stabilizer_params;
+                                    external_params = TRUE;
+                                }
+                                g_mutex_unlock(&vd->lock);
+
+                                MotionEstimate estimate = {0};
+                                gboolean estimate_valid = FALSE;
+                                if (vd->estimator && vd->estimator_ready && vd->frame_map[i].map_addr != NULL) {
+                                    int est_ret = motion_estimator_analyse(vd->estimator,
+                                                                           (const uint8_t *)vd->frame_map[i].map_addr,
+                                                                           vd->frame_map[i].map_size, &estimate);
+                                    if (est_ret == 0 && estimate.valid) {
+                                        estimate_valid = TRUE;
+                                    }
+                                }
+
+                                if (!vd->stabilizer_cfg.enable) {
+                                    params.enable = FALSE;
+                                }
+
+                                if (!external_params && estimate_valid) {
+                                    params.enable = TRUE;
+                                    params.has_transform = TRUE;
+                                    params.translate_x = estimate.translate_x;
+                                    params.translate_y = estimate.translate_y;
+                                }
+
+                                if (params.enable) {
+                                    int acquire_fd = -1;
+                                    if (mpp_frame_get_fd) {
+                                        acquire_fd = mpp_frame_get_fd(frame);
+                                    }
+                                    if (acquire_fd >= 0 && acquire_fd != info.fd) {
+                                        params.acquire_fence_fd = dup(acquire_fd);
+                                        if (params.acquire_fence_fd < 0) {
+                                            LOGW("Video stabilizer: failed to dup acquire fence: %s", g_strerror(errno));
+                                        }
+                                    }
+                                    int release_fence_fd = -1;
+                                    int process_ret = video_stabilizer_process(vd->stabilizer, info.fd,
+                                                                               vd->frame_map[i].processed_prime_fd,
+                                                                               &params, &release_fence_fd);
+                                    if (process_ret == 0) {
+                                        fb_to_signal = vd->frame_map[i].processed_fb_id;
+                                        in_fence_fd = release_fence_fd;
+                                    } else if (process_ret < 0) {
+                                        if (release_fence_fd >= 0) {
+                                            close(release_fence_fd);
+                                        }
+                                        LOGW("Video stabilizer: processing failed (%d); using raw frame", process_ret);
+                                    }
+                                }
+                            }
+
                             g_mutex_lock(&vd->lock);
-                            vd->pending_fb = vd->frame_map[i].fb_id;
+                            if (vd->pending_in_fence_fd >= 0) {
+                                close(vd->pending_in_fence_fd);
+                                vd->pending_in_fence_fd = -1;
+                            }
+                            vd->pending_fb = fb_to_signal;
                             vd->pending_pts = mpp_frame_get_pts(frame);
+                            vd->pending_in_fence_fd = in_fence_fd;
+                            vd->pending_src_w = mpp_frame_get_width(frame);
+                            vd->pending_src_h = mpp_frame_get_height(frame);
                             g_cond_signal(&vd->cond);
                             g_mutex_unlock(&vd->lock);
                             break;
@@ -470,15 +794,33 @@ static gpointer display_thread_func(gpointer data) {
             g_cond_wait(&vd->cond, &vd->lock);
         }
         uint32_t fb = vd->pending_fb;
+        uint32_t src_w = vd->pending_src_w;
+        uint32_t src_h = vd->pending_src_h;
+        int in_fence_fd = vd->pending_in_fence_fd;
         vd->pending_fb = 0;
+        vd->pending_src_w = 0;
+        vd->pending_src_h = 0;
+        vd->pending_in_fence_fd = -1;
         gboolean still_running = vd->running;
         g_mutex_unlock(&vd->lock);
 
         if (!still_running && fb == 0) {
+            if (in_fence_fd >= 0) {
+                close(in_fence_fd);
+            }
             break;
         }
         if (fb != 0) {
-            commit_plane(vd, fb, 0, 0);
+            int out_fence_fd = -1;
+            commit_plane(vd, fb, src_w, src_h, in_fence_fd, &out_fence_fd);
+            if (out_fence_fd >= 0) {
+                if (vd->last_out_fence_fd >= 0) {
+                    close(vd->last_out_fence_fd);
+                }
+                vd->last_out_fence_fd = out_fence_fd;
+            }
+        } else if (in_fence_fd >= 0) {
+            close(in_fence_fd);
         }
         if (!still_running) {
             break;
@@ -515,6 +857,32 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         return -1;
     }
 
+    vd->pending_in_fence_fd = -1;
+    vd->last_out_fence_fd = -1;
+    vd->stabilizer_cfg = cfg->stabilizer;
+    vd->stabilizer_params_valid = FALSE;
+    vd->stabilizer_ready = FALSE;
+    vd->estimator_cfg = derive_estimator_cfg(&vd->stabilizer_cfg);
+    vd->estimator_ready = FALSE;
+    vd->stabilizer = video_stabilizer_new();
+    if (vd->stabilizer != NULL) {
+        if (video_stabilizer_init(vd->stabilizer, &vd->stabilizer_cfg) != 0) {
+            LOGW("Video stabilizer: initialization failed");
+            video_stabilizer_free(vd->stabilizer);
+            vd->stabilizer = NULL;
+        } else if (vd->stabilizer_cfg.enable && !video_stabilizer_is_available(vd->stabilizer)) {
+            LOGW("Video stabilizer requested but unavailable; continuing without it");
+        }
+    }
+    vd->estimator = motion_estimator_new();
+    if (vd->estimator != NULL) {
+        if (motion_estimator_init(vd->estimator, &vd->estimator_cfg) != 0) {
+            LOGW("Motion estimator: initialization failed");
+            motion_estimator_free(vd->estimator);
+            vd->estimator = NULL;
+        }
+    }
+
     int dup_fd = fcntl(drm_fd, F_DUPFD_CLOEXEC, 0);
     if (dup_fd < 0) {
         LOGE("Video decoder: failed to dup DRM fd: %s", g_strerror(errno));
@@ -537,6 +905,13 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         LOGE("Video decoder: failed to query plane properties");
         video_decoder_deinit(vd);
         return -1;
+    }
+
+    if (drm_get_prop_id(vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, "IN_FENCE_FD", &vd->prop_in_fence_fd) != 0) {
+        vd->prop_in_fence_fd = 0;
+    }
+    if (drm_get_prop_id(vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, "OUT_FENCE_PTR", &vd->prop_out_fence_ptr) != 0) {
+        vd->prop_out_fence_ptr = 0;
     }
 
     if (mpp_create(&vd->ctx, &vd->mpi) != MPP_OK) {
@@ -594,6 +969,26 @@ void video_decoder_deinit(VideoDecoder *vd) {
     }
 
     video_decoder_stop(vd);
+
+    if (vd->pending_in_fence_fd >= 0) {
+        close(vd->pending_in_fence_fd);
+        vd->pending_in_fence_fd = -1;
+    }
+    if (vd->last_out_fence_fd >= 0) {
+        close(vd->last_out_fence_fd);
+        vd->last_out_fence_fd = -1;
+    }
+
+    if (vd->stabilizer) {
+        video_stabilizer_free(vd->stabilizer);
+        vd->stabilizer = NULL;
+        vd->stabilizer_ready = FALSE;
+    }
+    if (vd->estimator) {
+        motion_estimator_free(vd->estimator);
+        vd->estimator = NULL;
+        vd->estimator_ready = FALSE;
+    }
 
     if (vd->packet) {
         mpp_packet_deinit(&vd->packet);
@@ -757,4 +1152,23 @@ void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester) 
         return;
     }
     vd->idr_requester = requester;
+}
+
+void video_decoder_set_stabilizer_params(VideoDecoder *vd, const StabilizerParams *params) {
+    if (vd == NULL) {
+        return;
+    }
+    if (vd->lock_initialized) {
+        g_mutex_lock(&vd->lock);
+    }
+    if (params != NULL) {
+        vd->pending_stabilizer_params = *params;
+        vd->stabilizer_params_valid = TRUE;
+    } else {
+        memset(&vd->pending_stabilizer_params, 0, sizeof(vd->pending_stabilizer_params));
+        vd->stabilizer_params_valid = FALSE;
+    }
+    if (vd->lock_initialized) {
+        g_mutex_unlock(&vd->lock);
+    }
 }

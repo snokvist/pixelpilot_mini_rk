@@ -5,6 +5,7 @@
 #include <sched.h>
 
 #include "osd_layout.h"
+#include "video_stabilizer.h"
 
 #define SPLASH_MAX_SEQUENCES 32
 
@@ -102,6 +103,7 @@ typedef struct {
     RecordCfg record;
     SseCfg sse;
     IdrCfg idr;
+    StabilizerConfig stabilizer;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);

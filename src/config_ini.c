@@ -813,6 +813,27 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
 }
 
 static int apply_general_key(AppCfg *cfg, const char *section, const char *key, const char *value) {
+    if (section == NULL) {
+        section = "";
+    }
+    if (*section == '\0' || strcasecmp(section, "global") == 0) {
+        if (strcasecmp(key, "config-version") == 0) {
+            /* Reserved for future compatibility checks. */
+            return 0;
+        }
+        return -1;
+    }
+    if (strcasecmp(section, "receiver") == 0) {
+        if (strcasecmp(key, "stabilizer-diagnostics") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.diagnostics = v;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "drm") == 0) {
         if (strcasecmp(key, "card") == 0) {
         ini_copy_string(cfg->card_path, sizeof(cfg->card_path), value);
@@ -1049,6 +1070,126 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
                 timeout = 1;
             }
             cfg->idr.http_timeout_ms = (unsigned int)timeout;
+            return 0;
+        }
+        return -1;
+    }
+    if (strcasecmp(section, "stabilizer") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "strength") == 0) {
+            cfg->stabilizer.strength = strtof(value, NULL);
+            if (cfg->stabilizer.strength <= 0.0f) {
+                cfg->stabilizer.strength = 0.1f;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "max-translation") == 0 || strcasecmp(key, "translation") == 0) {
+            cfg->stabilizer.max_translation_px = strtof(value, NULL);
+            if (cfg->stabilizer.max_translation_px <= 0.0f) {
+                cfg->stabilizer.max_translation_px = 1.0f;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "max-rotation") == 0 || strcasecmp(key, "rotation") == 0) {
+            cfg->stabilizer.max_rotation_deg = strtof(value, NULL);
+            if (cfg->stabilizer.max_rotation_deg < 0.0f) {
+                cfg->stabilizer.max_rotation_deg = 0.0f;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "diagnostics") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.diagnostics = v;
+            return 0;
+        }
+        if (strcasecmp(key, "demo-enable") == 0 || strcasecmp(key, "demo") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.demo_enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "demo-amplitude") == 0) {
+            cfg->stabilizer.demo_amplitude_px = strtof(value, NULL);
+            if (cfg->stabilizer.demo_amplitude_px < 0.0f) {
+                cfg->stabilizer.demo_amplitude_px = 0.0f;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "demo-frequency") == 0) {
+            cfg->stabilizer.demo_frequency_hz = strtof(value, NULL);
+            if (cfg->stabilizer.demo_frequency_hz <= 0.0f) {
+                cfg->stabilizer.demo_frequency_hz = 0.1f;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "manual-enable") == 0 || strcasecmp(key, "manual") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.manual_enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "manual-offset-x") == 0) {
+            cfg->stabilizer.manual_offset_x_px = strtof(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "manual-offset-y") == 0) {
+            cfg->stabilizer.manual_offset_y_px = strtof(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "guard-band-x") == 0 || strcasecmp(key, "base-crop-x") == 0) {
+            cfg->stabilizer.guard_band_x_px = strtof(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "guard-band-y") == 0 || strcasecmp(key, "base-crop-y") == 0) {
+            cfg->stabilizer.guard_band_y_px = strtof(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "estimator-enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.estimator_enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "estimator-search") == 0 || strcasecmp(key, "estimator-radius") == 0) {
+            cfg->stabilizer.estimator_search_radius_px = (int)strtol(value, NULL, 10);
+            if (cfg->stabilizer.estimator_search_radius_px < 0) {
+                cfg->stabilizer.estimator_search_radius_px = 0;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "estimator-downsample") == 0) {
+            cfg->stabilizer.estimator_downsample_factor = (int)strtol(value, NULL, 10);
+            if (cfg->stabilizer.estimator_downsample_factor < 0) {
+                cfg->stabilizer.estimator_downsample_factor = 0;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "estimator-smoothing") == 0) {
+            cfg->stabilizer.estimator_smoothing_factor = strtof(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "estimator-diagnostics") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.estimator_diagnostics = v;
             return 0;
         }
         return -1;

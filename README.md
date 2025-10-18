@@ -67,6 +67,15 @@ to the defaults listed in `src/config.c` when omitted.
 | `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
+| `[stabilizer].enable` | `true` copies decoded frames through the RGA-backed stabiliser. Requires librga at build time. |
+| `[stabilizer].strength` | Multiplier applied to per-frame translation values before clamping. Mirrors `--stabilizer-strength`. |
+| `[stabilizer].max-translation` | Maximum translation (in pixels) applied horizontally/vertically. Mirrors `--stabilizer-max-translation`. |
+| `[stabilizer].max-rotation` | Rotation clamp in degrees accepted from per-frame metadata. Mirrors `--stabilizer-max-rotation`. |
+| `[stabilizer].diagnostics` | `true` prints periodic info logs confirming the stabiliser is active. Mirrors `--stabilizer-diagnostics`. |
+| `[stabilizer].demo-enable` / `demo-amplitude` / `demo-frequency` | Enables the built-in verification waveform and controls its pixel amplitude and oscillation rate. Mirrors `--stabilizer-demo-*`. |
+| `[stabilizer].manual-enable` / `manual-offset-x` / `manual-offset-y` | Applies a fixed translation when no per-frame parameters are available. Mirrors `--stabilizer-manual-*`. |
+| `[stabilizer].guard-band-x` / `guard-band-y` | Pixels cropped from each edge before the RGA blit. The cropped window is scaled back to the full output size and defines how far the stabiliser can translate while staying within bounds. Mirrors `--stabilizer-guard-band-*`. |
+| `[stabilizer].estimator-enable` / `estimator-search` / `estimator-downsample` / `estimator-smoothing` / `estimator-diagnostics` | Controls the built-in block-matching motion estimator that feeds per-frame translations when no external metadata is present. Mirrors `--stabilizer-estimator-*`. |
 | `[record].enable` | `true` to persist the H.265 video elementary stream to MP4 via minimp4. |
 | `[record].path` | Optional output path or directory for the MP4 file. If omitted, files land in `/media` with a timestamped name (video only, no audio). |
 | `[record].mode` | Selects the minimp4 writer mode: `standard` (seekable, updates MP4 metadata at the end), `sequential` (append-only, avoids seeks), or `fragmented` (stream-friendly MP4 fragments). |
@@ -82,6 +91,56 @@ to the defaults listed in `src/config.c` when omitted.
 | `[osd.element.NAME].anchor` / `offset` / `size` / color keys | Control placement and styling for OSD widgets. See inline comments in the sample file for full semantics. |
 | `[osd.element.NAME].line` | For text widgets, each `line =` entry appends a formatted row supporting `{token}` placeholders. |
 | `[osd.element.NAME].metric` | For line/bar widgets, selects the metric token (e.g. `udp.bitrate.latest_mbps`) sampled each refresh. |
+
+### Video stabiliser quick start
+
+Builds produced with `PIXELPILOT_HAVE_RGA=1` expose CLI toggles for the RGA-backed
+post-processing path:
+
+```sh
+./pixelpilot_mini_rk --stabilizer-enable --stabilizer-strength 1.25 \
+    --stabilizer-max-translation 24 --stabilizer-max-rotation 3 \
+    --stabilizer-diagnostics --stabilizer-demo-enable \
+    --stabilizer-demo-amplitude 12 --stabilizer-demo-frequency 0.75
+```
+
+The same values can be persisted via `[stabilizer]` keys inside an INI file. The
+new `config/stabilizer-demo.ini` sample enables the module with conservative
+translation clamps, diagnostics, and the built-in demo waveform so you can see
+the effect immediately:
+
+```sh
+./pixelpilot_mini_rk --config config/stabilizer-demo.ini
+```
+
+Watch the log for `Video stabilizer applied crop=...` messages to confirm that
+the RGA path is actively processing frames. With the estimator enabled you will
+also see `params=yes` alongside the live crop and occasional diagnostics when a
+requested offset is clamped. A single bypass message is printed if the module
+cannot run (for example, when librga support is missing).
+
+When you want to validate the pipeline without the oscillating demo waveform,
+point `--config` at `config/stabilizer-manual.ini`. It enables diagnostics,
+keeps the waveform disabled, reserves a symmetric guard band, and applies a
+static translation so the stabilised buffer always differs from the decoder
+output. Manual offsets are clamped by both the `max-translation` value and the
+configured guard bands (with any additional stride padding extending the
+positive range). If your requested offset exceeds those limits the log will
+emit a one-off message such as:
+
+```
+Video stabilizer manual offsets (200,200) constrained by guard 96 x 96 (stride extra 32 x 0); crop=(128,96) src=(1248,888)
+```
+
+This confirms the stabiliser is still active even though the requested motion
+does not fit inside the crop window. Adjust the guard band or translation clamp
+to suit your expected motion profile. The built-in motion estimator now keeps
+the crop centred automatically, but you can still feed dynamic per-frame
+offsets via `video_decoder_set_stabilizer_params()` when external sensor data is
+available.
+
+Update `config/pixelpilot_mini.ini` (installed to `/etc/pixelpilot_mini.ini` by
+`make install`) to keep the stabiliser enabled on boot.
 
 ## CPU affinity control
 

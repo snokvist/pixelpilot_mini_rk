@@ -17,6 +17,9 @@ PKG_GSTCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags gstreamer-1.0 g
 PKG_GSTLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0)
 PKG_MPPCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags rockchip-mpp)
 PKG_MPPLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs rockchip-mpp)
+PKG_GLIBCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags glib-2.0)
+PKG_RGACFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags librga)
+PKG_RGALIBS := $(shell $(PKG_CONFIG) --silence-errors --libs librga)
 
 CFLAGS ?= -O2 -Wall
 CFLAGS += -Iinclude -Ithird_party/minimp4
@@ -67,10 +70,22 @@ ifneq ($(strip $(PKG_GSTCFLAGS)),)
 CFLAGS += $(PKG_GSTCFLAGS)
 endif
 
+ifneq ($(strip $(PKG_GLIBCFLAGS)),)
+CFLAGS += $(PKG_GLIBCFLAGS)
+else
+CFLAGS += -I/usr/include/glib-2.0 -I/usr/lib/$(shell uname -m)-linux-gnu/glib-2.0/include
+endif
+
 ifneq ($(strip $(PKG_MPPCFLAGS)),)
 CFLAGS += $(PKG_MPPCFLAGS)
 else
 CFLAGS += -I/usr/include/rockchip
+endif
+
+ifneq ($(strip $(PKG_RGACFLAGS)),)
+CFLAGS += $(PKG_RGACFLAGS) -DPIXELPILOT_HAVE_RGA=1
+else
+CFLAGS += -DPIXELPILOT_HAVE_RGA=0
 endif
 
 ifneq ($(strip $(PKG_DRMLIBS)),)
@@ -91,6 +106,10 @@ else
 LDFLAGS += -lrockchip_mpp
 endif
 
+ifneq ($(strip $(PKG_RGALIBS)),)
+LDFLAGS += $(PKG_RGALIBS)
+endif
+
 LDFLAGS += -lpthread -lm
 
 TARGET := pixelpilot_mini_rk
@@ -106,6 +125,13 @@ COMPANION_LDFLAGS := -lm
 
 all: $(TARGET) $(COMPANION)
 
+tests/video_stabilizer_test: tests/video_stabilizer_test.c src/video_stabilizer.c src/video_motion_estimator.c src/logging.c
+	$(CC) $(CFLAGS) tests/video_stabilizer_test.c src/video_stabilizer.c src/video_motion_estimator.c src/logging.c -o $@ $(LDFLAGS)
+
+test: tests/video_stabilizer_test
+	@echo "Running video stabilizer smoke test"
+	./tests/video_stabilizer_test
+
 $(TARGET): $(APP_OBJ)
 	$(CC) $(APP_OBJ) -o $@ $(LDFLAGS)
 
@@ -116,7 +142,7 @@ $(COMPANION): $(COMPANION_OBJ)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(APP_OBJ) $(COMPANION_OBJ) $(TARGET) $(COMPANION)
+	rm -f $(APP_OBJ) $(COMPANION_OBJ) $(TARGET) $(COMPANION) tests/video_stabilizer_test
 
 install: all
 	install -d $(DESTDIR)$(BINDIR)

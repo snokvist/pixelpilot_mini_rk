@@ -44,6 +44,30 @@ static void usage(const char *prog) {
             "  --idr-port N                 (HTTP port for IDR requests; default: 80)\n"
             "  --idr-path PATH              (HTTP path for IDR trigger; default: /request/idr)\n"
             "  --idr-timeout-ms N           (per-request timeout; default: 200)\n"
+            "  --stabilizer-enable          (enable RGA-backed video stabilizer)\n"
+            "  --stabilizer-disable         (disable video stabilizer processing)\n"
+            "  --stabilizer-strength F      (translation gain multiplier; default: 1.0)\n"
+            "  --stabilizer-max-translation PX (max translation clamp; default: 32)\n"
+            "  --stabilizer-max-rotation DEG (max rotation clamp; default: 5)\n"
+            "  --stabilizer-diagnostics     (log when stabilizer is bypassed/applied)\n"
+            "  --stabilizer-no-diagnostics  (suppress stabilizer diagnostics logging)\n"
+            "  --stabilizer-demo-enable     (enable built-in demo motion path)\n"
+            "  --stabilizer-demo-disable    (disable built-in demo motion path)\n"
+            "  --stabilizer-demo-amplitude PX (demo motion amplitude in pixels)\n"
+            "  --stabilizer-demo-frequency HZ (demo motion frequency; default: 0.5)\n"
+            "  --stabilizer-manual-enable   (force a fixed translation when no params provided)\n"
+            "  --stabilizer-manual-disable  (disable manual translation override)\n"
+            "  --stabilizer-manual-offset-x PX (horizontal manual translation in pixels)\n"
+            "  --stabilizer-manual-offset-y PX (vertical manual translation in pixels)\n"
+            "  --stabilizer-guard-band-x PX (base crop margin per side along X; default: auto)\n"
+            "  --stabilizer-guard-band-y PX (base crop margin per side along Y; default: auto)\n"
+            "  --stabilizer-estimator-enable    (enable motion estimator driven stabilization)\n"
+            "  --stabilizer-estimator-disable   (disable motion estimator)\n"
+            "  --stabilizer-estimator-search PX (estimator search radius in pixels; default: max-translation)\n"
+            "  --stabilizer-estimator-downsample N (luma downsample factor; default: 4)\n"
+            "  --stabilizer-estimator-smoothing F (exponential smoothing factor; default: 0.6)\n"
+            "  --stabilizer-estimator-diagnostics (log estimator activity)\n"
+            "  --stabilizer-estimator-no-diagnostics (suppress estimator diagnostics)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -191,6 +215,25 @@ void cfg_defaults(AppCfg *c) {
     c->idr.http_port = 80;
     c->idr.http_timeout_ms = 200;
     strcpy(c->idr.http_path, "/request/idr");
+
+    c->stabilizer.enable = 0;
+    c->stabilizer.strength = 1.0f;
+    c->stabilizer.max_translation_px = 32.0f;
+    c->stabilizer.max_rotation_deg = 5.0f;
+    c->stabilizer.diagnostics = 0;
+    c->stabilizer.demo_enable = 0;
+    c->stabilizer.demo_amplitude_px = 0.0f;
+    c->stabilizer.demo_frequency_hz = 0.5f;
+    c->stabilizer.manual_enable = 0;
+    c->stabilizer.manual_offset_x_px = 0.0f;
+    c->stabilizer.manual_offset_y_px = 0.0f;
+    c->stabilizer.guard_band_x_px = -1.0f;
+    c->stabilizer.guard_band_y_px = -1.0f;
+    c->stabilizer.estimator_enable = -1;
+    c->stabilizer.estimator_diagnostics = -1;
+    c->stabilizer.estimator_search_radius_px = 0;
+    c->stabilizer.estimator_downsample_factor = 0;
+    c->stabilizer.estimator_smoothing_factor = 0.0f;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -416,6 +459,113 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg->idr.http_timeout_ms = (unsigned int)timeout;
+        } else if (!strcmp(argv[i], "--stabilizer-enable")) {
+            cfg->stabilizer.enable = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-disable")) {
+            cfg->stabilizer.enable = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-strength") && i + 1 < argc) {
+            cfg->stabilizer.strength = (float)atof(argv[++i]);
+            if (cfg->stabilizer.strength <= 0.0f) {
+                LOGW("--stabilizer-strength must be positive; clamping to 0.1");
+                cfg->stabilizer.strength = 0.1f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-strength")) {
+            LOGE("--stabilizer-strength requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-max-translation") && i + 1 < argc) {
+            cfg->stabilizer.max_translation_px = (float)atof(argv[++i]);
+            if (cfg->stabilizer.max_translation_px <= 0.0f) {
+                LOGW("--stabilizer-max-translation must be positive; clamping to 1");
+                cfg->stabilizer.max_translation_px = 1.0f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-max-translation")) {
+            LOGE("--stabilizer-max-translation requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-max-rotation") && i + 1 < argc) {
+            cfg->stabilizer.max_rotation_deg = (float)atof(argv[++i]);
+            if (cfg->stabilizer.max_rotation_deg < 0.0f) {
+                cfg->stabilizer.max_rotation_deg = 0.0f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-max-rotation")) {
+            LOGE("--stabilizer-max-rotation requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-diagnostics")) {
+            cfg->stabilizer.diagnostics = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-no-diagnostics")) {
+            cfg->stabilizer.diagnostics = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-demo-enable")) {
+            cfg->stabilizer.demo_enable = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-demo-disable")) {
+            cfg->stabilizer.demo_enable = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-demo-amplitude") && i + 1 < argc) {
+            cfg->stabilizer.demo_amplitude_px = (float)atof(argv[++i]);
+            if (cfg->stabilizer.demo_amplitude_px < 0.0f) {
+                LOGW("--stabilizer-demo-amplitude must be non-negative; clamping to 0");
+                cfg->stabilizer.demo_amplitude_px = 0.0f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-demo-amplitude")) {
+            LOGE("--stabilizer-demo-amplitude requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-demo-frequency") && i + 1 < argc) {
+            cfg->stabilizer.demo_frequency_hz = (float)atof(argv[++i]);
+            if (cfg->stabilizer.demo_frequency_hz <= 0.0f) {
+                LOGW("--stabilizer-demo-frequency must be positive; clamping to 0.1");
+                cfg->stabilizer.demo_frequency_hz = 0.1f;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-demo-frequency")) {
+            LOGE("--stabilizer-demo-frequency requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-manual-enable")) {
+            cfg->stabilizer.manual_enable = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-manual-disable")) {
+            cfg->stabilizer.manual_enable = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-manual-offset-x") && i + 1 < argc) {
+            cfg->stabilizer.manual_offset_x_px = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-manual-offset-x")) {
+            LOGE("--stabilizer-manual-offset-x requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-manual-offset-y") && i + 1 < argc) {
+            cfg->stabilizer.manual_offset_y_px = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-manual-offset-y")) {
+            LOGE("--stabilizer-manual-offset-y requires a numeric argument");
+        } else if (!strcmp(argv[i], "--stabilizer-guard-band-x") && i + 1 < argc) {
+            cfg->stabilizer.guard_band_x_px = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-guard-band-x")) {
+            LOGE("--stabilizer-guard-band-x requires a numeric argument");
+        } else if (!strcmp(argv[i], "--stabilizer-guard-band-y") && i + 1 < argc) {
+            cfg->stabilizer.guard_band_y_px = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-guard-band-y")) {
+            LOGE("--stabilizer-guard-band-y requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-enable")) {
+            cfg->stabilizer.estimator_enable = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-disable")) {
+            cfg->stabilizer.estimator_enable = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-search") && i + 1 < argc) {
+            cfg->stabilizer.estimator_search_radius_px = atoi(argv[++i]);
+            if (cfg->stabilizer.estimator_search_radius_px < 0) {
+                cfg->stabilizer.estimator_search_radius_px = 0;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-search")) {
+            LOGE("--stabilizer-estimator-search requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-downsample") && i + 1 < argc) {
+            cfg->stabilizer.estimator_downsample_factor = atoi(argv[++i]);
+            if (cfg->stabilizer.estimator_downsample_factor < 0) {
+                cfg->stabilizer.estimator_downsample_factor = 0;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-downsample")) {
+            LOGE("--stabilizer-estimator-downsample requires an integer argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-smoothing") && i + 1 < argc) {
+            cfg->stabilizer.estimator_smoothing_factor = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-smoothing")) {
+            LOGE("--stabilizer-estimator-smoothing requires a numeric argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-diagnostics")) {
+            cfg->stabilizer.estimator_diagnostics = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-no-diagnostics")) {
+            cfg->stabilizer.estimator_diagnostics = 0;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {
