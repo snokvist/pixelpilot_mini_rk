@@ -36,6 +36,8 @@ struct VideoStabilizer {
     gboolean diag_logged_disabled;
     gboolean diag_logged_unconfigured;
     gboolean diag_logged_no_params;
+    gboolean diag_logged_translation_clamp;
+    gboolean diag_logged_stride_clamp;
 };
 
 VideoStabilizer *video_stabilizer_new(void) {
@@ -121,6 +123,8 @@ void video_stabilizer_shutdown(VideoStabilizer *stabilizer) {
     stabilizer->diag_logged_disabled = FALSE;
     stabilizer->diag_logged_unconfigured = FALSE;
     stabilizer->diag_logged_no_params = FALSE;
+    stabilizer->diag_logged_translation_clamp = FALSE;
+    stabilizer->diag_logged_stride_clamp = FALSE;
 }
 
 int video_stabilizer_update(VideoStabilizer *stabilizer, const StabilizerConfig *config) {
@@ -147,6 +151,8 @@ int video_stabilizer_update(VideoStabilizer *stabilizer, const StabilizerConfig 
     stabilizer->diag_logged_disabled = FALSE;
     stabilizer->diag_logged_unconfigured = FALSE;
     stabilizer->diag_logged_no_params = FALSE;
+    stabilizer->diag_logged_translation_clamp = FALSE;
+    stabilizer->diag_logged_stride_clamp = FALSE;
     return 0;
 }
 
@@ -166,6 +172,8 @@ int video_stabilizer_configure(VideoStabilizer *stabilizer, uint32_t width, uint
     stabilizer->frames_processed = 0;
     stabilizer->demo_start_us = 0;
     stabilizer->diag_logged_no_params = FALSE;
+    stabilizer->diag_logged_translation_clamp = FALSE;
+    stabilizer->diag_logged_stride_clamp = FALSE;
     return 0;
 }
 
@@ -278,6 +286,12 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     gboolean using_manual = FALSE;
     gboolean had_params = params && params->enable;
     gboolean have_transform = FALSE;
+    gboolean have_requested_offsets = FALSE;
+    gboolean limited_by_translation = FALSE;
+    gboolean limited_by_stride = FALSE;
+    int requested_tx = 0;
+    int requested_ty = 0;
+    const char *request_mode = NULL;
 
     src.fd = in_fd;
     src.mmuFlag = 1;
@@ -301,35 +315,62 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
         if (params) {
             tx = (int)lroundf(params->translate_x * stabilizer->config.strength);
             ty = (int)lroundf(params->translate_y * stabilizer->config.strength);
-            if (tx > (int)stabilizer->config.max_translation_px) {
-                tx = (int)stabilizer->config.max_translation_px;
-            }
-            if (tx < -(int)stabilizer->config.max_translation_px) {
-                tx = -(int)stabilizer->config.max_translation_px;
-            }
-            if (ty > (int)stabilizer->config.max_translation_px) {
-                ty = (int)stabilizer->config.max_translation_px;
-            }
-            if (ty < -(int)stabilizer->config.max_translation_px) {
-                ty = -(int)stabilizer->config.max_translation_px;
-            }
+            requested_tx = tx;
+            requested_ty = ty;
+            have_requested_offsets = TRUE;
+            request_mode = "parameter";
         }
-        tx = CLAMP(tx, -max_crop_x, max_crop_x);
-        ty = CLAMP(ty, -max_crop_y, max_crop_y);
-        crop_x = CLAMP(tx, 0, max_crop_x);
-        crop_y = CLAMP(ty, 0, max_crop_y);
+        if (tx > (int)stabilizer->config.max_translation_px) {
+            tx = (int)stabilizer->config.max_translation_px;
+            limited_by_translation = TRUE;
+        }
+        if (tx < -(int)stabilizer->config.max_translation_px) {
+            tx = -(int)stabilizer->config.max_translation_px;
+            limited_by_translation = TRUE;
+        }
+        if (ty > (int)stabilizer->config.max_translation_px) {
+            ty = (int)stabilizer->config.max_translation_px;
+            limited_by_translation = TRUE;
+        }
+        if (ty < -(int)stabilizer->config.max_translation_px) {
+            ty = -(int)stabilizer->config.max_translation_px;
+            limited_by_translation = TRUE;
+        }
+        int stride_tx = CLAMP(tx, -max_crop_x, max_crop_x);
+        int stride_ty = CLAMP(ty, -max_crop_y, max_crop_y);
+        if (have_requested_offsets && (stride_tx != tx || stride_ty != ty)) {
+            limited_by_stride = TRUE;
+        }
+        crop_x = CLAMP(stride_tx, 0, max_crop_x);
+        crop_y = CLAMP(stride_ty, 0, max_crop_y);
+        if (have_requested_offsets && (crop_x != stride_tx || crop_y != stride_ty)) {
+            limited_by_stride = TRUE;
+        }
         have_transform = TRUE;
     }
 
     if (!have_transform && stabilizer->config.manual_enable) {
         int tx = (int)lroundf(stabilizer->config.manual_offset_x_px);
         int ty = (int)lroundf(stabilizer->config.manual_offset_y_px);
+        requested_tx = tx;
+        requested_ty = ty;
+        have_requested_offsets = TRUE;
+        request_mode = "manual";
         tx = CLAMP(tx, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
         ty = CLAMP(ty, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
-        tx = CLAMP(tx, -max_crop_x, max_crop_x);
-        ty = CLAMP(ty, -max_crop_y, max_crop_y);
-        crop_x = CLAMP(tx, 0, max_crop_x);
-        crop_y = CLAMP(ty, 0, max_crop_y);
+        if (tx != requested_tx || ty != requested_ty) {
+            limited_by_translation = TRUE;
+        }
+        int stride_tx = CLAMP(tx, -max_crop_x, max_crop_x);
+        int stride_ty = CLAMP(ty, -max_crop_y, max_crop_y);
+        if (stride_tx != tx || stride_ty != ty) {
+            limited_by_stride = TRUE;
+        }
+        crop_x = CLAMP(stride_tx, 0, max_crop_x);
+        crop_y = CLAMP(stride_ty, 0, max_crop_y);
+        if (crop_x != stride_tx || crop_y != stride_ty) {
+            limited_by_stride = TRUE;
+        }
         using_manual = TRUE;
         have_transform = TRUE;
     }
@@ -346,10 +387,10 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
         int ty = (int)lround(amp * cos(2.0 * M_PI * freq * t));
         tx = CLAMP(tx, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
         ty = CLAMP(ty, -(int)stabilizer->config.max_translation_px, (int)stabilizer->config.max_translation_px);
-        tx = CLAMP(tx, -max_crop_x, max_crop_x);
-        ty = CLAMP(ty, -max_crop_y, max_crop_y);
-        crop_x = CLAMP(tx, 0, max_crop_x);
-        crop_y = CLAMP(ty, 0, max_crop_y);
+        int stride_tx = CLAMP(tx, -max_crop_x, max_crop_x);
+        int stride_ty = CLAMP(ty, -max_crop_y, max_crop_y);
+        crop_x = CLAMP(stride_tx, 0, max_crop_x);
+        crop_y = CLAMP(stride_ty, 0, max_crop_y);
         using_demo = TRUE;
         have_transform = TRUE;
     }
@@ -359,6 +400,20 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     }
     if ((crop_y & 1) != 0) {
         crop_y &= ~1;
+    }
+
+    if (stabilizer->config.diagnostics && have_requested_offsets) {
+        if (limited_by_translation && !stabilizer->diag_logged_translation_clamp) {
+            LOGI("Video stabilizer %s offsets (%d,%d) limited to ±%.0f px", request_mode ? request_mode : "requested",
+                 requested_tx, requested_ty, stabilizer->config.max_translation_px);
+            stabilizer->diag_logged_translation_clamp = TRUE;
+        }
+        if (limited_by_stride && !stabilizer->diag_logged_stride_clamp) {
+            LOGI("Video stabilizer %s offsets (%d,%d) constrained by stride margin %d x %d; crop=(%d,%d)",
+                 request_mode ? request_mode : "requested", requested_tx, requested_ty, max_crop_x, max_crop_y, crop_x,
+                 crop_y);
+            stabilizer->diag_logged_stride_clamp = TRUE;
+        }
     }
 
     if (rga_set_rect(&src.rect, crop_x, crop_y, width, height, hor_stride, ver_stride,

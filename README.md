@@ -118,7 +118,17 @@ if the module cannot run (for example, when librga support is missing).
 When you want to validate the pipeline without the oscillating demo waveform,
 point `--config` at `config/stabilizer-manual.ini`. It enables diagnostics,
 keeps the waveform disabled, and applies a static horizontal crop so the
-stabilised buffer always differs from the decoder output.
+stabilised buffer always differs from the decoder output. The manual offsets
+are clamped by both the `max-translation` value and the decoder's stride margin
+(`hor_stride - width` / `ver_stride - height`). If your requested offset exceeds
+those limits the log will emit a one-off message such as:
+
+```
+Video stabilizer manual offsets (200,200) constrained by stride margin 32 x 0; crop=(32,0)
+```
+
+This confirms the stabiliser is still active even though the hardware cannot
+accommodate the full translation.
 
 Update `config/pixelpilot_mini.ini` (installed to `/etc/pixelpilot_mini.ini` by
 `make install`) to keep the stabiliser enabled on boot.

@@ -60,9 +60,17 @@ waveform enabled, so you can observe the stabiliser at work immediately.
 
 If you prefer to keep the source frame aligned while still exercising the
 stabiliser, use `config/stabilizer-manual.ini`. It enables diagnostics, turns
-off the waveform, and requests a static 12 pixel horizontal crop so the output
-frame visibly differs from the raw decoder buffer. Adjust the offsets to match
-your test scenario.
+off the waveform, and requests a static horizontal crop so the output frame
+visibly differs from the raw decoder buffer. Manual offsets are clamped by both
+`max-translation` and the stride margin exposed by the decoder. When an offset
+is reduced you will see a one-off diagnostic similar to:
+
+```
+Video stabilizer manual offsets (200,200) constrained by stride margin 32 x 0; crop=(32,0)
+```
+
+Increase `max-translation` or adjust your expectations based on the available
+stride headroom for the format you are decoding.
 
 With diagnostics enabled the log will periodically emit entries such as:
 

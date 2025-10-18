@@ -813,6 +813,27 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
 }
 
 static int apply_general_key(AppCfg *cfg, const char *section, const char *key, const char *value) {
+    if (section == NULL) {
+        section = "";
+    }
+    if (*section == '\0' || strcasecmp(section, "global") == 0) {
+        if (strcasecmp(key, "config-version") == 0) {
+            /* Reserved for future compatibility checks. */
+            return 0;
+        }
+        return -1;
+    }
+    if (strcasecmp(section, "receiver") == 0) {
+        if (strcasecmp(key, "stabilizer-diagnostics") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.diagnostics = v;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "drm") == 0) {
         if (strcasecmp(key, "card") == 0) {
         ini_copy_string(cfg->card_path, sizeof(cfg->card_path), value);
