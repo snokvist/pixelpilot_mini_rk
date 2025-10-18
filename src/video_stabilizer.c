@@ -103,6 +103,12 @@ static void stabilizer_copy_defaults(StabilizerConfig *cfg) {
     if (cfg->estimator_downsample_factor <= 0) {
         cfg->estimator_downsample_factor = 4;
     }
+    if (cfg->estimator_max_sample_width_px < -1) {
+        cfg->estimator_max_sample_width_px = -1;
+    }
+    if (cfg->estimator_max_sample_height_px < -1) {
+        cfg->estimator_max_sample_height_px = -1;
+    }
     if (!isfinite(cfg->estimator_smoothing_factor) || cfg->estimator_smoothing_factor < 0.0f) {
         cfg->estimator_smoothing_factor = 0.6f;
     }

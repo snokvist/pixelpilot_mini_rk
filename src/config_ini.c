@@ -1180,6 +1180,20 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             }
             return 0;
         }
+        if (strcasecmp(key, "estimator-max-width") == 0) {
+            cfg->stabilizer.estimator_max_sample_width_px = (int)strtol(value, NULL, 10);
+            if (cfg->stabilizer.estimator_max_sample_width_px < -1) {
+                cfg->stabilizer.estimator_max_sample_width_px = -1;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "estimator-max-height") == 0) {
+            cfg->stabilizer.estimator_max_sample_height_px = (int)strtol(value, NULL, 10);
+            if (cfg->stabilizer.estimator_max_sample_height_px < -1) {
+                cfg->stabilizer.estimator_max_sample_height_px = -1;
+            }
+            return 0;
+        }
         if (strcasecmp(key, "estimator-smoothing") == 0) {
             cfg->stabilizer.estimator_smoothing_factor = strtof(value, NULL);
             return 0;

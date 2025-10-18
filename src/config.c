@@ -65,6 +65,8 @@ static void usage(const char *prog) {
             "  --stabilizer-estimator-disable   (disable motion estimator)\n"
             "  --stabilizer-estimator-search PX (estimator search radius in pixels; default: max-translation)\n"
             "  --stabilizer-estimator-downsample N (luma downsample factor; default: 4)\n"
+            "  --stabilizer-estimator-max-width PX (cap estimator luma grid width; default: 256, -1 to disable)\n"
+            "  --stabilizer-estimator-max-height PX (cap estimator luma grid height; default: 144, -1 to disable)\n"
             "  --stabilizer-estimator-smoothing F (exponential smoothing factor; default: 0.6)\n"
             "  --stabilizer-estimator-diagnostics (log estimator activity)\n"
             "  --stabilizer-estimator-no-diagnostics (suppress estimator diagnostics)\n"
@@ -233,6 +235,8 @@ void cfg_defaults(AppCfg *c) {
     c->stabilizer.estimator_diagnostics = -1;
     c->stabilizer.estimator_search_radius_px = 0;
     c->stabilizer.estimator_downsample_factor = 0;
+    c->stabilizer.estimator_max_sample_width_px = 0;
+    c->stabilizer.estimator_max_sample_height_px = 0;
     c->stabilizer.estimator_smoothing_factor = 0.0f;
 }
 
@@ -556,6 +560,22 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             }
         } else if (!strcmp(argv[i], "--stabilizer-estimator-downsample")) {
             LOGE("--stabilizer-estimator-downsample requires an integer argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-max-width") && i + 1 < argc) {
+            cfg->stabilizer.estimator_max_sample_width_px = atoi(argv[++i]);
+            if (cfg->stabilizer.estimator_max_sample_width_px < -1) {
+                cfg->stabilizer.estimator_max_sample_width_px = -1;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-max-width")) {
+            LOGE("--stabilizer-estimator-max-width requires an integer argument");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-max-height") && i + 1 < argc) {
+            cfg->stabilizer.estimator_max_sample_height_px = atoi(argv[++i]);
+            if (cfg->stabilizer.estimator_max_sample_height_px < -1) {
+                cfg->stabilizer.estimator_max_sample_height_px = -1;
+            }
+        } else if (!strcmp(argv[i], "--stabilizer-estimator-max-height")) {
+            LOGE("--stabilizer-estimator-max-height requires an integer argument");
             return -1;
         } else if (!strcmp(argv[i], "--stabilizer-estimator-smoothing") && i + 1 < argc) {
             cfg->stabilizer.estimator_smoothing_factor = (float)atof(argv[++i]);

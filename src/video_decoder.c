@@ -163,6 +163,8 @@ static MotionEstimatorConfig derive_estimator_cfg(const StabilizerConfig *cfg) {
     } else {
         out.downsample_factor = 4;
     }
+    out.max_sample_width_px = cfg->estimator_max_sample_width_px;
+    out.max_sample_height_px = cfg->estimator_max_sample_height_px;
     if (isfinite(cfg->estimator_smoothing_factor) && cfg->estimator_smoothing_factor >= 0.0f) {
         out.smoothing_factor = cfg->estimator_smoothing_factor;
     } else {

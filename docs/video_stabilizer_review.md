@@ -34,8 +34,9 @@ execute on supported systems.【F:tests/video_stabilizer_test.c†L1-L289】
    motion; integrating IMU or optical-flow inputs would improve responsiveness
    and resilience when the scene lacks texture.
 4. **Performance profiling.** Downsampling at factor 1–2 increases CPU load.
-   We should profile typical ARM targets, tune the default factor, and consider
-   NEON intrinsics or adaptive resolution.
+   Width/height clamps now keep the estimator grid within ~256×144 pixels by
+   default, but we should still profile typical ARM targets, tune the defaults,
+   and consider NEON intrinsics or adaptive resolution.
 
 ## Goal
 

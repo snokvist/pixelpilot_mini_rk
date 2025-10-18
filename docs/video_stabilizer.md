@@ -96,6 +96,14 @@ the measured translations alongside any clamp messages. External subsystems can
 still provide explicit offsets by calling `video_decoder_set_stabilizer_params`
 —those values override the estimator for the next frame.
 
+The motion estimator downsamples the decoded luma plane before running block
+matching. Large working sets noticeably increase CPU usage, so the stabiliser
+exposes `estimator-max-width` and `estimator-max-height` clamps (or the
+corresponding CLI flags) to bound the grid size. The defaults (`256x144`) keep
+processing costs below a single core on RK3566-class boards. Set either knob to
+`-1` to remove the limit if your target has more headroom or if you require
+higher fidelity tracking.
+
 With diagnostics enabled the log will periodically emit entries such as:
 
 ```

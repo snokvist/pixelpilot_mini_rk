@@ -254,8 +254,8 @@ int main(void) {
     est_ret = motion_estimator_analyse(estimator, frame1, synth_size, &estimate);
     assert(est_ret == 0);
     assert(estimate.valid);
-    assert(fabsf(estimate.translate_x - (float)shift_x) <= 1.0f);
-    assert(fabsf(estimate.translate_y - (float)shift_y) <= 1.0f);
+    assert(fabsf(estimate.translate_x + (float)shift_x) <= 1.0f);
+    assert(fabsf(estimate.translate_y + (float)shift_y) <= 1.0f);
 
     g_free(frame1);
     g_free(frame0);

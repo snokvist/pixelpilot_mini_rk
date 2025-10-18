@@ -26,6 +26,8 @@ typedef struct {
     int estimator_diagnostics;
     int estimator_search_radius_px;
     int estimator_downsample_factor;
+    int estimator_max_sample_width_px;
+    int estimator_max_sample_height_px;
     float estimator_smoothing_factor;
 } StabilizerConfig;
 

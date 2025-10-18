@@ -10,6 +10,8 @@ typedef struct {
     int diagnostics;
     int search_radius_px;
     int downsample_factor;
+    int max_sample_width_px;
+    int max_sample_height_px;
     float smoothing_factor;
 } MotionEstimatorConfig;
 

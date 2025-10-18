@@ -75,7 +75,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[stabilizer].demo-enable` / `demo-amplitude` / `demo-frequency` | Enables the built-in verification waveform and controls its pixel amplitude and oscillation rate. Mirrors `--stabilizer-demo-*`. |
 | `[stabilizer].manual-enable` / `manual-offset-x` / `manual-offset-y` | Applies a fixed translation when no per-frame parameters are available. Mirrors `--stabilizer-manual-*`. |
 | `[stabilizer].guard-band-x` / `guard-band-y` | Pixels cropped from each edge before the RGA blit. The cropped window is scaled back to the full output size and defines how far the stabiliser can translate while staying within bounds. Mirrors `--stabilizer-guard-band-*`. |
-| `[stabilizer].estimator-enable` / `estimator-search` / `estimator-downsample` / `estimator-smoothing` / `estimator-diagnostics` | Controls the built-in block-matching motion estimator that feeds per-frame translations when no external metadata is present. Mirrors `--stabilizer-estimator-*`. |
+| `[stabilizer].estimator-enable` / `estimator-search` / `estimator-downsample` / `estimator-max-width` / `estimator-max-height` / `estimator-smoothing` / `estimator-diagnostics` | Controls the built-in block-matching motion estimator that feeds per-frame translations when no external metadata is present. Width/height clamps keep the luma grid manageable on lower-power SoCs (set to `-1` to disable). Mirrors `--stabilizer-estimator-*`. |
 | `[record].enable` | `true` to persist the H.265 video elementary stream to MP4 via minimp4. |
 | `[record].path` | Optional output path or directory for the MP4 file. If omitted, files land in `/media` with a timestamped name (video only, no audio). |
 | `[record].mode` | Selects the minimp4 writer mode: `standard` (seekable, updates MP4 metadata at the end), `sequential` (append-only, avoids seeks), or `fragmented` (stream-friendly MP4 fragments). |
@@ -118,6 +118,13 @@ the RGA path is actively processing frames. With the estimator enabled you will
 also see `params=yes` alongside the live crop and occasional diagnostics when a
 requested offset is clamped. A single bypass message is printed if the module
 cannot run (for example, when librga support is missing).
+
+The block-matching estimator can saturate a CPU core if it processes large luma
+grids every frame. The new `--stabilizer-estimator-max-width` and
+`--stabilizer-estimator-max-height` knobs (mirrored in the `[stabilizer]` INI
+section) cap the downsampled working set. The defaults (`256x144`) keep the
+search manageable on dual-core RK3566-class devices; set either option to `-1`
+to remove the clamp if you have headroom or need additional accuracy.
 
 When you want to validate the pipeline without the oscillating demo waveform,
 point `--config` at `config/stabilizer-manual.ini`. It enables diagnostics,

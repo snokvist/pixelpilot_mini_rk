@@ -20,6 +20,7 @@ struct VideoMotionEstimator {
 
     int sample_width;
     int sample_height;
+    int sample_factor;
 
     guint8 *prev_sample;
     guint8 *curr_sample;
@@ -32,6 +33,7 @@ struct VideoMotionEstimator {
     gboolean diag_logged_disabled;
     gboolean diag_logged_unconfigured;
     gboolean diag_logged_no_prev;
+    gboolean diag_logged_sample_clamp;
 };
 
 static void motion_estimator_apply_defaults(MotionEstimatorConfig *cfg) {
@@ -46,6 +48,16 @@ static void motion_estimator_apply_defaults(MotionEstimatorConfig *cfg) {
     }
     if (cfg->downsample_factor > 16) {
         cfg->downsample_factor = 16;
+    }
+    if (cfg->max_sample_width_px < 0) {
+        cfg->max_sample_width_px = 0;
+    } else if (cfg->max_sample_width_px == 0) {
+        cfg->max_sample_width_px = 256;
+    }
+    if (cfg->max_sample_height_px < 0) {
+        cfg->max_sample_height_px = 0;
+    } else if (cfg->max_sample_height_px == 0) {
+        cfg->max_sample_height_px = 144;
     }
     if (!isfinite(cfg->smoothing_factor) || cfg->smoothing_factor < 0.0f) {
         cfg->smoothing_factor = 0.5f;
@@ -100,6 +112,7 @@ int motion_estimator_update(VideoMotionEstimator *estimator, const MotionEstimat
     estimator->diag_logged_disabled = FALSE;
     estimator->diag_logged_unconfigured = FALSE;
     estimator->diag_logged_no_prev = FALSE;
+    estimator->diag_logged_sample_clamp = FALSE;
     return 0;
 }
 
@@ -121,6 +134,8 @@ int motion_estimator_reset(VideoMotionEstimator *estimator) {
     estimator->frames_valid = 0;
     estimator->filtered_x = 0.0f;
     estimator->filtered_y = 0.0f;
+    estimator->sample_factor = 0;
+    estimator->diag_logged_sample_clamp = FALSE;
     return 0;
 }
 
@@ -143,10 +158,35 @@ int motion_estimator_configure(VideoMotionEstimator *estimator, uint32_t width, 
     estimator->hor_stride = hor_stride;
     estimator->ver_stride = ver_stride;
 
-    int factor = estimator->config.downsample_factor;
-    if (factor <= 0) {
-        factor = 4;
+    int base_factor = estimator->config.downsample_factor;
+    if (base_factor <= 0) {
+        base_factor = 4;
     }
+    int factor = base_factor;
+    gboolean clamped = FALSE;
+    if (estimator->config.max_sample_width_px > 0) {
+        int max_w = estimator->config.max_sample_width_px;
+        int needed = (int)((width + (uint32_t)max_w - 1u) / (uint32_t)max_w);
+        if (needed < 1) {
+            needed = 1;
+        }
+        if (needed > factor) {
+            factor = needed;
+            clamped = TRUE;
+        }
+    }
+    if (estimator->config.max_sample_height_px > 0) {
+        int max_h = estimator->config.max_sample_height_px;
+        int needed = (int)((height + (uint32_t)max_h - 1u) / (uint32_t)max_h);
+        if (needed < 1) {
+            needed = 1;
+        }
+        if (needed > factor) {
+            factor = needed;
+            clamped = TRUE;
+        }
+    }
+    estimator->sample_factor = factor;
     int sample_w = (int)(width / (uint32_t)factor);
     int sample_h = (int)(height / (uint32_t)factor);
     if (sample_w < 8) {
@@ -154,6 +194,12 @@ int motion_estimator_configure(VideoMotionEstimator *estimator, uint32_t width, 
     }
     if (sample_h < 8) {
         sample_h = height >= 8 ? 8 : (int)height;
+    }
+    if (estimator->config.diagnostics && clamped && !estimator->diag_logged_sample_clamp) {
+        LOGI("Motion estimator downsample factor raised from %d to %d (sample %dx%d within %dx%d)", base_factor,
+             factor, sample_w, sample_h, estimator->config.max_sample_width_px,
+             estimator->config.max_sample_height_px);
+        estimator->diag_logged_sample_clamp = TRUE;
     }
     estimator->sample_width = sample_w;
     estimator->sample_height = sample_h;
@@ -258,7 +304,7 @@ int motion_estimator_analyse(VideoMotionEstimator *estimator, const uint8_t *nv1
 
     uint32_t width = estimator->width;
     uint32_t height = estimator->height;
-    int factor = estimator->config.downsample_factor <= 0 ? 4 : estimator->config.downsample_factor;
+    int factor = estimator->sample_factor <= 0 ? 1 : estimator->sample_factor;
     if (!estimator->curr_sample || !estimator->prev_sample) {
         return -1;
     }
