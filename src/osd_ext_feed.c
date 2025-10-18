@@ -520,11 +520,17 @@ int main(int argc, char **argv)
         const char *text_ptrs[MAX_ENTRIES];
         bool present_arr[MAX_ENTRIES];
         double values_arr[MAX_ENTRIES];
-        size_t emit_count = 0;
+        size_t emit_count = MAX_ENTRIES;
 
         for (size_t i = 0; i < MAX_ENTRIES; ++i) {
             struct feed_slot *slot = &slots[i];
+
+            text_ptrs[i] = text_buf[i];
+            present_arr[i] = true;
+
             if (!slot->active) {
+                text_buf[i][0] = '\0';
+                values_arr[i] = 0.0;
                 continue;
             }
 
@@ -537,23 +543,19 @@ int main(int argc, char **argv)
             }
 
             if (slot->is_metric) {
-                snprintf(text_buf[emit_count], sizeof(text_buf[emit_count]),
+                snprintf(text_buf[i], sizeof(text_buf[i]),
                          "%.32s #%llu @ %.2f Hz",
                          slot->text[0] ? slot->text : "Metric",
                          slot->send_counter + 1,
                          freq_hz);
             } else {
-                copy_label(text_buf[emit_count], sizeof(text_buf[emit_count]), slot->text);
+                copy_label(text_buf[i], sizeof(text_buf[i]), slot->text);
             }
 
-            text_ptrs[emit_count] = text_buf[emit_count];
-            present_arr[emit_count] = true;
-            values_arr[emit_count] = slot->has_value ? slot->value : 0.0;
+            values_arr[i] = slot->has_value ? slot->value : 0.0;
 
             slot->last_emit_ms = now;
             slot->send_counter++;
-
-            emit_count++;
         }
 
         int written = build_osd_payload(text_ptrs, values_arr, present_arr,
