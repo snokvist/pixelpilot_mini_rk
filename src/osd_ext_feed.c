@@ -65,13 +65,18 @@ static void copy_label(char *dst, size_t dst_len, const char *src) {
     dst[len] = '\0';
 }
 
-struct feed_slot {
+struct component_state {
     bool active;
+    uint64_t expiry_ms;
+};
+
+struct feed_slot {
     bool is_metric;
     bool has_value;
     char text[64];
     double value;
-    uint64_t expiry_ms;
+    struct component_state text_state;
+    struct component_state value_state;
     uint64_t last_emit_ms;
     unsigned long long send_counter;
 };
@@ -410,60 +415,102 @@ int main(int argc, char **argv)
                     for (size_t i = 0; i < count && i < MAX_ENTRIES; ++i) {
                         const char *incoming_text = (i < text_count) ? parsed_texts[i] : "";
                         bool text_nonempty = incoming_text && incoming_text[0] != '\0';
-                        bool has_value = (i < value_count);
-                        double value = has_value ? parsed_values[i] : 0.0;
+                        bool has_value_component = (i < value_count);
+                        double value = has_value_component ? parsed_values[i] : 0.0;
 
-                        if (!text_nonempty && !has_value) {
+                        if (!text_nonempty && !has_value_component) {
                             continue;
                         }
 
                         struct feed_slot *slot = &slots[i];
-                        if (slot->active && slot->expiry_ms > now && !has_ttl_field) {
-                            if (g_verbose) {
-                                fprintf(stdout, "Ignoring slot %zu update while TTL active\n", i + 1);
-                                fflush(stdout);
-                            }
-                            continue;
-                        }
-                        bool prev_active = slot->active;
+                        bool prev_text_active = slot->text_state.active;
+                        bool prev_value_active = slot->value_state.active;
+                        bool prev_has_value = slot->has_value;
                         bool prev_metric = slot->is_metric;
                         double prev_value = slot->value;
                         char prev_text[64];
                         copy_label(prev_text, sizeof(prev_text), slot->text);
 
-                        if (has_value) {
-                            slot->is_metric = true;
-                            slot->has_value = true;
-                            slot->value = value;
-                        } else {
-                            slot->has_value = false;
-                            slot->value = 0.0;
-                        }
+                        bool slot_active_before = prev_text_active || prev_value_active;
+                        bool text_applied = false;
+                        bool value_applied = false;
 
                         if (text_nonempty) {
-                            copy_label(slot->text, sizeof(slot->text), incoming_text);
-                            if (!has_value) {
-                                slot->is_metric = false;
+                            bool ttl_active = slot->text_state.active && slot->text_state.expiry_ms > now;
+                            if (ttl_active && !has_ttl_field) {
+                                if (g_verbose) {
+                                    fprintf(stdout,
+                                            "Ignoring slot %zu text update while TTL active\n",
+                                            i + 1);
+                                    fflush(stdout);
+                                }
+                            } else {
+                                copy_label(slot->text, sizeof(slot->text), incoming_text);
+                                slot->text_state.active = true;
+                                slot->text_state.expiry_ms = has_ttl_field
+                                    ? (ttl_ms_field > 0 ? now + ttl_ms_field : now)
+                                    : 0;
+                                if (!has_value_component) {
+                                    slot->is_metric = false;
+                                    slot->has_value = false;
+                                    slot->value_state.active = false;
+                                    slot->value_state.expiry_ms = 0;
+                                    slot->value = 0.0;
+                                }
+                                text_applied = true;
                             }
                         }
 
-                        slot->active = true;
-                        if (has_ttl_field) {
-                            slot->expiry_ms = ttl_ms_field > 0 ? now + ttl_ms_field : 0;
-                        } else {
-                            slot->expiry_ms = 0;
+                        if (has_value_component) {
+                            bool ttl_active = slot->value_state.active && slot->value_state.expiry_ms > now;
+                            bool locked_by_text = slot->text_state.active && !slot->is_metric &&
+                                                   slot->text_state.expiry_ms > now;
+                            if (!has_ttl_field && (ttl_active || locked_by_text)) {
+                                if (g_verbose) {
+                                    fprintf(stdout,
+                                            "Ignoring slot %zu value update while TTL active\n",
+                                            i + 1);
+                                    fflush(stdout);
+                                }
+                            } else {
+                                slot->value = value;
+                                slot->has_value = true;
+                                slot->value_state.active = true;
+                                slot->value_state.expiry_ms = has_ttl_field
+                                    ? (ttl_ms_field > 0 ? now + ttl_ms_field : now)
+                                    : 0;
+                                slot->is_metric = true;
+                                value_applied = true;
+                            }
                         }
-                        if (!prev_active) {
+
+                        bool slot_active_after = slot->text_state.active || slot->value_state.active;
+
+                        if (slot_active_after && !slot_active_before) {
                             slot->send_counter = 0;
                             slot->last_emit_ms = 0;
                         }
 
-                        if (!prev_active || prev_metric != slot->is_metric ||
-                            strcmp(prev_text, slot->text) != 0 ||
-                            (slot->has_value && (!prev_active || fabs(prev_value - slot->value) > 0.0001))) {
+                        if (!slot_active_after) {
+                            slot->is_metric = false;
+                            slot->has_value = false;
+                            slot->value = 0.0;
+                            slot->text[0] = '\0';
+                        }
+
+                        if (slot_active_before != slot_active_after ||
+                            prev_metric != slot->is_metric ||
+                            prev_has_value != slot->has_value ||
+                            (prev_text_active != slot->text_state.active) ||
+                            (slot->text_state.active && strcmp(prev_text, slot->text) != 0) ||
+                            (prev_value_active != slot->value_state.active) ||
+                            (slot->value_state.active && fabs(prev_value - slot->value) > 0.0001)) {
                             state_changed = true;
                         }
-                        any_applied = true;
+
+                        if (text_applied || value_applied) {
+                            any_applied = true;
+                        }
                     }
                     if (any_applied) {
                         packet_updated = true;
@@ -476,38 +523,82 @@ int main(int argc, char **argv)
                         bool any_applied = false;
                         for (size_t i = 0; i < fallback_count && i < MAX_ENTRIES; ++i) {
                             struct feed_slot *slot = &slots[i];
-                            if (slot->active && slot->expiry_ms > now && !has_ttl_field) {
-                                if (g_verbose) {
-                                    fprintf(stdout, "Ignoring slot %zu metric update while TTL active\n", i + 1);
-                                    fflush(stdout);
-                                }
-                                continue;
-                            }
-                            bool prev_active = slot->active;
+                            bool prev_text_active = slot->text_state.active;
+                            bool prev_value_active = slot->value_state.active;
+                            bool prev_metric = slot->is_metric;
                             double prev_value = slot->value;
                             char prev_text[64];
                             copy_label(prev_text, sizeof(prev_text), slot->text);
 
-                            copy_label(slot->text, sizeof(slot->text), fallback_labels[i]);
-                            slot->is_metric = true;
-                            slot->has_value = true;
-                            slot->value = fallback_values[i];
-                            slot->active = true;
-                            if (has_ttl_field) {
-                                slot->expiry_ms = ttl_ms_field > 0 ? now + ttl_ms_field : 0;
+                            bool slot_active_before = prev_text_active || prev_value_active;
+                            bool text_applied = false;
+                            bool value_applied = false;
+
+                            bool text_ttl_active = slot->text_state.active && slot->text_state.expiry_ms > now;
+                            bool value_ttl_active = slot->value_state.active && slot->value_state.expiry_ms > now;
+                            bool locked_by_text = slot->text_state.active && !slot->is_metric &&
+                                                   slot->text_state.expiry_ms > now;
+
+                            if (text_ttl_active && !has_ttl_field) {
+                                if (g_verbose) {
+                                    fprintf(stdout,
+                                            "Ignoring slot %zu metric label update while TTL active\n",
+                                            i + 1);
+                                    fflush(stdout);
+                                }
                             } else {
-                                slot->expiry_ms = 0;
+                                copy_label(slot->text, sizeof(slot->text), fallback_labels[i]);
+                                slot->text_state.active = true;
+                                slot->text_state.expiry_ms = has_ttl_field
+                                    ? (ttl_ms_field > 0 ? now + ttl_ms_field : now)
+                                    : 0;
+                                text_applied = true;
                             }
-                            if (!prev_active) {
+
+                            if ((value_ttl_active || locked_by_text) && !has_ttl_field) {
+                                if (g_verbose) {
+                                    fprintf(stdout,
+                                            "Ignoring slot %zu metric value update while TTL active\n",
+                                            i + 1);
+                                    fflush(stdout);
+                                }
+                            } else {
+                                slot->value = fallback_values[i];
+                                slot->has_value = true;
+                                slot->value_state.active = true;
+                                slot->value_state.expiry_ms = has_ttl_field
+                                    ? (ttl_ms_field > 0 ? now + ttl_ms_field : now)
+                                    : 0;
+                                slot->is_metric = true;
+                                value_applied = true;
+                            }
+
+                            bool slot_active_after = slot->text_state.active || slot->value_state.active;
+
+                            if (slot_active_after && !slot_active_before) {
                                 slot->send_counter = 0;
                                 slot->last_emit_ms = 0;
                             }
 
-                            if (!prev_active || strcmp(prev_text, slot->text) != 0 ||
-                                fabs(prev_value - slot->value) > 0.0001) {
+                            if (!slot_active_after) {
+                                slot->is_metric = false;
+                                slot->has_value = false;
+                                slot->value = 0.0;
+                                slot->text[0] = '\0';
+                            }
+
+                            if (slot_active_before != slot_active_after ||
+                                prev_metric != slot->is_metric ||
+                                (prev_text_active != slot->text_state.active) ||
+                                (slot->text_state.active && strcmp(prev_text, slot->text) != 0) ||
+                                (prev_value_active != slot->value_state.active) ||
+                                (slot->value_state.active && fabs(prev_value - slot->value) > 0.0001)) {
                                 state_changed = true;
                             }
-                            any_applied = true;
+
+                            if (text_applied || value_applied) {
+                                any_applied = true;
+                            }
                         }
                         if (any_applied) {
                             packet_updated = true;
@@ -519,18 +610,30 @@ int main(int argc, char **argv)
 
         for (size_t i = 0; i < MAX_ENTRIES; ++i) {
             struct feed_slot *slot = &slots[i];
-            if (!slot->active) {
-                continue;
-            }
-            if (slot->expiry_ms > 0 && now >= slot->expiry_ms) {
-                slot->active = false;
-                slot->has_value = false;
-                slot->is_metric = false;
+            bool expired = false;
+
+            if (slot->text_state.active && slot->text_state.expiry_ms > 0 && now >= slot->text_state.expiry_ms) {
+                slot->text_state.active = false;
+                slot->text_state.expiry_ms = 0;
                 slot->text[0] = '\0';
+                expired = true;
+            }
+
+            if (slot->value_state.active && slot->value_state.expiry_ms > 0 && now >= slot->value_state.expiry_ms) {
+                slot->value_state.active = false;
+                slot->value_state.expiry_ms = 0;
+                slot->has_value = false;
                 slot->value = 0.0;
-                slot->expiry_ms = 0;
+                expired = true;
+            }
+
+            if (!slot->text_state.active && !slot->value_state.active && expired) {
+                slot->is_metric = false;
                 slot->last_emit_ms = 0;
                 slot->send_counter = 0;
+            }
+
+            if (expired) {
                 state_changed = true;
             }
         }
@@ -553,16 +656,27 @@ int main(int argc, char **argv)
             text_ptrs[i] = text_buf[i];
             present_arr[i] = true;
 
-            if (!slot->active) {
+            bool slot_active = slot->text_state.active || slot->value_state.active;
+            if (!slot_active) {
                 text_buf[i][0] = '\0';
                 values_arr[i] = 0.0;
                 continue;
             }
 
-            if (slot->expiry_ms > 0) {
+            if (slot->text_state.active && slot->text_state.expiry_ms > 0) {
                 any_ttl_slots = true;
-                if (slot->expiry_ms > now) {
-                    uint64_t remaining = slot->expiry_ms - now;
+                if (slot->text_state.expiry_ms > now) {
+                    uint64_t remaining = slot->text_state.expiry_ms - now;
+                    if (remaining > max_remaining_ttl_ms) {
+                        max_remaining_ttl_ms = remaining;
+                    }
+                }
+            }
+
+            if (slot->value_state.active && slot->value_state.expiry_ms > 0) {
+                any_ttl_slots = true;
+                if (slot->value_state.expiry_ms > now) {
+                    uint64_t remaining = slot->value_state.expiry_ms - now;
                     if (remaining > max_remaining_ttl_ms) {
                         max_remaining_ttl_ms = remaining;
                     }
@@ -570,24 +684,24 @@ int main(int argc, char **argv)
             }
 
             double freq_hz = 0.0;
-            if (slot->last_emit_ms != 0) {
+            if (slot->value_state.active && slot->last_emit_ms != 0) {
                 uint64_t delta_ms = now - slot->last_emit_ms;
                 if (delta_ms > 0) {
                     freq_hz = 1000.0 / (double)delta_ms;
                 }
             }
 
-            if (slot->is_metric) {
+            if (slot->is_metric && slot->value_state.active) {
                 snprintf(text_buf[i], sizeof(text_buf[i]),
                          "%.32s #%llu @ %.2f Hz",
                          slot->text[0] ? slot->text : "Metric",
                          slot->send_counter + 1,
                          freq_hz);
             } else {
-                copy_label(text_buf[i], sizeof(text_buf[i]), slot->text);
+                copy_label(text_buf[i], sizeof(text_buf[i]), slot->text_state.active ? slot->text : "");
             }
 
-            values_arr[i] = slot->has_value ? slot->value : 0.0;
+            values_arr[i] = (slot->value_state.active && slot->has_value) ? slot->value : 0.0;
 
             slot->last_emit_ms = now;
             slot->send_counter++;
