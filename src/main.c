@@ -94,8 +94,8 @@ static int write_pid_file(void) {
     return 0;
 }
 
-static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, VideoDecoderZoomRect *out_rect) {
-    if (out_enabled == NULL || out_rect == NULL) {
+static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, VideoDecoderZoomRequest *out_request) {
+    if (out_enabled == NULL || out_request == NULL) {
         return FALSE;
     }
     if (cmd == NULL) {
@@ -108,7 +108,7 @@ static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, Video
     }
     if (*p == '\0') {
         *out_enabled = FALSE;
-        memset(out_rect, 0, sizeof(*out_rect));
+        memset(out_request, 0, sizeof(*out_request));
         return TRUE;
     }
     if (g_ascii_strncasecmp(p, "zoom=", 5) != 0) {
@@ -123,7 +123,7 @@ static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, Video
     }
     if (g_ascii_strcasecmp(p, "off") == 0) {
         *out_enabled = FALSE;
-        memset(out_rect, 0, sizeof(*out_rect));
+        memset(out_request, 0, sizeof(*out_request));
         return TRUE;
     }
 
@@ -159,10 +159,14 @@ static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, Video
         return FALSE;
     }
 
-    out_rect->w = values[0];
-    out_rect->h = values[1];
-    out_rect->x = values[2];
-    out_rect->y = values[3];
+    if (values[0] == 0 || values[1] == 0) {
+        return FALSE;
+    }
+
+    out_request->scale_x_percent = values[0];
+    out_request->scale_y_percent = values[1];
+    out_request->center_x_percent = values[2];
+    out_request->center_y_percent = values[3];
     *out_enabled = TRUE;
     return TRUE;
 }
@@ -565,15 +569,15 @@ int main(int argc, char **argv) {
                 const char *zoom_text = ext_snapshot.text[OSD_EXTERNAL_MAX_TEXT - 1];
                 if (g_strcmp0(zoom_text, last_zoom_command) != 0) {
                     gboolean zoom_enabled = FALSE;
-                    VideoDecoderZoomRect zoom_rect = {0};
-                    if (parse_zoom_command(zoom_text, &zoom_enabled, &zoom_rect)) {
+                    VideoDecoderZoomRequest zoom_request = {0};
+                    if (parse_zoom_command(zoom_text, &zoom_enabled, &zoom_request)) {
                         if (zoom_enabled) {
-                            pipeline_apply_zoom_command(&ps, TRUE, &zoom_rect);
+                            pipeline_apply_zoom_command(&ps, TRUE, &zoom_request);
                         } else {
                             pipeline_apply_zoom_command(&ps, FALSE, NULL);
                         }
                     } else if (zoom_text != NULL && zoom_text[0] != '\0') {
-                        LOGW("External zoom command ignored: expected 'zoom=WIDTH,HEIGHT,X,Y' or 'zoom=off' (got '%s')",
+                        LOGW("External zoom command ignored: expected 'zoom=SCALE_X,SCALE_Y,CENTER_X,CENTER_Y' or 'zoom=off' (got '%s')",
                              zoom_text);
                     } else if (last_zoom_command[0] != '\0') {
                         pipeline_apply_zoom_command(&ps, FALSE, NULL);

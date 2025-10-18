@@ -60,6 +60,7 @@ struct VideoDecoder {
     uint32_t src_h;
 
     gboolean zoom_enabled;
+    VideoDecoderZoomRequest zoom_request;
     VideoDecoderZoomRect zoom_rect;
     uint32_t last_committed_fb;
 
@@ -174,6 +175,99 @@ static gboolean sanitize_zoom_rect(uint32_t max_w, uint32_t max_h, VideoDecoderZ
     if (rect->y + rect->h > max_h) {
         rect->y = max_h - rect->h;
     }
+    return rect->w > 0 && rect->h > 0;
+}
+
+static gboolean sanitize_zoom_request(VideoDecoderZoomRequest *request) {
+    if (request == NULL) {
+        return FALSE;
+    }
+    if (request->scale_x_percent == 0 || request->scale_y_percent == 0) {
+        return FALSE;
+    }
+    if (request->scale_x_percent > 100) {
+        request->scale_x_percent = 100;
+    }
+    if (request->scale_y_percent > 100) {
+        request->scale_y_percent = 100;
+    }
+    if (request->center_x_percent > 100) {
+        request->center_x_percent = 100;
+    }
+    if (request->center_y_percent > 100) {
+        request->center_y_percent = 100;
+    }
+    return TRUE;
+}
+
+static gboolean compute_zoom_rect_from_request(uint32_t frame_w, uint32_t frame_h,
+                                               const VideoDecoderZoomRequest *request,
+                                               VideoDecoderZoomRect *rect) {
+    if (rect == NULL || request == NULL) {
+        return FALSE;
+    }
+    if (frame_w == 0 || frame_h == 0) {
+        return FALSE;
+    }
+
+    double scale_x = (double)request->scale_x_percent / 100.0;
+    double scale_y = (double)request->scale_y_percent / 100.0;
+    if (scale_x <= 0.0 || scale_y <= 0.0) {
+        return FALSE;
+    }
+
+    uint32_t width = (uint32_t)ceil((double)frame_w * scale_x);
+    uint32_t height = (uint32_t)ceil((double)frame_h * scale_y);
+    if (width == 0) {
+        width = 1;
+    }
+    if (height == 0) {
+        height = 1;
+    }
+    if (width > frame_w) {
+        width = frame_w;
+    }
+    if (height > frame_h) {
+        height = frame_h;
+    }
+
+    double center_x = ((double)frame_w - 1.0) * ((double)request->center_x_percent / 100.0);
+    double center_y = ((double)frame_h - 1.0) * ((double)request->center_y_percent / 100.0);
+
+    double half_w = (double)width / 2.0;
+    double half_h = (double)height / 2.0;
+
+    double left = center_x - half_w;
+    double top = center_y - half_h;
+
+    double max_left = (double)frame_w - (double)width;
+    double max_top = (double)frame_h - (double)height;
+
+    if (left < 0.0) {
+        left = 0.0;
+    }
+    if (top < 0.0) {
+        top = 0.0;
+    }
+    if (left > max_left) {
+        left = max_left;
+    }
+    if (top > max_top) {
+        top = max_top;
+    }
+
+    rect->w = width;
+    rect->h = height;
+    rect->x = (uint32_t)llround(left);
+    rect->y = (uint32_t)llround(top);
+
+    if (rect->x + rect->w > frame_w) {
+        rect->x = frame_w - rect->w;
+    }
+    if (rect->y + rect->h > frame_h) {
+        rect->y = frame_h - rect->h;
+    }
+
     return rect->w > 0 && rect->h > 0;
 }
 
@@ -478,13 +572,15 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
     vd->src_w = width;
     vd->src_h = height;
     if (vd->zoom_enabled) {
-        VideoDecoderZoomRect adjusted = vd->zoom_rect;
-        if (!sanitize_zoom_rect(width, height, &adjusted)) {
+        VideoDecoderZoomRect adjusted = {0};
+        if (!compute_zoom_rect_from_request(width, height, &vd->zoom_request, &adjusted) ||
+            !sanitize_zoom_rect(width, height, &adjusted)) {
             LOGW("Video decoder: disabling zoom after %ux%u format change", width, height);
             vd->zoom_enabled = FALSE;
+            memset(&vd->zoom_request, 0, sizeof(vd->zoom_request));
             memset(&vd->zoom_rect, 0, sizeof(vd->zoom_rect));
-        } else if (adjusted.x != vd->zoom_rect.x || adjusted.y != vd->zoom_rect.y ||
-                   adjusted.w != vd->zoom_rect.w || adjusted.h != vd->zoom_rect.h) {
+        } else if (adjusted.x != vd->zoom_rect.x || adjusted.y != vd->zoom_rect.y || adjusted.w != vd->zoom_rect.w ||
+                   adjusted.h != vd->zoom_rect.h) {
             LOGI("Video decoder: clamped zoom to %ux%u+%u,%u for %ux%u frame", adjusted.w, adjusted.h,
                  adjusted.x, adjusted.y, width, height);
             vd->zoom_rect = adjusted;
@@ -853,7 +949,7 @@ void video_decoder_send_eos(VideoDecoder *vd) {
     }
 }
 
-int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecoderZoomRect *rect) {
+int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecoderZoomRequest *request) {
     if (vd == NULL) {
         return -1;
     }
@@ -861,6 +957,7 @@ int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecode
         g_mutex_lock(&vd->lock);
         gboolean was_enabled = vd->zoom_enabled;
         vd->zoom_enabled = FALSE;
+        memset(&vd->zoom_request, 0, sizeof(vd->zoom_request));
         memset(&vd->zoom_rect, 0, sizeof(vd->zoom_rect));
         uint32_t fb = was_enabled ? vd->last_committed_fb : 0;
         g_mutex_unlock(&vd->lock);
@@ -872,30 +969,71 @@ int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecode
         return 0;
     }
 
-    if (rect == NULL) {
-        LOGW("Video decoder: zoom request missing rectangle");
+    if (request == NULL) {
+        LOGW("Video decoder: zoom request missing parameters");
         return -1;
     }
 
     g_mutex_lock(&vd->lock);
     uint32_t max_w = vd->src_w ? vd->src_w : (uint32_t)vd->mode_w;
     uint32_t max_h = vd->src_h ? vd->src_h : (uint32_t)vd->mode_h;
-    VideoDecoderZoomRect sanitized = *rect;
+    VideoDecoderZoomRequest sanitized_request = *request;
     gboolean changed = FALSE;
 
-    if (max_w == 0 || max_h == 0 || !sanitize_zoom_rect(max_w, max_h, &sanitized)) {
+    if (!sanitize_zoom_request(&sanitized_request)) {
         g_mutex_unlock(&vd->lock);
-        LOGW("Video decoder: rejected zoom rectangle %ux%u+%u,%u for frame %ux%u",
-             rect->w, rect->h, rect->x, rect->y, max_w, max_h);
+        LOGW("Video decoder: rejected zoom percentages %u%%x%u%% @ %u%%,%u%%",
+             request->scale_x_percent, request->scale_y_percent, request->center_x_percent, request->center_y_percent);
         return -1;
     }
 
-    if (!vd->zoom_enabled || vd->zoom_rect.x != sanitized.x || vd->zoom_rect.y != sanitized.y ||
-        vd->zoom_rect.w != sanitized.w || vd->zoom_rect.h != sanitized.h) {
+    gboolean request_was_clamped = sanitized_request.scale_x_percent != request->scale_x_percent ||
+                                   sanitized_request.scale_y_percent != request->scale_y_percent ||
+                                   sanitized_request.center_x_percent != request->center_x_percent ||
+                                   sanitized_request.center_y_percent != request->center_y_percent;
+
+    if (max_w == 0 || max_h == 0) {
+        gboolean queued_request_changed = !vd->zoom_enabled ||
+                                          vd->zoom_request.scale_x_percent != sanitized_request.scale_x_percent ||
+                                          vd->zoom_request.scale_y_percent != sanitized_request.scale_y_percent ||
+                                          vd->zoom_request.center_x_percent != sanitized_request.center_x_percent ||
+                                          vd->zoom_request.center_y_percent != sanitized_request.center_y_percent;
+        if (queued_request_changed) {
+            vd->zoom_enabled = TRUE;
+            vd->zoom_request = sanitized_request;
+            memset(&vd->zoom_rect, 0, sizeof(vd->zoom_rect));
+        }
+        g_mutex_unlock(&vd->lock);
+        LOGI("Video decoder: queued zoom request (%u%%x%u%% @ %u%%,%u%%) until frame size is known",
+             sanitized_request.scale_x_percent, sanitized_request.scale_y_percent,
+             sanitized_request.center_x_percent, sanitized_request.center_y_percent);
+        return 0;
+    }
+
+    VideoDecoderZoomRect rect = {0};
+    if (!compute_zoom_rect_from_request(max_w, max_h, &sanitized_request, &rect) ||
+        !sanitize_zoom_rect(max_w, max_h, &rect)) {
+        g_mutex_unlock(&vd->lock);
+        LOGW("Video decoder: rejected zoom request after clamping (frame %ux%u)", max_w, max_h);
+        return -1;
+    }
+
+    gboolean request_changed = !vd->zoom_enabled ||
+                               vd->zoom_request.scale_x_percent != sanitized_request.scale_x_percent ||
+                               vd->zoom_request.scale_y_percent != sanitized_request.scale_y_percent ||
+                               vd->zoom_request.center_x_percent != sanitized_request.center_x_percent ||
+                               vd->zoom_request.center_y_percent != sanitized_request.center_y_percent;
+
+    gboolean rect_changed = !vd->zoom_enabled || vd->zoom_rect.x != rect.x || vd->zoom_rect.y != rect.y ||
+                            vd->zoom_rect.w != rect.w || vd->zoom_rect.h != rect.h;
+
+    if (request_changed || rect_changed) {
         vd->zoom_enabled = TRUE;
-        vd->zoom_rect = sanitized;
+        vd->zoom_request = sanitized_request;
+        vd->zoom_rect = rect;
         changed = TRUE;
     }
+    VideoDecoderZoomRequest applied_request = sanitized_request;
 
     uint32_t fb = changed ? vd->last_committed_fb : 0;
     g_mutex_unlock(&vd->lock);
@@ -904,6 +1042,11 @@ int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecode
         if (commit_plane(vd, fb, 0, 0) != 0) {
             LOGW("Video decoder: failed to apply zoom on framebuffer %u", fb);
         }
+    }
+    if (request_was_clamped) {
+        LOGI("Video decoder: clamped zoom request to %u%%x%u%% @ %u%%,%u%%",
+             applied_request.scale_x_percent, applied_request.scale_y_percent,
+             applied_request.center_x_percent, applied_request.center_y_percent);
     }
     return 0;
 }

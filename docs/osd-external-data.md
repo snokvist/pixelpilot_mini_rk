@@ -69,26 +69,33 @@ When the helper thread observes that `clock_gettime(CLOCK_MONOTONIC)` exceeds
 
 * Text slot 8 (`ext.text8`) is reserved for live zoom instructions that affect the
   primary video plane. A well-formed command uses the prefix `zoom=` followed by
-  either the literal `off` or four comma-separated integers representing the
-  cropped region:
+  either the literal `off` or four comma-separated integers that describe the
+  crop **as percentages** of the current decoded frame:
 
   ```text
-  zoom=WIDTH,HEIGHT,X,Y
+  zoom=SCALE_X,SCALE_Y,CENTER_X,CENTER_Y
   ```
 
-  * `WIDTH` / `HEIGHT` describe the size of the window in decoded pixels.
-  * `X` / `Y` are the top-left coordinates of that window within the decoded frame.
+  * `SCALE_X` / `SCALE_Y` request the window size as a percentage of the decoded
+    frame. `100,100` shows the full frame; `50,50` crops to half the width and
+    height. Values below 1 are rejected. Values above 100 are clamped to 100.
+  * `CENTER_X` / `CENTER_Y` position the window by expressing its centre as a
+    percentage of the frame. `50,50` keeps the crop centred, while `0,100` anchors
+    it to the bottom-left. Positions above 100 are clamped toward the edges.
 
+* The decoder clamps both the requested scale and the resulting window so the
+  plane never samples outside the decoded frame. If the sender places the crop
+  partially off-screen (for example `50,50,100,100`), the window is nudged back
+  inside the frame before programming the plane. Any rejection or clamp is logged
+  once when the command is applied.
 * Commands are debounced: the receiver only reprograms the plane when the text
-  changes. Publish the string repeatedly only if you want to refresh its TTL.
-* The rectangle is clamped to the decoded frame size. Requests that are out of
-  bounds or zero-sized are rejected and logged.
+  changes. Publish the same string again only when refreshing its TTL.
 * Include `ttl_ms` with every zoom update so the request naturally expires when
-  the publisher stops sending data. For example, to zoom into a 512×128 area
-  placed at (240, 240) for one second:
+  the publisher stops sending data. A typical one-second zoom command that crops
+  to half size around the centre looks like:
 
   ```json
-  {"text":["","","","","","","","zoom=512,128,240,240"], "ttl_ms": 1000}
+  {"text":["","","","","","","","zoom=50,50,50,50"], "ttl_ms": 1000}
   ```
 
 * Clearing the slot (empty string) or publishing `zoom=off` restores the full

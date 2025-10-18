@@ -1571,7 +1571,7 @@ gboolean pipeline_consume_reinit_request(PipelineState *ps) {
     return requested;
 }
 
-void pipeline_apply_zoom_command(PipelineState *ps, gboolean enabled, const VideoDecoderZoomRect *rect) {
+void pipeline_apply_zoom_command(PipelineState *ps, gboolean enabled, const VideoDecoderZoomRequest *request) {
     if (ps == NULL) {
         return;
     }
@@ -1591,7 +1591,7 @@ void pipeline_apply_zoom_command(PipelineState *ps, gboolean enabled, const Vide
         return;
     }
 
-    int ret = video_decoder_set_zoom(decoder, enabled, enabled ? rect : NULL);
+    int ret = video_decoder_set_zoom(decoder, enabled, enabled ? request : NULL);
     if (ret != 0 && enabled) {
         LOGW("Pipeline: zoom enable request was rejected");
     }
