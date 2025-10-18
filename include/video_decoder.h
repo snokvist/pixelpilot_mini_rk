@@ -8,6 +8,7 @@
 #include "config.h"
 #include "drm_modeset.h"
 #include "idr_requester.h"
+#include "video_stabilizer.h"
 
 typedef struct VideoDecoder VideoDecoder;
 
@@ -24,6 +25,7 @@ int video_decoder_feed(VideoDecoder *vd, const guint8 *data, size_t size);
 void video_decoder_send_eos(VideoDecoder *vd);
 
 void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester);
+void video_decoder_set_stabilizer_params(VideoDecoder *vd, const StabilizerParams *params);
 
 size_t video_decoder_max_packet_size(const VideoDecoder *vd);
 
