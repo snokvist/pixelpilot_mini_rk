@@ -64,15 +64,15 @@ static void copy_label(char *dst, size_t dst_len, const char *src) {
     dst[len] = '\0';
 }
 
-struct metric_entry {
-    char label[64];
+struct feed_slot {
+    bool active;
+    bool is_metric;
+    bool has_value;
+    char text[64];
     double value;
-};
-
-struct snapshot_entry {
-    char label[64];
-    double value;
-    bool present;
+    uint64_t expiry_ms;
+    uint64_t last_emit_ms;
+    unsigned long long send_counter;
 };
 
 static bool parse_metric(const char *payload, const char *key, double *out) {
@@ -160,17 +160,23 @@ static size_t parse_number_array(const char *payload, const char *key, double ou
     return count;
 }
 
-static size_t extract_text_value_arrays(const char *payload, char labels[][64], double values[], size_t max) {
-    char tmp_labels[MAX_ENTRIES][64];
-    double tmp_values[MAX_ENTRIES];
-    size_t text_count = parse_string_array(payload, "text", tmp_labels, max);
-    size_t value_count = parse_number_array(payload, "value", tmp_values, max);
-    size_t count = text_count < value_count ? text_count : value_count;
-    for (size_t i = 0; i < count; ++i) {
-        copy_label(labels[i], sizeof(labels[i]), tmp_labels[i]);
-        values[i] = tmp_values[i];
+static bool parse_uint_field(const char *payload, const char *key, uint64_t *out) {
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char *pos = strstr(payload, pattern);
+    if (!pos) {
+        return false;
     }
-    return count;
+    pos += strlen(pattern);
+    while (*pos && isspace((unsigned char)*pos)) pos++;
+    errno = 0;
+    char *endptr = NULL;
+    unsigned long long value = strtoull(pos, &endptr, 10);
+    if (errno != 0 || endptr == pos) {
+        return false;
+    }
+    *out = (uint64_t)value;
+    return true;
 }
 
 static size_t extract_known_metrics(const char *payload, char labels[][64], double values[], size_t max) {
@@ -356,20 +362,10 @@ int main(int argc, char **argv)
         fflush(stdout);
     }
 
-    struct metric_entry entries[MAX_ENTRIES] = {0};
-    struct snapshot_entry last_sent[MAX_ENTRIES] = {0};
-    size_t entry_count = 0;
-    size_t last_sent_count = 0;
-    bool snapshot_valid = false;
+    struct feed_slot slots[MAX_ENTRIES] = {0};
 
-    const uint64_t stale_timeout_ms = 5000;
     const uint64_t connect_retry_ms = 1000;
     uint64_t last_connect_attempt_ms = 0;
-    uint64_t start_ms = now_ms();
-    uint64_t last_data_ms = 0;
-    uint64_t last_fallback_send_ms = 0;
-    uint64_t last_send_ms = 0;
-    uint64_t update_counter = 0;
 
     char udp_buf[512];
     char json_buf[512];
@@ -390,6 +386,7 @@ int main(int argc, char **argv)
 
         uint64_t now = now_ms();
         bool packet_updated = false;
+        bool state_changed = false;
 
         if (poll_rc > 0 && (pfd.revents & POLLIN)) {
             ssize_t n = recvfrom(udp_fd, udp_buf, sizeof(udp_buf) - 1, 0, NULL, NULL);
@@ -399,92 +396,124 @@ int main(int argc, char **argv)
             } else {
                 udp_buf[n] = '\0';
 
-                char parsed_labels[MAX_ENTRIES][64];
+                char parsed_texts[MAX_ENTRIES][64];
                 double parsed_values[MAX_ENTRIES];
-                size_t parsed_count = extract_text_value_arrays(udp_buf, parsed_labels, parsed_values, MAX_ENTRIES);
-                if (parsed_count == 0) {
-                    parsed_count = extract_known_metrics(udp_buf, parsed_labels, parsed_values, MAX_ENTRIES);
-                }
+                size_t text_count = parse_string_array(udp_buf, "text", parsed_texts, MAX_ENTRIES);
+                size_t value_count = parse_number_array(udp_buf, "value", parsed_values, MAX_ENTRIES);
+                uint64_t ttl_ms_field = 0;
+                bool has_ttl_field = parse_uint_field(udp_buf, "ttl_ms", &ttl_ms_field);
 
-                if (parsed_count > 0) {
-                    entry_count = parsed_count;
-                    for (size_t i = 0; i < entry_count; ++i) {
-                        copy_label(entries[i].label, sizeof(entries[i].label), parsed_labels[i]);
-                        entries[i].value = parsed_values[i];
+                if (text_count > 0 || value_count > 0) {
+                    size_t count = text_count > value_count ? text_count : value_count;
+                    for (size_t i = 0; i < count && i < MAX_ENTRIES; ++i) {
+                        const char *incoming_text = (i < text_count) ? parsed_texts[i] : "";
+                        bool text_nonempty = incoming_text && incoming_text[0] != '\0';
+                        bool has_value = (i < value_count);
+                        double value = has_value ? parsed_values[i] : 0.0;
+
+                        if (!text_nonempty && !has_value) {
+                            continue;
+                        }
+
+                        struct feed_slot *slot = &slots[i];
+                        bool prev_active = slot->active;
+                        bool prev_metric = slot->is_metric;
+                        double prev_value = slot->value;
+                        char prev_text[64];
+                        copy_label(prev_text, sizeof(prev_text), slot->text);
+
+                        if (has_value) {
+                            slot->is_metric = true;
+                            slot->has_value = true;
+                            slot->value = value;
+                        } else {
+                            slot->has_value = false;
+                            slot->value = 0.0;
+                        }
+
+                        if (text_nonempty) {
+                            copy_label(slot->text, sizeof(slot->text), incoming_text);
+                            if (!has_value) {
+                                slot->is_metric = false;
+                            }
+                        }
+
+                        slot->active = true;
+                        if (has_ttl_field) {
+                            slot->expiry_ms = ttl_ms_field > 0 ? now + ttl_ms_field : 0;
+                        } else {
+                            slot->expiry_ms = 0;
+                        }
+                        if (!prev_active) {
+                            slot->send_counter = 0;
+                            slot->last_emit_ms = 0;
+                        }
+
+                        if (!prev_active || prev_metric != slot->is_metric ||
+                            strcmp(prev_text, slot->text) != 0 ||
+                            (slot->has_value && (!prev_active || fabs(prev_value - slot->value) > 0.0001))) {
+                            state_changed = true;
+                        }
+                        packet_updated = true;
                     }
-                    for (size_t i = entry_count; i < MAX_ENTRIES; ++i) {
-                        entries[i].label[0] = '\0';
-                        entries[i].value = 0.0;
+                } else {
+                    char fallback_labels[MAX_ENTRIES][64];
+                    double fallback_values[MAX_ENTRIES];
+                    size_t fallback_count = extract_known_metrics(udp_buf, fallback_labels, fallback_values, MAX_ENTRIES);
+                    if (fallback_count > 0) {
+                        for (size_t i = 0; i < fallback_count && i < MAX_ENTRIES; ++i) {
+                            struct feed_slot *slot = &slots[i];
+                            bool prev_active = slot->active;
+                            double prev_value = slot->value;
+                            char prev_text[64];
+                            copy_label(prev_text, sizeof(prev_text), slot->text);
+
+                            copy_label(slot->text, sizeof(slot->text), fallback_labels[i]);
+                            slot->is_metric = true;
+                            slot->has_value = true;
+                            slot->value = fallback_values[i];
+                            slot->active = true;
+                            if (has_ttl_field) {
+                                slot->expiry_ms = ttl_ms_field > 0 ? now + ttl_ms_field : 0;
+                            } else {
+                                slot->expiry_ms = 0;
+                            }
+                            if (!prev_active) {
+                                slot->send_counter = 0;
+                                slot->last_emit_ms = 0;
+                            }
+
+                            if (!prev_active || strcmp(prev_text, slot->text) != 0 ||
+                                fabs(prev_value - slot->value) > 0.0001) {
+                                state_changed = true;
+                            }
+                        }
+                        packet_updated = true;
                     }
-                    last_data_ms = now;
-                    packet_updated = true;
                 }
             }
         }
 
-        bool have_entries = entry_count > 0;
-        bool fallback_active = false;
-        if (have_entries) {
-            if (last_data_ms == 0) {
-                if (now - start_ms >= stale_timeout_ms) {
-                    fallback_active = true;
-                }
-            } else if (now - last_data_ms >= stale_timeout_ms) {
-                fallback_active = true;
-            }
-        }
-
-        if (!have_entries) {
-            continue;
-        }
-
-        double current_values[MAX_ENTRIES];
-        bool present[MAX_ENTRIES];
-        size_t send_count = entry_count;
-        for (size_t i = 0; i < send_count; ++i) {
-            if (!entries[i].label[0]) {
-                present[i] = false;
-                current_values[i] = 0.0;
+        for (size_t i = 0; i < MAX_ENTRIES; ++i) {
+            struct feed_slot *slot = &slots[i];
+            if (!slot->active) {
                 continue;
             }
-            present[i] = true;
-            current_values[i] = fallback_active ? 0.0 : entries[i].value;
-        }
-
-        bool changed = !snapshot_valid || send_count != last_sent_count;
-        if (!changed) {
-            for (size_t i = 0; i < send_count; ++i) {
-                if (!present[i] && !last_sent[i].present) continue;
-                if (present[i] != last_sent[i].present ||
-                    strcmp(entries[i].label, last_sent[i].label) != 0 ||
-                    fabs(current_values[i] - last_sent[i].value) > 0.001) {
-                    changed = true;
-                    break;
-                }
+            if (slot->expiry_ms > 0 && now >= slot->expiry_ms) {
+                slot->active = false;
+                slot->has_value = false;
+                slot->is_metric = false;
+                slot->text[0] = '\0';
+                slot->value = 0.0;
+                slot->expiry_ms = 0;
+                slot->last_emit_ms = 0;
+                slot->send_counter = 0;
+                state_changed = true;
             }
         }
 
-        bool fallback_tick = false;
-        if (fallback_active) {
-            if (last_fallback_send_ms == 0 || (now - last_fallback_send_ms) >= 1000) {
-                fallback_tick = true;
-            }
-        } else {
-            last_fallback_send_ms = 0;
-        }
-
-        bool should_send = packet_updated || changed || fallback_tick;
-        if (!should_send) {
+        if (!packet_updated && !state_changed) {
             continue;
-        }
-
-        uint64_t next_count = update_counter + 1;
-        double freq_hz = 0.0;
-        if (last_send_ms != 0) {
-            uint64_t delta_ms = now - last_send_ms;
-            if (delta_ms > 0) {
-                freq_hz = 1000.0 / (double)delta_ms;
-            }
         }
 
         char text_buf[MAX_ENTRIES][64];
@@ -492,21 +521,39 @@ int main(int argc, char **argv)
         bool present_arr[MAX_ENTRIES];
         double values_arr[MAX_ENTRIES];
         size_t emit_count = 0;
-        for (size_t i = 0; i < send_count && emit_count < MAX_ENTRIES; ++i) {
-            if (!present[i]) continue;
-            values_arr[emit_count] = current_values[i];
-            snprintf(text_buf[emit_count], sizeof(text_buf[emit_count]),
-                     "%.32s #%llu @ %.2f Hz",
-                     entries[i].label[0] ? entries[i].label : "Metric",
-                     (unsigned long long)next_count,
-                     freq_hz);
+
+        for (size_t i = 0; i < MAX_ENTRIES; ++i) {
+            struct feed_slot *slot = &slots[i];
+            if (!slot->active) {
+                continue;
+            }
+
+            double freq_hz = 0.0;
+            if (slot->last_emit_ms != 0) {
+                uint64_t delta_ms = now - slot->last_emit_ms;
+                if (delta_ms > 0) {
+                    freq_hz = 1000.0 / (double)delta_ms;
+                }
+            }
+
+            if (slot->is_metric) {
+                snprintf(text_buf[emit_count], sizeof(text_buf[emit_count]),
+                         "%.32s #%llu @ %.2f Hz",
+                         slot->text[0] ? slot->text : "Metric",
+                         slot->send_counter + 1,
+                         freq_hz);
+            } else {
+                copy_label(text_buf[emit_count], sizeof(text_buf[emit_count]), slot->text);
+            }
+
             text_ptrs[emit_count] = text_buf[emit_count];
             present_arr[emit_count] = true;
-            emit_count++;
-        }
+            values_arr[emit_count] = slot->has_value ? slot->value : 0.0;
 
-        if (emit_count == 0) {
-            continue;
+            slot->last_emit_ms = now;
+            slot->send_counter++;
+
+            emit_count++;
         }
 
         int written = build_osd_payload(text_ptrs, values_arr, present_arr,
@@ -537,28 +584,10 @@ int main(int argc, char **argv)
             continue;
         }
 
-        last_send_ms = now;
-        update_counter = next_count;
-
         if (g_verbose) {
             fprintf(stdout, "Forwarded: %s", json_buf);
             fflush(stdout);
         }
-
-        if (fallback_active) {
-            last_fallback_send_ms = now;
-        }
-
-        for (size_t i = 0; i < emit_count; ++i) {
-            copy_label(last_sent[i].label, sizeof(last_sent[i].label), entries[i].label);
-            last_sent[i].value = values_arr[i];
-            last_sent[i].present = true;
-        }
-        for (size_t i = emit_count; i < last_sent_count; ++i) {
-            last_sent[i].present = false;
-        }
-        last_sent_count = emit_count;
-        snapshot_valid = true;
     }
 
     if (unix_fd >= 0) {
