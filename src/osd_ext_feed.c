@@ -406,6 +406,7 @@ int main(int argc, char **argv)
 
                 if (text_count > 0 || value_count > 0) {
                     size_t count = text_count > value_count ? text_count : value_count;
+                    bool any_applied = false;
                     for (size_t i = 0; i < count && i < MAX_ENTRIES; ++i) {
                         const char *incoming_text = (i < text_count) ? parsed_texts[i] : "";
                         bool text_nonempty = incoming_text && incoming_text[0] != '\0';
@@ -417,6 +418,13 @@ int main(int argc, char **argv)
                         }
 
                         struct feed_slot *slot = &slots[i];
+                        if (slot->active && slot->expiry_ms > now && !has_ttl_field) {
+                            if (g_verbose) {
+                                fprintf(stdout, "Ignoring slot %zu update while TTL active\n", i + 1);
+                                fflush(stdout);
+                            }
+                            continue;
+                        }
                         bool prev_active = slot->active;
                         bool prev_metric = slot->is_metric;
                         double prev_value = slot->value;
@@ -455,6 +463,9 @@ int main(int argc, char **argv)
                             (slot->has_value && (!prev_active || fabs(prev_value - slot->value) > 0.0001))) {
                             state_changed = true;
                         }
+                        any_applied = true;
+                    }
+                    if (any_applied) {
                         packet_updated = true;
                     }
                 } else {
@@ -462,8 +473,16 @@ int main(int argc, char **argv)
                     double fallback_values[MAX_ENTRIES];
                     size_t fallback_count = extract_known_metrics(udp_buf, fallback_labels, fallback_values, MAX_ENTRIES);
                     if (fallback_count > 0) {
+                        bool any_applied = false;
                         for (size_t i = 0; i < fallback_count && i < MAX_ENTRIES; ++i) {
                             struct feed_slot *slot = &slots[i];
+                            if (slot->active && slot->expiry_ms > now && !has_ttl_field) {
+                                if (g_verbose) {
+                                    fprintf(stdout, "Ignoring slot %zu metric update while TTL active\n", i + 1);
+                                    fflush(stdout);
+                                }
+                                continue;
+                            }
                             bool prev_active = slot->active;
                             double prev_value = slot->value;
                             char prev_text[64];
@@ -488,8 +507,11 @@ int main(int argc, char **argv)
                                 fabs(prev_value - slot->value) > 0.0001) {
                                 state_changed = true;
                             }
+                            any_applied = true;
                         }
-                        packet_updated = true;
+                        if (any_applied) {
+                            packet_updated = true;
+                        }
                     }
                 }
             }
