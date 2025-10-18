@@ -45,6 +45,12 @@ keys. Of note:
   per-frame parameters are provided. This is useful on hardware without motion
   metadata because it keeps the RGA copy path active even with the demo wave
   disabled.
+* `--stabilizer-guard-band-x` / `--stabilizer-guard-band-y` (or
+  `guard-band-x` / `guard-band-y` in the INI) reserve a symmetric crop margin
+  around the decoded frame. The guard band keeps the steady-state crop centred
+  and defines how much negative and positive translation is possible before the
+  stabiliser hits the stride boundary. Leaving these options unset defaults to
+  half of the available stride headroom on each axis.
 
 Typical command line enablement looks like:
 
@@ -60,16 +66,17 @@ waveform enabled, so you can observe the stabiliser at work immediately.
 
 If you prefer to keep the source frame aligned while still exercising the
 stabiliser, use `config/stabilizer-manual.ini`. It enables diagnostics, turns
-off the waveform, and requests a static horizontal crop so the output frame
-visibly differs from the raw decoder buffer. Manual offsets are clamped by both
-`max-translation` and the stride margin exposed by the decoder. When an offset
-is reduced you will see a one-off diagnostic similar to:
+off the waveform, reserves a symmetric guard band, and requests a static
+horizontal crop so the output frame visibly differs from the raw decoder
+buffer. Manual offsets are clamped by both `max-translation` and the stride
+margin exposed by the decoder. When an offset is reduced you will see a one-off
+diagnostic similar to:
 
 ```
-Video stabilizer manual offsets (200,200) constrained by stride margin 32 x 0; crop=(32,0)
+Video stabilizer manual offsets (200,200) constrained by stride margin 32 x 0 (guard 16 x 0); crop=(16,0)
 ```
 
-Increase `max-translation` or adjust your expectations based on the available
+Increase `max-translation` or adjust the guard band based on the available
 stride headroom for the format you are decoding.
 
 With diagnostics enabled the log will periodically emit entries such as:

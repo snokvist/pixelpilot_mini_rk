@@ -1150,6 +1150,14 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->stabilizer.manual_offset_y_px = strtof(value, NULL);
             return 0;
         }
+        if (strcasecmp(key, "guard-band-x") == 0 || strcasecmp(key, "base-crop-x") == 0) {
+            cfg->stabilizer.guard_band_x_px = strtof(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "guard-band-y") == 0 || strcasecmp(key, "base-crop-y") == 0) {
+            cfg->stabilizer.guard_band_y_px = strtof(value, NULL);
+            return 0;
+        }
         return -1;
     }
     if (strcasecmp(section, "gst") == 0) {

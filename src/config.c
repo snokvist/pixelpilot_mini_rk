@@ -59,6 +59,8 @@ static void usage(const char *prog) {
             "  --stabilizer-manual-disable  (disable manual translation override)\n"
             "  --stabilizer-manual-offset-x PX (horizontal manual translation in pixels)\n"
             "  --stabilizer-manual-offset-y PX (vertical manual translation in pixels)\n"
+            "  --stabilizer-guard-band-x PX (base crop margin per side along X; default: auto)\n"
+            "  --stabilizer-guard-band-y PX (base crop margin per side along Y; default: auto)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -218,6 +220,8 @@ void cfg_defaults(AppCfg *c) {
     c->stabilizer.manual_enable = 0;
     c->stabilizer.manual_offset_x_px = 0.0f;
     c->stabilizer.manual_offset_y_px = 0.0f;
+    c->stabilizer.guard_band_x_px = -1.0f;
+    c->stabilizer.guard_band_y_px = -1.0f;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -512,6 +516,14 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->stabilizer.manual_offset_y_px = (float)atof(argv[++i]);
         } else if (!strcmp(argv[i], "--stabilizer-manual-offset-y")) {
             LOGE("--stabilizer-manual-offset-y requires a numeric argument");
+        } else if (!strcmp(argv[i], "--stabilizer-guard-band-x") && i + 1 < argc) {
+            cfg->stabilizer.guard_band_x_px = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-guard-band-x")) {
+            LOGE("--stabilizer-guard-band-x requires a numeric argument");
+        } else if (!strcmp(argv[i], "--stabilizer-guard-band-y") && i + 1 < argc) {
+            cfg->stabilizer.guard_band_y_px = (float)atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--stabilizer-guard-band-y")) {
+            LOGE("--stabilizer-guard-band-y requires a numeric argument");
             return -1;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;

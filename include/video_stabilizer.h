@@ -20,6 +20,8 @@ typedef struct {
     int manual_enable;
     float manual_offset_x_px;
     float manual_offset_y_px;
+    float guard_band_x_px;
+    float guard_band_y_px;
 } StabilizerConfig;
 
 typedef struct {

@@ -67,6 +67,8 @@ int main(void) {
     cfg.manual_enable = 0;
     cfg.manual_offset_x_px = 0.0f;
     cfg.manual_offset_y_px = 0.0f;
+    cfg.guard_band_x_px = -1.0f;
+    cfg.guard_band_y_px = -1.0f;
 
     VideoStabilizer *stabilizer = video_stabilizer_new();
     assert(stabilizer != NULL);
@@ -188,6 +190,8 @@ int main(void) {
     cfg.manual_enable = 1;
     cfg.manual_offset_x_px = 4.0f;
     cfg.manual_offset_y_px = 0.0f;
+    cfg.guard_band_x_px = 8.0f;
+    cfg.guard_band_y_px = 8.0f;
     video_stabilizer_update(stabilizer, &cfg);
 
     memset(&params, 0, sizeof(params));

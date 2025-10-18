@@ -74,6 +74,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[stabilizer].diagnostics` | `true` prints periodic info logs confirming the stabiliser is active. Mirrors `--stabilizer-diagnostics`. |
 | `[stabilizer].demo-enable` / `demo-amplitude` / `demo-frequency` | Enables the built-in verification waveform and controls its pixel amplitude and oscillation rate. Mirrors `--stabilizer-demo-*`. |
 | `[stabilizer].manual-enable` / `manual-offset-x` / `manual-offset-y` | Applies a fixed translation when no per-frame parameters are available. Mirrors `--stabilizer-manual-*`. |
+| `[stabilizer].guard-band-x` / `guard-band-y` | Symmetric crop margin reserved on each axis to keep the steady-state crop centred and define the usable translation range. Mirrors `--stabilizer-guard-band-*`. |
 | `[record].enable` | `true` to persist the H.265 video elementary stream to MP4 via minimp4. |
 | `[record].path` | Optional output path or directory for the MP4 file. If omitted, files land in `/media` with a timestamped name (video only, no audio). |
 | `[record].mode` | Selects the minimp4 writer mode: `standard` (seekable, updates MP4 metadata at the end), `sequential` (append-only, avoids seeks), or `fragmented` (stream-friendly MP4 fragments). |
@@ -117,18 +118,20 @@ if the module cannot run (for example, when librga support is missing).
 
 When you want to validate the pipeline without the oscillating demo waveform,
 point `--config` at `config/stabilizer-manual.ini`. It enables diagnostics,
-keeps the waveform disabled, and applies a static horizontal crop so the
-stabilised buffer always differs from the decoder output. The manual offsets
-are clamped by both the `max-translation` value and the decoder's stride margin
-(`hor_stride - width` / `ver_stride - height`). If your requested offset exceeds
-those limits the log will emit a one-off message such as:
+keeps the waveform disabled, reserves a symmetric guard band, and applies a
+static horizontal crop so the stabilised buffer always differs from the decoder
+output. The manual offsets are clamped by both the `max-translation` value and
+the decoder's stride margin (`hor_stride - width` / `ver_stride - height`). If
+your requested offset exceeds those limits the log will emit a one-off message
+such as:
 
 ```
-Video stabilizer manual offsets (200,200) constrained by stride margin 32 x 0; crop=(32,0)
+Video stabilizer manual offsets (200,200) constrained by stride margin 32 x 0 (guard 16 x 0); crop=(16,0)
 ```
 
 This confirms the stabiliser is still active even though the hardware cannot
-accommodate the full translation.
+accommodate the full translation. Adjust the guard band or translation clamp to
+suit your sensor's stride headroom.
 
 Update `config/pixelpilot_mini.ini` (installed to `/etc/pixelpilot_mini.ini` by
 `make install`) to keep the stabiliser enabled on boot.
