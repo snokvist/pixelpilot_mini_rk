@@ -65,6 +65,51 @@ linger:
 When the helper thread observes that `clock_gettime(CLOCK_MONOTONIC)` exceeds
 `last_update_ns + ttl_ms`, it zeroes the snapshot before the next OSD refresh.
 
+### Zoom/crop control channel
+
+* Text slot 8 (`ext.text8`) is reserved for live zoom instructions that affect the
+  primary video plane. A well-formed command uses the prefix `zoom=` followed by
+  either the literal `off` or four comma-separated integers that describe the
+  crop **as percentages** of the current decoded frame:
+
+  ```text
+  zoom=SCALE_X,SCALE_Y,CENTER_X,CENTER_Y
+  ```
+
+  * `SCALE_X` / `SCALE_Y` request the window size as a percentage of the decoded
+    frame. `100,100` shows the full frame; `50,50` crops to half the width and
+    height. Values below 1 are rejected. Values above 100 are clamped to 100.
+  * `CENTER_X` / `CENTER_Y` position the window by expressing its centre as a
+    percentage of the frame. `50,50` keeps the crop centred, while `0,100` anchors
+    it to the bottom-left. Positions above 100 are clamped toward the edges.
+
+* The decoder clamps both the requested scale and the resulting window so the
+  plane never samples outside the decoded frame. If the sender places the crop
+  partially off-screen (for example `50,50,100,100`), the window is nudged back
+  inside the frame before programming the plane. Any rejection or clamp is logged
+  once when the command is applied.
+* The DRM plane can only upscale by a factor of four in either direction, so the
+  receiver enforces a minimum crop size to stay within that limit. Requests that
+  would require more magnification are automatically widened or heightened to the
+  smallest allowed size and a log entry records the adjustment. After that clamp,
+  the crop is rounded to the chroma-aligned sizes that the Rockchip plane
+  accepts: widths and heights snap to four-pixel increments and the origin lands
+  on an even pixel. Expect the applied percentages in the log to differ slightly
+  from what was requested. On a 1080p output fed with a 1280×720 stream, this
+  means percentages much below `25,38` cannot be honoured.
+* Commands are debounced: the receiver only reprograms the plane when the text
+  changes. Publish the same string again only when refreshing its TTL.
+* Include `ttl_ms` with every zoom update so the request naturally expires when
+  the publisher stops sending data. A typical one-second zoom command that crops
+  to half size around the centre looks like:
+
+  ```json
+  {"text":["","","","","","","","zoom=50,50,50,50"], "ttl_ms": 1000}
+  ```
+
+* Clearing the slot (empty string) or publishing `zoom=off` restores the full
+  frame.
+
 ## Token exposure
 
 Extend `osd_token_format()` so that strings become available through

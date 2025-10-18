@@ -35,6 +35,15 @@
 
 #define DECODER_READ_BUF_SIZE (1024 * 1024)
 #define DECODER_MAX_FRAMES 24
+#define VIDEO_DECODER_MAX_PLANE_UPSCALE 4.0
+/*
+ * RK356x VOP planes sampling NV12 surfaces expect crop widths/heights that
+ * align to chroma blocks and even source offsets. Align crops to 4 pixels in
+ * both directions and keep the origin on an even boundary to satisfy the
+ * hardware without over-constraining the caller.
+ */
+#define VIDEO_DECODER_ZOOM_DIMENSION_ALIGNMENT 4u
+#define VIDEO_DECODER_ZOOM_POSITION_ALIGNMENT 2u
 
 struct FrameSlot {
     int prime_fd;
@@ -58,6 +67,11 @@ struct VideoDecoder {
     int mode_h;
     uint32_t src_w;
     uint32_t src_h;
+
+    gboolean zoom_enabled;
+    VideoDecoderZoomRequest zoom_request;
+    VideoDecoderZoomRect zoom_rect;
+    uint32_t last_committed_fb;
 
     uint32_t prop_fb_id;
     uint32_t prop_crtc_id;
@@ -143,6 +157,435 @@ static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size)
         memcpy(dst, src, size);
     }
 #endif
+}
+
+static uint32_t align_dimension_to(uint32_t value, uint32_t max_value, uint32_t alignment) {
+    if (max_value == 0) {
+        return 0;
+    }
+    if (value == 0) {
+        value = 1;
+    }
+    if (value > max_value) {
+        value = max_value;
+    }
+
+    if (alignment <= 1) {
+        return value;
+    }
+
+    if (max_value < alignment) {
+        return max_value;
+    }
+
+    uint32_t remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+
+    uint32_t upward = value + (alignment - remainder);
+    if (upward <= max_value) {
+        return upward;
+    }
+
+    uint32_t downward = value - remainder;
+    if (downward >= alignment) {
+        return downward;
+    }
+
+    uint32_t max_aligned = max_value - (max_value % alignment);
+    if (max_aligned >= alignment) {
+        return max_aligned;
+    }
+
+    return alignment <= max_value ? alignment : max_value;
+}
+
+static uint32_t align_position_to(double desired, uint32_t max_value, uint32_t alignment) {
+    if (max_value == 0) {
+        return 0;
+    }
+
+    if (desired < 0.0) {
+        desired = 0.0;
+    }
+    double max_d = (double)max_value;
+    if (desired > max_d) {
+        desired = max_d;
+    }
+
+    uint32_t candidate = (uint32_t)llround(desired);
+    if (candidate > max_value) {
+        candidate = max_value;
+    }
+
+    if (alignment <= 1) {
+        return candidate;
+    }
+
+    uint32_t remainder = candidate % alignment;
+    if (remainder == 0) {
+        return candidate;
+    }
+
+    uint32_t down = candidate - remainder;
+    uint32_t up = candidate + (alignment - remainder);
+    if (up > max_value) {
+        return down;
+    }
+    if (down > max_value) {
+        return up;
+    }
+
+    double down_error = fabs(desired - (double)down);
+    double up_error = fabs((double)up - desired);
+    if (up_error < down_error) {
+        return up;
+    }
+    return down;
+}
+
+static gboolean align_zoom_rect_for_subsampling(uint32_t max_w, uint32_t max_h, VideoDecoderZoomRect *rect) {
+    if (rect == NULL) {
+        return FALSE;
+    }
+    if (rect->w == 0 || rect->h == 0) {
+        return FALSE;
+    }
+
+    double center_x = (double)rect->x + ((double)rect->w / 2.0);
+    double center_y = (double)rect->y + ((double)rect->h / 2.0);
+
+    uint32_t aligned_w = align_dimension_to(rect->w, max_w, VIDEO_DECODER_ZOOM_DIMENSION_ALIGNMENT);
+    uint32_t aligned_h = align_dimension_to(rect->h, max_h, VIDEO_DECODER_ZOOM_DIMENSION_ALIGNMENT);
+    if (aligned_w == 0 || aligned_h == 0) {
+        return FALSE;
+    }
+
+    if (aligned_w > max_w) {
+        aligned_w = max_w;
+    }
+    if (aligned_h > max_h) {
+        aligned_h = max_h;
+    }
+
+    double desired_x = center_x - ((double)aligned_w / 2.0);
+    double desired_y = center_y - ((double)aligned_h / 2.0);
+
+    uint32_t max_x = (aligned_w >= max_w) ? 0 : max_w - aligned_w;
+    uint32_t max_y = (aligned_h >= max_h) ? 0 : max_h - aligned_h;
+
+    uint32_t aligned_x = align_position_to(desired_x, max_x, VIDEO_DECODER_ZOOM_POSITION_ALIGNMENT);
+    uint32_t aligned_y = align_position_to(desired_y, max_y, VIDEO_DECODER_ZOOM_POSITION_ALIGNMENT);
+
+    rect->w = aligned_w;
+    rect->h = aligned_h;
+    rect->x = aligned_x;
+    rect->y = aligned_y;
+
+    if (rect->x + rect->w > max_w) {
+        rect->x = (max_w > rect->w) ? (max_w - rect->w) : 0;
+    }
+    if (rect->y + rect->h > max_h) {
+        rect->y = (max_h > rect->h) ? (max_h - rect->h) : 0;
+    }
+
+    return rect->w > 0 && rect->h > 0;
+}
+
+static gboolean sanitize_zoom_rect(uint32_t max_w, uint32_t max_h, VideoDecoderZoomRect *rect) {
+    if (rect == NULL || max_w == 0 || max_h == 0) {
+        return FALSE;
+    }
+    if (rect->w == 0 || rect->h == 0) {
+        return FALSE;
+    }
+    if (rect->w > max_w) {
+        rect->w = max_w;
+    }
+    if (rect->h > max_h) {
+        rect->h = max_h;
+    }
+    if (rect->x >= max_w) {
+        rect->x = max_w > rect->w ? max_w - rect->w : 0;
+    }
+    if (rect->y >= max_h) {
+        rect->y = max_h > rect->h ? max_h - rect->h : 0;
+    }
+    if (rect->x + rect->w > max_w) {
+        rect->x = max_w > rect->w ? max_w - rect->w : 0;
+    }
+    if (rect->y + rect->h > max_h) {
+        rect->y = max_h > rect->h ? max_h - rect->h : 0;
+    }
+
+    if (!align_zoom_rect_for_subsampling(max_w, max_h, rect)) {
+        return FALSE;
+    }
+
+    if (rect->x + rect->w > max_w) {
+        rect->x = max_w > rect->w ? max_w - rect->w : 0;
+    }
+    if (rect->y + rect->h > max_h) {
+        rect->y = max_h > rect->h ? max_h - rect->h : 0;
+    }
+
+    return rect->w > 0 && rect->h > 0;
+}
+
+static void compute_plane_destination(uint32_t mode_w, uint32_t mode_h, uint32_t src_w, uint32_t src_h,
+                                      uint32_t *dst_w_out, uint32_t *dst_h_out) {
+    if (dst_w_out) {
+        *dst_w_out = src_w;
+    }
+    if (dst_h_out) {
+        *dst_h_out = src_h;
+    }
+
+    if (mode_w == 0 || mode_h == 0 || src_w == 0 || src_h == 0) {
+        return;
+    }
+
+    double src_ar = (double)src_w / (double)src_h;
+    double mode_ar = (double)mode_w / (double)mode_h;
+
+    uint32_t dst_w = mode_w;
+    uint32_t dst_h = mode_h;
+
+    if (src_ar > mode_ar) {
+        dst_w = mode_w;
+        dst_h = (uint32_t)lround((double)mode_w / src_ar);
+        if (dst_h == 0) {
+            dst_h = 1;
+        }
+        if (dst_h > mode_h) {
+            dst_h = mode_h;
+        }
+    } else {
+        dst_h = mode_h;
+        dst_w = (uint32_t)lround((double)mode_h * src_ar);
+        if (dst_w == 0) {
+            dst_w = 1;
+        }
+        if (dst_w > mode_w) {
+            dst_w = mode_w;
+        }
+    }
+
+    if (dst_w_out) {
+        *dst_w_out = dst_w;
+    }
+    if (dst_h_out) {
+        *dst_h_out = dst_h;
+    }
+}
+
+static gboolean enforce_plane_scaler_limits(const VideoDecoder *vd, uint32_t frame_w, uint32_t frame_h,
+                                            VideoDecoderZoomRect *rect, gboolean *changed_out) {
+    if (rect == NULL) {
+        return FALSE;
+    }
+
+    if (changed_out) {
+        *changed_out = FALSE;
+    }
+
+    if (vd == NULL || vd->mode_w <= 0 || vd->mode_h <= 0) {
+        return TRUE;
+    }
+
+    for (int iter = 0; iter < 4; ++iter) {
+        if (rect->w == 0 || rect->h == 0) {
+            return FALSE;
+        }
+
+        uint32_t dst_w = rect->w;
+        uint32_t dst_h = rect->h;
+        compute_plane_destination((uint32_t)vd->mode_w, (uint32_t)vd->mode_h, rect->w, rect->h, &dst_w, &dst_h);
+
+        double scale_w = (double)dst_w / (double)rect->w;
+        double scale_h = (double)dst_h / (double)rect->h;
+        gboolean adjusted = FALSE;
+
+        double center_x = (double)rect->x + ((double)rect->w / 2.0);
+        double center_y = (double)rect->y + ((double)rect->h / 2.0);
+
+        if (scale_w > VIDEO_DECODER_MAX_PLANE_UPSCALE + 1e-6) {
+            double min_w = ceil((double)dst_w / VIDEO_DECODER_MAX_PLANE_UPSCALE);
+            if (min_w < 1.0) {
+                min_w = 1.0;
+            }
+            if (min_w > (double)frame_w) {
+                min_w = (double)frame_w;
+            }
+            if (min_w > (double)rect->w) {
+                rect->w = (uint32_t)min_w;
+                adjusted = TRUE;
+            }
+        }
+
+        if (scale_h > VIDEO_DECODER_MAX_PLANE_UPSCALE + 1e-6) {
+            double min_h = ceil((double)dst_h / VIDEO_DECODER_MAX_PLANE_UPSCALE);
+            if (min_h < 1.0) {
+                min_h = 1.0;
+            }
+            if (min_h > (double)frame_h) {
+                min_h = (double)frame_h;
+            }
+            if (min_h > (double)rect->h) {
+                rect->h = (uint32_t)min_h;
+                adjusted = TRUE;
+            }
+        }
+
+        if (!adjusted) {
+            break;
+        }
+
+        if (rect->w > frame_w) {
+            rect->w = frame_w;
+        }
+        if (rect->h > frame_h) {
+            rect->h = frame_h;
+        }
+
+        double max_x = (double)frame_w - (double)rect->w;
+        double max_y = (double)frame_h - (double)rect->h;
+
+        double new_x = center_x - ((double)rect->w / 2.0);
+        double new_y = center_y - ((double)rect->h / 2.0);
+
+        if (new_x < 0.0) {
+            new_x = 0.0;
+        }
+        if (new_y < 0.0) {
+            new_y = 0.0;
+        }
+        if (new_x > max_x) {
+            new_x = max_x;
+        }
+        if (new_y > max_y) {
+            new_y = max_y;
+        }
+
+        rect->x = (uint32_t)llround(new_x);
+        rect->y = (uint32_t)llround(new_y);
+
+        if (!sanitize_zoom_rect(frame_w, frame_h, rect)) {
+            return FALSE;
+        }
+
+        if (changed_out) {
+            *changed_out = TRUE;
+        }
+    }
+
+    uint32_t final_dst_w = rect->w;
+    uint32_t final_dst_h = rect->h;
+    compute_plane_destination((uint32_t)vd->mode_w, (uint32_t)vd->mode_h, rect->w, rect->h, &final_dst_w, &final_dst_h);
+
+    double final_scale_w = (double)final_dst_w / (double)rect->w;
+    double final_scale_h = (double)final_dst_h / (double)rect->h;
+
+    if (final_scale_w > VIDEO_DECODER_MAX_PLANE_UPSCALE + 1e-6 ||
+        final_scale_h > VIDEO_DECODER_MAX_PLANE_UPSCALE + 1e-6) {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static gboolean sanitize_zoom_request(VideoDecoderZoomRequest *request) {
+    if (request == NULL) {
+        return FALSE;
+    }
+    if (request->scale_x_percent == 0 || request->scale_y_percent == 0) {
+        return FALSE;
+    }
+    if (request->scale_x_percent > 100) {
+        request->scale_x_percent = 100;
+    }
+    if (request->scale_y_percent > 100) {
+        request->scale_y_percent = 100;
+    }
+    if (request->center_x_percent > 100) {
+        request->center_x_percent = 100;
+    }
+    if (request->center_y_percent > 100) {
+        request->center_y_percent = 100;
+    }
+    return TRUE;
+}
+
+static gboolean compute_zoom_rect_from_request(uint32_t frame_w, uint32_t frame_h,
+                                               const VideoDecoderZoomRequest *request,
+                                               VideoDecoderZoomRect *rect) {
+    if (rect == NULL || request == NULL) {
+        return FALSE;
+    }
+    if (frame_w == 0 || frame_h == 0) {
+        return FALSE;
+    }
+
+    double scale_x = (double)request->scale_x_percent / 100.0;
+    double scale_y = (double)request->scale_y_percent / 100.0;
+    if (scale_x <= 0.0 || scale_y <= 0.0) {
+        return FALSE;
+    }
+
+    uint32_t width = (uint32_t)ceil((double)frame_w * scale_x);
+    uint32_t height = (uint32_t)ceil((double)frame_h * scale_y);
+    if (width == 0) {
+        width = 1;
+    }
+    if (height == 0) {
+        height = 1;
+    }
+    if (width > frame_w) {
+        width = frame_w;
+    }
+    if (height > frame_h) {
+        height = frame_h;
+    }
+
+    double center_x = ((double)frame_w - 1.0) * ((double)request->center_x_percent / 100.0);
+    double center_y = ((double)frame_h - 1.0) * ((double)request->center_y_percent / 100.0);
+
+    double half_w = (double)width / 2.0;
+    double half_h = (double)height / 2.0;
+
+    double left = center_x - half_w;
+    double top = center_y - half_h;
+
+    double max_left = (double)frame_w - (double)width;
+    double max_top = (double)frame_h - (double)height;
+
+    if (left < 0.0) {
+        left = 0.0;
+    }
+    if (top < 0.0) {
+        top = 0.0;
+    }
+    if (left > max_left) {
+        left = max_left;
+    }
+    if (top > max_top) {
+        top = max_top;
+    }
+
+    rect->w = width;
+    rect->h = height;
+    rect->x = (uint32_t)llround(left);
+    rect->y = (uint32_t)llround(top);
+
+    if (rect->x + rect->w > frame_w) {
+        rect->x = frame_w - rect->w;
+    }
+    if (rect->y + rect->h > frame_h) {
+        rect->y = frame_h - rect->h;
+    }
+
+    return rect->w > 0 && rect->h > 0;
 }
 
 static void log_decoder_neon_status_once(void) {
@@ -234,15 +677,49 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         return -1;
     }
 
-    if (src_w == 0) {
-        src_w = vd->src_w ? vd->src_w : (uint32_t)vd->mode_w;
-    } else {
-        vd->src_w = src_w;
+    uint32_t base_src_w = 0;
+    uint32_t base_src_h = 0;
+    gboolean zoom_enabled = FALSE;
+    VideoDecoderZoomRect zoom_rect = {0};
+
+    g_mutex_lock(&vd->lock);
+    base_src_w = vd->src_w;
+    base_src_h = vd->src_h;
+    if (src_w != 0) {
+        base_src_w = src_w;
+    } else if (base_src_w == 0) {
+        base_src_w = vd->mode_w > 0 ? (uint32_t)vd->mode_w : 1;
     }
-    if (src_h == 0) {
-        src_h = vd->src_h ? vd->src_h : (uint32_t)vd->mode_h;
-    } else {
-        vd->src_h = src_h;
+    if (src_h != 0) {
+        base_src_h = src_h;
+    } else if (base_src_h == 0) {
+        base_src_h = vd->mode_h > 0 ? (uint32_t)vd->mode_h : 1;
+    }
+    zoom_enabled = vd->zoom_enabled;
+    zoom_rect = vd->zoom_rect;
+    g_mutex_unlock(&vd->lock);
+
+    if (base_src_w == 0) {
+        base_src_w = 1;
+    }
+    if (base_src_h == 0) {
+        base_src_h = 1;
+    }
+
+    gboolean use_zoom = FALSE;
+    VideoDecoderZoomRect zoom_local = zoom_rect;
+    if (zoom_enabled && sanitize_zoom_rect(base_src_w, base_src_h, &zoom_local)) {
+        use_zoom = TRUE;
+    }
+
+    uint32_t display_src_w = use_zoom ? zoom_local.w : base_src_w;
+    uint32_t display_src_h = use_zoom ? zoom_local.h : base_src_h;
+
+    if (display_src_w == 0) {
+        display_src_w = 1;
+    }
+    if (display_src_h == 0) {
+        display_src_h = 1;
     }
 
     int dst_x = 0;
@@ -250,8 +727,8 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     int dst_w = vd->mode_w;
     int dst_h = vd->mode_h;
 
-    if (src_w > 0 && src_h > 0 && vd->mode_w > 0 && vd->mode_h > 0) {
-        double src_ar = (double)src_w / (double)src_h;
+    if (display_src_w > 0 && display_src_h > 0 && vd->mode_w > 0 && vd->mode_h > 0) {
+        double src_ar = (double)display_src_w / (double)display_src_h;
         double mode_ar = (double)vd->mode_w / (double)vd->mode_h;
 
         if (src_ar > 0.0 && mode_ar > 0.0) {
@@ -280,16 +757,21 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         }
     }
 
+    uint64_t src_x_q16 = use_zoom ? ((uint64_t)zoom_local.x << 16) : 0;
+    uint64_t src_y_q16 = use_zoom ? ((uint64_t)zoom_local.y << 16) : 0;
+    uint64_t src_w_q16 = (uint64_t)(use_zoom ? zoom_local.w : base_src_w) << 16;
+    uint64_t src_h_q16 = (uint64_t)(use_zoom ? zoom_local.h : base_src_h) << 16;
+
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_fb_id, fb_id);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_id, vd->crtc_id);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_x, dst_x);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_y, dst_y);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_w, dst_w);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_h, dst_h);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_x, 0);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_y, 0);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_w, (uint64_t)src_w << 16);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_h, (uint64_t)src_h << 16);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_x, src_x_q16);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_y, src_y_q16);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_w, src_w_q16);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_h, src_h_q16);
 
     int ret = drmModeAtomicCommit(vd->drm_fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
     if (ret != 0 && errno == EBUSY) {
@@ -297,6 +779,20 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     }
     if (ret != 0) {
         LOGW("Atomic commit failed: %s", g_strerror(errno));
+    } else {
+        g_mutex_lock(&vd->lock);
+        if (src_w != 0) {
+            vd->src_w = src_w;
+        } else if (vd->src_w == 0) {
+            vd->src_w = base_src_w;
+        }
+        if (src_h != 0) {
+            vd->src_h = src_h;
+        } else if (vd->src_h == 0) {
+            vd->src_h = base_src_h;
+        }
+        vd->last_committed_fb = fb_id;
+        g_mutex_unlock(&vd->lock);
     }
     drmModeAtomicFree(req);
     return ret;
@@ -389,8 +885,26 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
     vd->mpi->control(vd->ctx, MPP_DEC_SET_EXT_BUF_GROUP, vd->frm_grp);
     vd->mpi->control(vd->ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
 
+    g_mutex_lock(&vd->lock);
     vd->src_w = width;
     vd->src_h = height;
+    if (vd->zoom_enabled) {
+        VideoDecoderZoomRect adjusted = {0};
+        if (!compute_zoom_rect_from_request(width, height, &vd->zoom_request, &adjusted) ||
+            !sanitize_zoom_rect(width, height, &adjusted)) {
+            LOGW("Video decoder: disabling zoom after %ux%u format change", width, height);
+            vd->zoom_enabled = FALSE;
+            memset(&vd->zoom_request, 0, sizeof(vd->zoom_request));
+            memset(&vd->zoom_rect, 0, sizeof(vd->zoom_rect));
+        } else if (adjusted.x != vd->zoom_rect.x || adjusted.y != vd->zoom_rect.y || adjusted.w != vd->zoom_rect.w ||
+                   adjusted.h != vd->zoom_rect.h) {
+            LOGI("Video decoder: clamped zoom to %ux%u+%u,%u for %ux%u frame", adjusted.w, adjusted.h,
+                 adjusted.x, adjusted.y, width, height);
+            vd->zoom_rect = adjusted;
+        }
+    }
+    g_mutex_unlock(&vd->lock);
+
     commit_plane(vd, vd->frame_map[0].fb_id, width, height);
     return 0;
 }
@@ -750,6 +1264,128 @@ void video_decoder_send_eos(VideoDecoder *vd) {
         }
         g_usleep(2000);
     }
+}
+
+int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecoderZoomRequest *request) {
+    if (vd == NULL) {
+        return -1;
+    }
+    if (!enabled) {
+        g_mutex_lock(&vd->lock);
+        gboolean was_enabled = vd->zoom_enabled;
+        vd->zoom_enabled = FALSE;
+        memset(&vd->zoom_request, 0, sizeof(vd->zoom_request));
+        memset(&vd->zoom_rect, 0, sizeof(vd->zoom_rect));
+        uint32_t fb = was_enabled ? vd->last_committed_fb : 0;
+        g_mutex_unlock(&vd->lock);
+        if (was_enabled && fb != 0) {
+            if (commit_plane(vd, fb, 0, 0) != 0) {
+                LOGW("Video decoder: failed to clear zoom on framebuffer %u", fb);
+            }
+        }
+        return 0;
+    }
+
+    if (request == NULL) {
+        LOGW("Video decoder: zoom request missing parameters");
+        return -1;
+    }
+
+    g_mutex_lock(&vd->lock);
+    uint32_t max_w = vd->src_w ? vd->src_w : (uint32_t)vd->mode_w;
+    uint32_t max_h = vd->src_h ? vd->src_h : (uint32_t)vd->mode_h;
+    VideoDecoderZoomRequest sanitized_request = *request;
+    gboolean changed = FALSE;
+
+    if (!sanitize_zoom_request(&sanitized_request)) {
+        g_mutex_unlock(&vd->lock);
+        LOGW("Video decoder: rejected zoom percentages %u%%x%u%% @ %u%%,%u%%",
+             request->scale_x_percent, request->scale_y_percent, request->center_x_percent, request->center_y_percent);
+        return -1;
+    }
+
+    gboolean request_was_clamped = sanitized_request.scale_x_percent != request->scale_x_percent ||
+                                   sanitized_request.scale_y_percent != request->scale_y_percent ||
+                                   sanitized_request.center_x_percent != request->center_x_percent ||
+                                   sanitized_request.center_y_percent != request->center_y_percent;
+
+    if (max_w == 0 || max_h == 0) {
+        gboolean queued_request_changed = !vd->zoom_enabled ||
+                                          vd->zoom_request.scale_x_percent != sanitized_request.scale_x_percent ||
+                                          vd->zoom_request.scale_y_percent != sanitized_request.scale_y_percent ||
+                                          vd->zoom_request.center_x_percent != sanitized_request.center_x_percent ||
+                                          vd->zoom_request.center_y_percent != sanitized_request.center_y_percent;
+        if (queued_request_changed) {
+            vd->zoom_enabled = TRUE;
+            vd->zoom_request = sanitized_request;
+            memset(&vd->zoom_rect, 0, sizeof(vd->zoom_rect));
+        }
+        g_mutex_unlock(&vd->lock);
+        LOGI("Video decoder: queued zoom request (%u%%x%u%% @ %u%%,%u%%) until frame size is known",
+             sanitized_request.scale_x_percent, sanitized_request.scale_y_percent,
+             sanitized_request.center_x_percent, sanitized_request.center_y_percent);
+        return 0;
+    }
+
+    VideoDecoderZoomRect rect = {0};
+    if (!compute_zoom_rect_from_request(max_w, max_h, &sanitized_request, &rect) ||
+        !sanitize_zoom_rect(max_w, max_h, &rect)) {
+        g_mutex_unlock(&vd->lock);
+        LOGW("Video decoder: rejected zoom request after clamping (frame %ux%u)", max_w, max_h);
+        return -1;
+    }
+
+    gboolean scaler_adjusted = FALSE;
+    if (!enforce_plane_scaler_limits(vd, max_w, max_h, &rect, &scaler_adjusted)) {
+        g_mutex_unlock(&vd->lock);
+        LOGW("Video decoder: rejected zoom %u%%x%u%% @ %u%%,%u%% (plane scaler limit %.1fx, frame %ux%u, mode %dx%d)",
+             sanitized_request.scale_x_percent, sanitized_request.scale_y_percent,
+             sanitized_request.center_x_percent, sanitized_request.center_y_percent,
+             VIDEO_DECODER_MAX_PLANE_UPSCALE, max_w, max_h, vd->mode_w, vd->mode_h);
+        return -1;
+    }
+
+    gboolean request_changed = !vd->zoom_enabled ||
+                               vd->zoom_request.scale_x_percent != sanitized_request.scale_x_percent ||
+                               vd->zoom_request.scale_y_percent != sanitized_request.scale_y_percent ||
+                               vd->zoom_request.center_x_percent != sanitized_request.center_x_percent ||
+                               vd->zoom_request.center_y_percent != sanitized_request.center_y_percent;
+
+    gboolean rect_changed = !vd->zoom_enabled || vd->zoom_rect.x != rect.x || vd->zoom_rect.y != rect.y ||
+                            vd->zoom_rect.w != rect.w || vd->zoom_rect.h != rect.h;
+
+    if (request_changed || rect_changed) {
+        vd->zoom_enabled = TRUE;
+        vd->zoom_request = sanitized_request;
+        vd->zoom_rect = rect;
+        changed = TRUE;
+    }
+
+    uint32_t fb = changed ? vd->last_committed_fb : 0;
+    VideoDecoderZoomRect applied_rect = rect;
+    gboolean log_clamp = request_was_clamped || scaler_adjusted;
+    g_mutex_unlock(&vd->lock);
+
+    if (changed && fb != 0) {
+        if (commit_plane(vd, fb, 0, 0) != 0) {
+            LOGW("Video decoder: failed to apply zoom on framebuffer %u", fb);
+        }
+    }
+    if (log_clamp) {
+        double applied_scale_x = max_w > 0 ? ((double)applied_rect.w / (double)max_w) * 100.0 : 0.0;
+        double applied_scale_y = max_h > 0 ? ((double)applied_rect.h / (double)max_h) * 100.0 : 0.0;
+        double applied_center_x = max_w > 0
+                                      ? (((double)applied_rect.x + (double)applied_rect.w / 2.0) / (double)max_w) * 100.0
+                                      : 0.0;
+        double applied_center_y = max_h > 0
+                                      ? (((double)applied_rect.y + (double)applied_rect.h / 2.0) / (double)max_h) * 100.0
+                                      : 0.0;
+        LOGI("Video decoder: limited zoom %u%%x%u%% @ %u%%,%u%% to %.1f%%x%.1f%% @ %.1f%%,%.1f%% (max plane scale %.1fx)",
+             sanitized_request.scale_x_percent, sanitized_request.scale_y_percent,
+             sanitized_request.center_x_percent, sanitized_request.center_y_percent, applied_scale_x, applied_scale_y,
+             applied_center_x, applied_center_y, VIDEO_DECODER_MAX_PLANE_UPSCALE);
+    }
+    return 0;
 }
 
 void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester) {
