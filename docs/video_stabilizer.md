@@ -47,10 +47,12 @@ keys. Of note:
   disabled.
 * `--stabilizer-guard-band-x` / `--stabilizer-guard-band-y` (or
   `guard-band-x` / `guard-band-y` in the INI) reserve a symmetric crop margin
-  around the decoded frame. The guard band keeps the steady-state crop centred
-  and defines how much negative and positive translation is possible before the
-  stabiliser hits the stride boundary. Leaving these options unset defaults to
-  half of the available stride headroom on each axis.
+  around the decoded frame. The guard value is interpreted as the number of
+  pixels trimmed from each edge before any translation is applied. The RGA blit
+  scales the cropped region back up to the full output size so the stabilised
+  frame still fills the display. Larger guard bands provide more room for
+  per-frame translations (up to `guard + stride_extra` in each direction). When
+  the options are omitted no base crop is applied.
 
 Typical command line enablement looks like:
 
@@ -67,17 +69,24 @@ waveform enabled, so you can observe the stabiliser at work immediately.
 If you prefer to keep the source frame aligned while still exercising the
 stabiliser, use `config/stabilizer-manual.ini`. It enables diagnostics, turns
 off the waveform, reserves a symmetric guard band, and requests a static
-horizontal crop so the output frame visibly differs from the raw decoder
-buffer. Manual offsets are clamped by both `max-translation` and the stride
-margin exposed by the decoder. When an offset is reduced you will see a one-off
-diagnostic similar to:
+translation so the output frame visibly differs from the raw decoder buffer.
+Manual offsets are clamped by both `max-translation` and the available
+guard-band range (plus any decoder stride padding). When an offset is reduced
+you will see a one-off diagnostic similar to:
 
 ```
-Video stabilizer manual offsets (200,200) constrained by stride margin 32 x 0 (guard 16 x 0); crop=(16,0)
+Video stabilizer manual offsets (200,200) constrained by guard 96 x 96 (stride extra 32 x 0); crop=(128,96) src=(1248,888)
 ```
 
-Increase `max-translation` or adjust the guard band based on the available
-stride headroom for the format you are decoding.
+Increase `max-translation` or expand the guard band until the requested motion
+fits inside the crop window.
+
+Manual mode keeps the crop static; it is intended purely as a smoke test for
+the RGA path. To stabilise a genuinely shaky feed you must provide per-frame
+translations (or affine transforms) via
+`video_decoder_set_stabilizer_params()`. The decoder stores the most recent
+parameters supplied by the caller and passes them into
+`video_stabilizer_process()` for the next frame.
 
 With diagnostics enabled the log will periodically emit entries such as:
 

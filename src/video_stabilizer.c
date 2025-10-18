@@ -288,44 +288,70 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
              height);
         return -EINVAL;
     }
-    const int max_crop_x = hor_stride > width ? (hor_stride - width) : 0;
-    const int max_crop_y = ver_stride > height ? (ver_stride - height) : 0;
+    const int stride_margin_x = hor_stride > width ? (hor_stride - width) : 0;
+    const int stride_margin_y = ver_stride > height ? (ver_stride - height) : 0;
 
-    int guard_band_x = 0;
-    int guard_band_y = 0;
-    if (max_crop_x > 0) {
-        int requested = (int)lroundf(stabilizer->config.guard_band_x_px);
-        if (requested < 0) {
-            requested = max_crop_x / 2;
-        }
-        if (requested < 0) {
-            requested = 0;
-        }
-        int max_sym = max_crop_x / 2;
-        if (requested > max_sym) {
-            requested = max_sym;
-        }
-        if ((requested & 1) != 0) {
-            requested &= ~1;
-        }
-        guard_band_x = requested;
+    int guard_band_x = (int)lroundf(stabilizer->config.guard_band_x_px);
+    int guard_band_y = (int)lroundf(stabilizer->config.guard_band_y_px);
+    if (stabilizer->config.guard_band_x_px < 0.0f) {
+        guard_band_x = 0;
     }
-    if (max_crop_y > 0) {
-        int requested = (int)lroundf(stabilizer->config.guard_band_y_px);
-        if (requested < 0) {
-            requested = max_crop_y / 2;
-        }
-        if (requested < 0) {
-            requested = 0;
-        }
-        int max_sym = max_crop_y / 2;
-        if (requested > max_sym) {
-            requested = max_sym;
-        }
-        if ((requested & 1) != 0) {
-            requested &= ~1;
-        }
-        guard_band_y = requested;
+    if (stabilizer->config.guard_band_y_px < 0.0f) {
+        guard_band_y = 0;
+    }
+    if (guard_band_x < 0) {
+        guard_band_x = 0;
+    }
+    if (guard_band_y < 0) {
+        guard_band_y = 0;
+    }
+
+    int max_guard_x = width / 2;
+    int max_guard_y = height / 2;
+    if (max_guard_x < 0) {
+        max_guard_x = 0;
+    }
+    if (max_guard_y < 0) {
+        max_guard_y = 0;
+    }
+    if (guard_band_x > max_guard_x) {
+        guard_band_x = max_guard_x;
+    }
+    if (guard_band_y > max_guard_y) {
+        guard_band_y = max_guard_y;
+    }
+    if ((guard_band_x & 1) != 0) {
+        guard_band_x &= ~1;
+    }
+    if ((guard_band_y & 1) != 0) {
+        guard_band_y &= ~1;
+    }
+
+    int src_width = width - (guard_band_x * 2);
+    int src_height = height - (guard_band_y * 2);
+    if (src_width <= 0) {
+        src_width = 2;
+        guard_band_x = (width - src_width) / 2;
+        guard_band_x &= ~1;
+    }
+    if (src_height <= 0) {
+        src_height = 2;
+        guard_band_y = (height - src_height) / 2;
+        guard_band_y &= ~1;
+    }
+    if ((src_width & 1) != 0) {
+        src_width--;
+    }
+    if ((src_height & 1) != 0) {
+        src_height--;
+    }
+    if (src_width <= 0) {
+        src_width = width;
+        guard_band_x = 0;
+    }
+    if (src_height <= 0) {
+        src_height = height;
+        guard_band_y = 0;
     }
 
     int crop_x = guard_band_x;
@@ -342,20 +368,14 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
     const char *request_mode = NULL;
 
     int left_limit_x = guard_band_x;
-    int right_limit_x = max_crop_x - guard_band_x;
-    if (right_limit_x < 0) {
-        right_limit_x = 0;
-    }
+    int right_limit_x = guard_band_x + stride_margin_x;
     int left_limit_y = guard_band_y;
-    int right_limit_y = max_crop_y - guard_band_y;
-    if (right_limit_y < 0) {
-        right_limit_y = 0;
-    }
+    int right_limit_y = guard_band_y + stride_margin_y;
 
     if (stabilizer->config.diagnostics && (guard_band_x > 0 || guard_band_y > 0) &&
         !stabilizer->diag_logged_base_crop) {
-        LOGI("Video stabilizer base crop guard=(%d,%d) within stride margin %d x %d", guard_band_x,
-             guard_band_y, max_crop_x, max_crop_y);
+        LOGI("Video stabilizer base crop guard=(%d,%d) src=(%d,%d) stride extra %d x %d", guard_band_x,
+             guard_band_y, src_width, src_height, stride_margin_x, stride_margin_y);
         stabilizer->diag_logged_base_crop = TRUE;
     }
 
@@ -498,14 +518,14 @@ int video_stabilizer_process(VideoStabilizer *stabilizer, int in_fd, int out_fd,
             stabilizer->diag_logged_translation_clamp = TRUE;
         }
         if (limited_by_stride && !stabilizer->diag_logged_stride_clamp) {
-            LOGI("Video stabilizer %s offsets (%d,%d) constrained by stride margin %d x %d (guard %d x %d); crop=(%d,%d)",
-                 request_mode ? request_mode : "requested", requested_tx, requested_ty, max_crop_x, max_crop_y,
-                 guard_band_x, guard_band_y, crop_x, crop_y);
+            LOGI("Video stabilizer %s offsets (%d,%d) constrained by guard %d x %d (stride extra %d x %d); crop=(%d,%d) src=(%d,%d)",
+                 request_mode ? request_mode : "requested", requested_tx, requested_ty, guard_band_x, guard_band_y,
+                 stride_margin_x, stride_margin_y, crop_x, crop_y, src_width, src_height);
             stabilizer->diag_logged_stride_clamp = TRUE;
         }
     }
 
-    if (rga_set_rect(&src.rect, crop_x, crop_y, width, height, hor_stride, ver_stride,
+    if (rga_set_rect(&src.rect, crop_x, crop_y, src_width, src_height, hor_stride, ver_stride,
                      RK_FORMAT_YCbCr_420_SP) != 0) {
         LOGW("Video stabilizer: failed to set source rect (stride=%d/%d)", hor_stride, ver_stride);
         return -EINVAL;
