@@ -91,9 +91,12 @@ When the helper thread observes that `clock_gettime(CLOCK_MONOTONIC)` exceeds
 * The DRM plane can only upscale by a factor of four in either direction, so the
   receiver enforces a minimum crop size to stay within that limit. Requests that
   would require more magnification are automatically widened or heightened to the
-  smallest allowed size and a log entry records the adjustment. On a 1080p output
-  fed with a 1920-pixel-wide stream, this means percentages below roughly
-  `25,25` cannot be honoured.
+  smallest allowed size and a log entry records the adjustment. After that clamp,
+  the crop is rounded to the chroma-aligned sizes that the Rockchip plane
+  accepts: widths and heights snap to four-pixel increments and the origin lands
+  on an even pixel. Expect the applied percentages in the log to differ slightly
+  from what was requested. On a 1080p output fed with a 1280×720 stream, this
+  means percentages much below `25,38` cannot be honoured.
 * Commands are debounced: the receiver only reprograms the plane when the text
   changes. Publish the same string again only when refreshing its TTL.
 * Include `ttl_ms` with every zoom update so the request naturally expires when

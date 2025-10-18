@@ -36,6 +36,14 @@
 #define DECODER_READ_BUF_SIZE (1024 * 1024)
 #define DECODER_MAX_FRAMES 24
 #define VIDEO_DECODER_MAX_PLANE_UPSCALE 4.0
+/*
+ * RK356x VOP planes sampling NV12 surfaces expect crop widths/heights that
+ * align to chroma blocks and even source offsets. Align crops to 4 pixels in
+ * both directions and keep the origin on an even boundary to satisfy the
+ * hardware without over-constraining the caller.
+ */
+#define VIDEO_DECODER_ZOOM_DIMENSION_ALIGNMENT 4u
+#define VIDEO_DECODER_ZOOM_POSITION_ALIGNMENT 2u
 
 struct FrameSlot {
     int prime_fd;
@@ -151,6 +159,140 @@ static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size)
 #endif
 }
 
+static uint32_t align_dimension_to(uint32_t value, uint32_t max_value, uint32_t alignment) {
+    if (max_value == 0) {
+        return 0;
+    }
+    if (value == 0) {
+        value = 1;
+    }
+    if (value > max_value) {
+        value = max_value;
+    }
+
+    if (alignment <= 1) {
+        return value;
+    }
+
+    if (max_value < alignment) {
+        return max_value;
+    }
+
+    uint32_t remainder = value % alignment;
+    if (remainder == 0) {
+        return value;
+    }
+
+    uint32_t upward = value + (alignment - remainder);
+    if (upward <= max_value) {
+        return upward;
+    }
+
+    uint32_t downward = value - remainder;
+    if (downward >= alignment) {
+        return downward;
+    }
+
+    uint32_t max_aligned = max_value - (max_value % alignment);
+    if (max_aligned >= alignment) {
+        return max_aligned;
+    }
+
+    return alignment <= max_value ? alignment : max_value;
+}
+
+static uint32_t align_position_to(double desired, uint32_t max_value, uint32_t alignment) {
+    if (max_value == 0) {
+        return 0;
+    }
+
+    if (desired < 0.0) {
+        desired = 0.0;
+    }
+    double max_d = (double)max_value;
+    if (desired > max_d) {
+        desired = max_d;
+    }
+
+    uint32_t candidate = (uint32_t)llround(desired);
+    if (candidate > max_value) {
+        candidate = max_value;
+    }
+
+    if (alignment <= 1) {
+        return candidate;
+    }
+
+    uint32_t remainder = candidate % alignment;
+    if (remainder == 0) {
+        return candidate;
+    }
+
+    uint32_t down = candidate - remainder;
+    uint32_t up = candidate + (alignment - remainder);
+    if (up > max_value) {
+        return down;
+    }
+    if (down > max_value) {
+        return up;
+    }
+
+    double down_error = fabs(desired - (double)down);
+    double up_error = fabs((double)up - desired);
+    if (up_error < down_error) {
+        return up;
+    }
+    return down;
+}
+
+static gboolean align_zoom_rect_for_subsampling(uint32_t max_w, uint32_t max_h, VideoDecoderZoomRect *rect) {
+    if (rect == NULL) {
+        return FALSE;
+    }
+    if (rect->w == 0 || rect->h == 0) {
+        return FALSE;
+    }
+
+    double center_x = (double)rect->x + ((double)rect->w / 2.0);
+    double center_y = (double)rect->y + ((double)rect->h / 2.0);
+
+    uint32_t aligned_w = align_dimension_to(rect->w, max_w, VIDEO_DECODER_ZOOM_DIMENSION_ALIGNMENT);
+    uint32_t aligned_h = align_dimension_to(rect->h, max_h, VIDEO_DECODER_ZOOM_DIMENSION_ALIGNMENT);
+    if (aligned_w == 0 || aligned_h == 0) {
+        return FALSE;
+    }
+
+    if (aligned_w > max_w) {
+        aligned_w = max_w;
+    }
+    if (aligned_h > max_h) {
+        aligned_h = max_h;
+    }
+
+    double desired_x = center_x - ((double)aligned_w / 2.0);
+    double desired_y = center_y - ((double)aligned_h / 2.0);
+
+    uint32_t max_x = (aligned_w >= max_w) ? 0 : max_w - aligned_w;
+    uint32_t max_y = (aligned_h >= max_h) ? 0 : max_h - aligned_h;
+
+    uint32_t aligned_x = align_position_to(desired_x, max_x, VIDEO_DECODER_ZOOM_POSITION_ALIGNMENT);
+    uint32_t aligned_y = align_position_to(desired_y, max_y, VIDEO_DECODER_ZOOM_POSITION_ALIGNMENT);
+
+    rect->w = aligned_w;
+    rect->h = aligned_h;
+    rect->x = aligned_x;
+    rect->y = aligned_y;
+
+    if (rect->x + rect->w > max_w) {
+        rect->x = (max_w > rect->w) ? (max_w - rect->w) : 0;
+    }
+    if (rect->y + rect->h > max_h) {
+        rect->y = (max_h > rect->h) ? (max_h - rect->h) : 0;
+    }
+
+    return rect->w > 0 && rect->h > 0;
+}
+
 static gboolean sanitize_zoom_rect(uint32_t max_w, uint32_t max_h, VideoDecoderZoomRect *rect) {
     if (rect == NULL || max_w == 0 || max_h == 0) {
         return FALSE;
@@ -165,17 +307,29 @@ static gboolean sanitize_zoom_rect(uint32_t max_w, uint32_t max_h, VideoDecoderZ
         rect->h = max_h;
     }
     if (rect->x >= max_w) {
-        rect->x = max_w - rect->w;
+        rect->x = max_w > rect->w ? max_w - rect->w : 0;
     }
     if (rect->y >= max_h) {
-        rect->y = max_h - rect->h;
+        rect->y = max_h > rect->h ? max_h - rect->h : 0;
     }
     if (rect->x + rect->w > max_w) {
-        rect->x = max_w - rect->w;
+        rect->x = max_w > rect->w ? max_w - rect->w : 0;
     }
     if (rect->y + rect->h > max_h) {
-        rect->y = max_h - rect->h;
+        rect->y = max_h > rect->h ? max_h - rect->h : 0;
     }
+
+    if (!align_zoom_rect_for_subsampling(max_w, max_h, rect)) {
+        return FALSE;
+    }
+
+    if (rect->x + rect->w > max_w) {
+        rect->x = max_w > rect->w ? max_w - rect->w : 0;
+    }
+    if (rect->y + rect->h > max_h) {
+        rect->y = max_h > rect->h ? max_h - rect->h : 0;
+    }
+
     return rect->w > 0 && rect->h > 0;
 }
 
