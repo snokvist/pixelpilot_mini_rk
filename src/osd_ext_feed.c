@@ -8,6 +8,7 @@
 #include <time.h>
 #include <signal.h>
 #include <errno.h>
+#include <limits.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -521,6 +522,8 @@ int main(int argc, char **argv)
         bool present_arr[MAX_ENTRIES];
         double values_arr[MAX_ENTRIES];
         size_t emit_count = MAX_ENTRIES;
+        bool any_ttl_slots = false;
+        uint64_t max_remaining_ttl_ms = 0;
 
         for (size_t i = 0; i < MAX_ENTRIES; ++i) {
             struct feed_slot *slot = &slots[i];
@@ -532,6 +535,16 @@ int main(int argc, char **argv)
                 text_buf[i][0] = '\0';
                 values_arr[i] = 0.0;
                 continue;
+            }
+
+            if (slot->expiry_ms > 0) {
+                any_ttl_slots = true;
+                if (slot->expiry_ms > now) {
+                    uint64_t remaining = slot->expiry_ms - now;
+                    if (remaining > max_remaining_ttl_ms) {
+                        max_remaining_ttl_ms = remaining;
+                    }
+                }
             }
 
             double freq_hz = 0.0;
@@ -558,8 +571,26 @@ int main(int argc, char **argv)
             slot->send_counter++;
         }
 
+        int message_ttl_ms = ttl_ms;
+        if (any_ttl_slots) {
+            uint64_t chosen = max_remaining_ttl_ms;
+            if (ttl_ms > 0 && (uint64_t)ttl_ms > chosen) {
+                chosen = (uint64_t)ttl_ms;
+            }
+            if (chosen > (uint64_t)INT_MAX) {
+                chosen = (uint64_t)INT_MAX;
+            }
+            if (chosen > 0 && chosen < (uint64_t)INT_MAX) {
+                message_ttl_ms = (int)chosen;
+            } else if (chosen == 0) {
+                message_ttl_ms = 1;
+            } else {
+                message_ttl_ms = INT_MAX;
+            }
+        }
+
         int written = build_osd_payload(text_ptrs, values_arr, present_arr,
-                                        emit_count, ttl_ms, json_buf, sizeof(json_buf));
+                                        emit_count, message_ttl_ms, json_buf, sizeof(json_buf));
         if (written < 0 || (size_t)written >= sizeof(json_buf)) {
             fprintf(stderr, "Failed to build JSON payload\n");
             continue;
