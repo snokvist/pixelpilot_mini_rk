@@ -1570,3 +1570,29 @@ gboolean pipeline_consume_reinit_request(PipelineState *ps) {
     g_mutex_unlock(&ps->lock);
     return requested;
 }
+
+void pipeline_apply_zoom_command(PipelineState *ps, gboolean enabled, const VideoDecoderZoomRect *rect) {
+    if (ps == NULL) {
+        return;
+    }
+
+    g_mutex_lock(&ps->lock);
+    gboolean decoder_ready = ps->decoder_initialized && ps->decoder != NULL;
+    gboolean decoder_running = ps->decoder_running && !ps->stop_requested;
+    VideoDecoder *decoder = decoder_ready ? ps->decoder : NULL;
+    g_mutex_unlock(&ps->lock);
+
+    if (!decoder_ready || decoder == NULL) {
+        return;
+    }
+
+    if (!decoder_running && enabled) {
+        LOGW("Pipeline: zoom request ignored because decoder is not running");
+        return;
+    }
+
+    int ret = video_decoder_set_zoom(decoder, enabled, enabled ? rect : NULL);
+    if (ret != 0 && enabled) {
+        LOGW("Pipeline: zoom enable request was rejected");
+    }
+}

@@ -59,6 +59,10 @@ struct VideoDecoder {
     uint32_t src_w;
     uint32_t src_h;
 
+    gboolean zoom_enabled;
+    VideoDecoderZoomRect zoom_rect;
+    uint32_t last_committed_fb;
+
     uint32_t prop_fb_id;
     uint32_t prop_crtc_id;
     uint32_t prop_crtc_x;
@@ -143,6 +147,34 @@ static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size)
         memcpy(dst, src, size);
     }
 #endif
+}
+
+static gboolean sanitize_zoom_rect(uint32_t max_w, uint32_t max_h, VideoDecoderZoomRect *rect) {
+    if (rect == NULL || max_w == 0 || max_h == 0) {
+        return FALSE;
+    }
+    if (rect->w == 0 || rect->h == 0) {
+        return FALSE;
+    }
+    if (rect->w > max_w) {
+        rect->w = max_w;
+    }
+    if (rect->h > max_h) {
+        rect->h = max_h;
+    }
+    if (rect->x >= max_w) {
+        rect->x = max_w - rect->w;
+    }
+    if (rect->y >= max_h) {
+        rect->y = max_h - rect->h;
+    }
+    if (rect->x + rect->w > max_w) {
+        rect->x = max_w - rect->w;
+    }
+    if (rect->y + rect->h > max_h) {
+        rect->y = max_h - rect->h;
+    }
+    return rect->w > 0 && rect->h > 0;
 }
 
 static void log_decoder_neon_status_once(void) {
@@ -234,15 +266,49 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         return -1;
     }
 
-    if (src_w == 0) {
-        src_w = vd->src_w ? vd->src_w : (uint32_t)vd->mode_w;
-    } else {
-        vd->src_w = src_w;
+    uint32_t base_src_w = 0;
+    uint32_t base_src_h = 0;
+    gboolean zoom_enabled = FALSE;
+    VideoDecoderZoomRect zoom_rect = {0};
+
+    g_mutex_lock(&vd->lock);
+    base_src_w = vd->src_w;
+    base_src_h = vd->src_h;
+    if (src_w != 0) {
+        base_src_w = src_w;
+    } else if (base_src_w == 0) {
+        base_src_w = vd->mode_w > 0 ? (uint32_t)vd->mode_w : 1;
     }
-    if (src_h == 0) {
-        src_h = vd->src_h ? vd->src_h : (uint32_t)vd->mode_h;
-    } else {
-        vd->src_h = src_h;
+    if (src_h != 0) {
+        base_src_h = src_h;
+    } else if (base_src_h == 0) {
+        base_src_h = vd->mode_h > 0 ? (uint32_t)vd->mode_h : 1;
+    }
+    zoom_enabled = vd->zoom_enabled;
+    zoom_rect = vd->zoom_rect;
+    g_mutex_unlock(&vd->lock);
+
+    if (base_src_w == 0) {
+        base_src_w = 1;
+    }
+    if (base_src_h == 0) {
+        base_src_h = 1;
+    }
+
+    gboolean use_zoom = FALSE;
+    VideoDecoderZoomRect zoom_local = zoom_rect;
+    if (zoom_enabled && sanitize_zoom_rect(base_src_w, base_src_h, &zoom_local)) {
+        use_zoom = TRUE;
+    }
+
+    uint32_t display_src_w = use_zoom ? zoom_local.w : base_src_w;
+    uint32_t display_src_h = use_zoom ? zoom_local.h : base_src_h;
+
+    if (display_src_w == 0) {
+        display_src_w = 1;
+    }
+    if (display_src_h == 0) {
+        display_src_h = 1;
     }
 
     int dst_x = 0;
@@ -250,8 +316,8 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     int dst_w = vd->mode_w;
     int dst_h = vd->mode_h;
 
-    if (src_w > 0 && src_h > 0 && vd->mode_w > 0 && vd->mode_h > 0) {
-        double src_ar = (double)src_w / (double)src_h;
+    if (display_src_w > 0 && display_src_h > 0 && vd->mode_w > 0 && vd->mode_h > 0) {
+        double src_ar = (double)display_src_w / (double)display_src_h;
         double mode_ar = (double)vd->mode_w / (double)vd->mode_h;
 
         if (src_ar > 0.0 && mode_ar > 0.0) {
@@ -280,16 +346,21 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         }
     }
 
+    uint64_t src_x_q16 = use_zoom ? ((uint64_t)zoom_local.x << 16) : 0;
+    uint64_t src_y_q16 = use_zoom ? ((uint64_t)zoom_local.y << 16) : 0;
+    uint64_t src_w_q16 = (uint64_t)(use_zoom ? zoom_local.w : base_src_w) << 16;
+    uint64_t src_h_q16 = (uint64_t)(use_zoom ? zoom_local.h : base_src_h) << 16;
+
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_fb_id, fb_id);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_id, vd->crtc_id);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_x, dst_x);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_y, dst_y);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_w, dst_w);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_h, dst_h);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_x, 0);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_y, 0);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_w, (uint64_t)src_w << 16);
-    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_h, (uint64_t)src_h << 16);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_x, src_x_q16);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_y, src_y_q16);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_w, src_w_q16);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_h, src_h_q16);
 
     int ret = drmModeAtomicCommit(vd->drm_fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
     if (ret != 0 && errno == EBUSY) {
@@ -297,6 +368,20 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     }
     if (ret != 0) {
         LOGW("Atomic commit failed: %s", g_strerror(errno));
+    } else {
+        g_mutex_lock(&vd->lock);
+        if (src_w != 0) {
+            vd->src_w = src_w;
+        } else if (vd->src_w == 0) {
+            vd->src_w = base_src_w;
+        }
+        if (src_h != 0) {
+            vd->src_h = src_h;
+        } else if (vd->src_h == 0) {
+            vd->src_h = base_src_h;
+        }
+        vd->last_committed_fb = fb_id;
+        g_mutex_unlock(&vd->lock);
     }
     drmModeAtomicFree(req);
     return ret;
@@ -389,8 +474,24 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
     vd->mpi->control(vd->ctx, MPP_DEC_SET_EXT_BUF_GROUP, vd->frm_grp);
     vd->mpi->control(vd->ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
 
+    g_mutex_lock(&vd->lock);
     vd->src_w = width;
     vd->src_h = height;
+    if (vd->zoom_enabled) {
+        VideoDecoderZoomRect adjusted = vd->zoom_rect;
+        if (!sanitize_zoom_rect(width, height, &adjusted)) {
+            LOGW("Video decoder: disabling zoom after %ux%u format change", width, height);
+            vd->zoom_enabled = FALSE;
+            memset(&vd->zoom_rect, 0, sizeof(vd->zoom_rect));
+        } else if (adjusted.x != vd->zoom_rect.x || adjusted.y != vd->zoom_rect.y ||
+                   adjusted.w != vd->zoom_rect.w || adjusted.h != vd->zoom_rect.h) {
+            LOGI("Video decoder: clamped zoom to %ux%u+%u,%u for %ux%u frame", adjusted.w, adjusted.h,
+                 adjusted.x, adjusted.y, width, height);
+            vd->zoom_rect = adjusted;
+        }
+    }
+    g_mutex_unlock(&vd->lock);
+
     commit_plane(vd, vd->frame_map[0].fb_id, width, height);
     return 0;
 }
@@ -750,6 +851,61 @@ void video_decoder_send_eos(VideoDecoder *vd) {
         }
         g_usleep(2000);
     }
+}
+
+int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecoderZoomRect *rect) {
+    if (vd == NULL) {
+        return -1;
+    }
+    if (!enabled) {
+        g_mutex_lock(&vd->lock);
+        gboolean was_enabled = vd->zoom_enabled;
+        vd->zoom_enabled = FALSE;
+        memset(&vd->zoom_rect, 0, sizeof(vd->zoom_rect));
+        uint32_t fb = was_enabled ? vd->last_committed_fb : 0;
+        g_mutex_unlock(&vd->lock);
+        if (was_enabled && fb != 0) {
+            if (commit_plane(vd, fb, 0, 0) != 0) {
+                LOGW("Video decoder: failed to clear zoom on framebuffer %u", fb);
+            }
+        }
+        return 0;
+    }
+
+    if (rect == NULL) {
+        LOGW("Video decoder: zoom request missing rectangle");
+        return -1;
+    }
+
+    g_mutex_lock(&vd->lock);
+    uint32_t max_w = vd->src_w ? vd->src_w : (uint32_t)vd->mode_w;
+    uint32_t max_h = vd->src_h ? vd->src_h : (uint32_t)vd->mode_h;
+    VideoDecoderZoomRect sanitized = *rect;
+    gboolean changed = FALSE;
+
+    if (max_w == 0 || max_h == 0 || !sanitize_zoom_rect(max_w, max_h, &sanitized)) {
+        g_mutex_unlock(&vd->lock);
+        LOGW("Video decoder: rejected zoom rectangle %ux%u+%u,%u for frame %ux%u",
+             rect->w, rect->h, rect->x, rect->y, max_w, max_h);
+        return -1;
+    }
+
+    if (!vd->zoom_enabled || vd->zoom_rect.x != sanitized.x || vd->zoom_rect.y != sanitized.y ||
+        vd->zoom_rect.w != sanitized.w || vd->zoom_rect.h != sanitized.h) {
+        vd->zoom_enabled = TRUE;
+        vd->zoom_rect = sanitized;
+        changed = TRUE;
+    }
+
+    uint32_t fb = changed ? vd->last_committed_fb : 0;
+    g_mutex_unlock(&vd->lock);
+
+    if (changed && fb != 0) {
+        if (commit_plane(vd, fb, 0, 0) != 0) {
+            LOGW("Video decoder: failed to apply zoom on framebuffer %u", fb);
+        }
+    }
+    return 0;
 }
 
 void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester) {

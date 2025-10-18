@@ -65,6 +65,35 @@ linger:
 When the helper thread observes that `clock_gettime(CLOCK_MONOTONIC)` exceeds
 `last_update_ns + ttl_ms`, it zeroes the snapshot before the next OSD refresh.
 
+### Zoom/crop control channel
+
+* Text slot 8 (`ext.text8`) is reserved for live zoom instructions that affect the
+  primary video plane. A well-formed command uses the prefix `zoom=` followed by
+  either the literal `off` or four comma-separated integers representing the
+  cropped region:
+
+  ```text
+  zoom=WIDTH,HEIGHT,X,Y
+  ```
+
+  * `WIDTH` / `HEIGHT` describe the size of the window in decoded pixels.
+  * `X` / `Y` are the top-left coordinates of that window within the decoded frame.
+
+* Commands are debounced: the receiver only reprograms the plane when the text
+  changes. Publish the string repeatedly only if you want to refresh its TTL.
+* The rectangle is clamped to the decoded frame size. Requests that are out of
+  bounds or zero-sized are rejected and logged.
+* Include `ttl_ms` with every zoom update so the request naturally expires when
+  the publisher stops sending data. For example, to zoom into a 512×128 area
+  placed at (240, 240) for one second:
+
+  ```json
+  {"text":["","","","","","","","zoom=512,128,240,240"], "ttl_ms": 1000}
+  ```
+
+* Clearing the slot (empty string) or publishing `zoom=off` restores the full
+  frame.
+
 ## Token exposure
 
 Extend `osd_token_format()` so that strings become available through

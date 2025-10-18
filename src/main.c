@@ -12,6 +12,7 @@
 #include "sse_streamer.h"
 #include "udev_monitor.h"
 
+#include <glib.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
@@ -91,6 +92,79 @@ static int write_pid_file(void) {
     close(fd);
     atexit(remove_instance_pid);
     return 0;
+}
+
+static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, VideoDecoderZoomRect *out_rect) {
+    if (out_enabled == NULL || out_rect == NULL) {
+        return FALSE;
+    }
+    if (cmd == NULL) {
+        return FALSE;
+    }
+
+    const char *p = cmd;
+    while (*p != '\0' && g_ascii_isspace(*p)) {
+        ++p;
+    }
+    if (*p == '\0') {
+        *out_enabled = FALSE;
+        memset(out_rect, 0, sizeof(*out_rect));
+        return TRUE;
+    }
+    if (g_ascii_strncasecmp(p, "zoom=", 5) != 0) {
+        return FALSE;
+    }
+    p += 5;
+    while (*p != '\0' && g_ascii_isspace(*p)) {
+        ++p;
+    }
+    if (*p == '\0') {
+        return FALSE;
+    }
+    if (g_ascii_strcasecmp(p, "off") == 0) {
+        *out_enabled = FALSE;
+        memset(out_rect, 0, sizeof(*out_rect));
+        return TRUE;
+    }
+
+    char buf[OSD_EXTERNAL_TEXT_LEN];
+    g_strlcpy(buf, p, sizeof(buf));
+    GStrv tokens = g_strsplit(buf, ",", 0);
+    guint32 values[4] = {0};
+    int idx = 0;
+    gboolean ok = TRUE;
+
+    for (char **it = tokens; ok && it != NULL && *it != NULL; ++it) {
+        if (idx >= 4) {
+            ok = FALSE;
+            break;
+        }
+        char *token = g_strstrip(*it);
+        if (token[0] == '\0') {
+            ok = FALSE;
+            break;
+        }
+        errno = 0;
+        char *end = NULL;
+        long long v = g_ascii_strtoll(token, &end, 10);
+        if (errno != 0 || end == token || *end != '\0' || v < 0 || v > G_MAXUINT32) {
+            ok = FALSE;
+            break;
+        }
+        values[idx++] = (guint32)v;
+    }
+    g_strfreev(tokens);
+
+    if (!ok || idx != 4) {
+        return FALSE;
+    }
+
+    out_rect->w = values[0];
+    out_rect->h = values[1];
+    out_rect->x = values[2];
+    out_rect->y = values[3];
+    *out_enabled = TRUE;
+    return TRUE;
 }
 
 static int ensure_single_instance(void) {
@@ -304,6 +378,7 @@ int main(int argc, char **argv) {
     struct timespec last_hp = {0, 0};
     struct timespec last_osd;
     clock_gettime(CLOCK_MONOTONIC, &last_osd);
+    char last_zoom_command[OSD_EXTERNAL_TEXT_LEN] = "";
 
     while (!g_exit_flag) {
         pipeline_poll_child(&ps);
@@ -487,6 +562,24 @@ int main(int argc, char **argv) {
             if (ms_since(now, last_osd) >= cfg.osd_refresh_ms) {
                 OsdExternalFeedSnapshot ext_snapshot;
                 osd_external_get_snapshot(&ext_bridge, &ext_snapshot);
+                const char *zoom_text = ext_snapshot.text[OSD_EXTERNAL_MAX_TEXT - 1];
+                if (g_strcmp0(zoom_text, last_zoom_command) != 0) {
+                    gboolean zoom_enabled = FALSE;
+                    VideoDecoderZoomRect zoom_rect = {0};
+                    if (parse_zoom_command(zoom_text, &zoom_enabled, &zoom_rect)) {
+                        if (zoom_enabled) {
+                            pipeline_apply_zoom_command(&ps, TRUE, &zoom_rect);
+                        } else {
+                            pipeline_apply_zoom_command(&ps, FALSE, NULL);
+                        }
+                    } else if (zoom_text != NULL && zoom_text[0] != '\0') {
+                        LOGW("External zoom command ignored: expected 'zoom=WIDTH,HEIGHT,X,Y' or 'zoom=off' (got '%s')",
+                             zoom_text);
+                    } else if (last_zoom_command[0] != '\0') {
+                        pipeline_apply_zoom_command(&ps, FALSE, NULL);
+                    }
+                    g_strlcpy(last_zoom_command, zoom_text != NULL ? zoom_text : "", sizeof(last_zoom_command));
+                }
                 osd_update_stats(fd, &cfg, &ms, &ps, audio_disabled, restart_count, &ext_snapshot, &osd);
                 last_osd = now;
             }
