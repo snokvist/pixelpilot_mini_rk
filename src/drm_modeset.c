@@ -83,6 +83,55 @@ static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
     return a->clock > b->clock;
 }
 
+static void capture_prev_connectors(int fd, const drmModeRes *res, uint32_t crtc_id, ModesetResult *out) {
+    if (!out) {
+        return;
+    }
+
+    out->prev_connector_count = 0;
+    out->prev_connectors = NULL;
+
+    if (!res || crtc_id == 0 || res->count_connectors <= 0) {
+        return;
+    }
+
+    uint32_t *tmp = calloc((size_t)res->count_connectors, sizeof(uint32_t));
+    if (!tmp) {
+        return;
+    }
+
+    int count = 0;
+    for (int i = 0; i < res->count_connectors; ++i) {
+        drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
+        if (!c) {
+            continue;
+        }
+
+        uint32_t encoder_id = c->encoder_id;
+        if (encoder_id != 0) {
+            drmModeEncoder *enc = drmModeGetEncoder(fd, encoder_id);
+            if (enc) {
+                if (enc->crtc_id == crtc_id && count < res->count_connectors) {
+                    tmp[count++] = c->connector_id;
+                }
+                drmModeFreeEncoder(enc);
+            }
+        }
+
+        drmModeFreeConnector(c);
+    }
+
+    if (count > 0) {
+        out->prev_connectors = malloc(sizeof(uint32_t) * (size_t)count);
+        if (out->prev_connectors) {
+            memcpy(out->prev_connectors, tmp, sizeof(uint32_t) * (size_t)count);
+            out->prev_connector_count = count;
+        }
+    }
+
+    free(tmp);
+}
+
 int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResult *out) {
     if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0) {
         LOGW("Failed to enable UNIVERSAL_PLANES");
@@ -288,18 +337,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         } else {
             memset(&out->prev_mode, 0, sizeof(out->prev_mode));
         }
-        out->prev_connector_count = crtc->count_connectors;
-        if (crtc->count_connectors > 0) {
-            size_t sz = sizeof(uint32_t) * (size_t)crtc->count_connectors;
-            out->prev_connectors = malloc(sz);
-            if (out->prev_connectors != NULL) {
-                memcpy(out->prev_connectors, crtc->connectors, sz);
-            } else {
-                out->prev_connector_count = 0;
-            }
-        } else {
-            out->prev_connectors = NULL;
-        }
+        capture_prev_connectors(fd, res, crtc->crtc_id, out);
     }
 
     drmModeFreeConnector(conn);
@@ -347,6 +385,7 @@ int atomic_modeset_restore(int fd, const ModesetResult *ms) {
             connectors = &fallback_connector;
             connector_count = 1;
         }
+        drmModeModeInfo prev_mode = ms->prev_mode;
         if (drmModeSetCrtc(fd,
                            ms->crtc_id,
                            ms->prev_fb_id,
@@ -354,7 +393,7 @@ int atomic_modeset_restore(int fd, const ModesetResult *ms) {
                            ms->prev_y,
                            connectors,
                            connector_count,
-                           &ms->prev_mode) != 0) {
+                           &prev_mode) != 0) {
             LOGW("Failed to restore previous CRTC mode");
             return -1;
         }
