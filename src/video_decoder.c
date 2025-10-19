@@ -636,6 +636,39 @@ static void release_frame_group(VideoDecoder *vd) {
     vd->src_h = 0;
 }
 
+static void video_decoder_disable_plane(VideoDecoder *vd) {
+    if (vd == NULL || vd->drm_fd < 0 || vd->plane_id == 0 || vd->prop_fb_id == 0 ||
+        vd->prop_crtc_id == 0) {
+        return;
+    }
+
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    if (!req) {
+        LOGW("Video decoder: failed to allocate atomic request for shutdown");
+        return;
+    }
+
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_fb_id, 0);
+    drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_id, 0);
+
+    int ret = drmModeAtomicCommit(vd->drm_fd, req, 0, NULL);
+    if (ret != 0) {
+        LOGW("Video decoder: failed to release plane on shutdown: %s", g_strerror(errno));
+    } else if (vd->lock_initialized) {
+        g_mutex_lock(&vd->lock);
+        vd->last_committed_fb = 0;
+        vd->src_w = 0;
+        vd->src_h = 0;
+        g_mutex_unlock(&vd->lock);
+    } else {
+        vd->last_committed_fb = 0;
+        vd->src_w = 0;
+        vd->src_h = 0;
+    }
+
+    drmModeAtomicFree(req);
+}
+
 static void set_control_verbose(MppApi *mpi, MppCtx ctx, MpiCmd control, RK_U32 enable) {
     RK_U32 res = mpi->control(ctx, control, &enable);
     if (res) {
@@ -1121,6 +1154,7 @@ void video_decoder_deinit(VideoDecoder *vd) {
     vd->ctx = NULL;
     vd->mpi = NULL;
 
+    video_decoder_disable_plane(vd);
     release_frame_group(vd);
 
     if (vd->packet_buf) {
