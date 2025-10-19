@@ -7,6 +7,7 @@
 #include <math.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #if defined(__has_include)
 #if __has_include(<libdrm/drm.h>)
@@ -270,11 +271,35 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     destroy_dumb_fb(fd, &fb);
 
     if (out) {
+        free(out->prev_connectors);
+        out->prev_connectors = NULL;
+        out->prev_connector_count = 0;
         out->connector_id = conn->connector_id;
         out->crtc_id = crtc->crtc_id;
         out->mode_w = w;
         out->mode_h = h;
         out->mode_hz = hz;
+        out->prev_fb_id = crtc->buffer_id;
+        out->prev_x = crtc->x;
+        out->prev_y = crtc->y;
+        out->prev_mode_valid = crtc->mode_valid ? 1 : 0;
+        if (crtc->mode_valid) {
+            out->prev_mode = crtc->mode;
+        } else {
+            memset(&out->prev_mode, 0, sizeof(out->prev_mode));
+        }
+        out->prev_connector_count = crtc->count_connectors;
+        if (crtc->count_connectors > 0) {
+            size_t sz = sizeof(uint32_t) * (size_t)crtc->count_connectors;
+            out->prev_connectors = malloc(sz);
+            if (out->prev_connectors != NULL) {
+                memcpy(out->prev_connectors, crtc->connectors, sz);
+            } else {
+                out->prev_connector_count = 0;
+            }
+        } else {
+            out->prev_connectors = NULL;
+        }
     }
 
     drmModeFreeConnector(conn);
@@ -306,4 +331,53 @@ int is_any_connected(int fd, const AppCfg *cfg) {
     }
     drmModeFreeResources(res);
     return connected;
+}
+
+int atomic_modeset_restore(int fd, const ModesetResult *ms) {
+    if (ms == NULL || ms->crtc_id == 0) {
+        return 0;
+    }
+
+    uint32_t *connectors = ms->prev_connectors;
+    int connector_count = ms->prev_connector_count;
+    uint32_t fallback_connector = ms->connector_id;
+
+    if (ms->prev_mode_valid) {
+        if (connectors == NULL || connector_count <= 0) {
+            connectors = &fallback_connector;
+            connector_count = 1;
+        }
+        if (drmModeSetCrtc(fd,
+                           ms->crtc_id,
+                           ms->prev_fb_id,
+                           ms->prev_x,
+                           ms->prev_y,
+                           connectors,
+                           connector_count,
+                           &ms->prev_mode) != 0) {
+            LOGW("Failed to restore previous CRTC mode");
+            return -1;
+        }
+    } else {
+        if (drmModeSetCrtc(fd, ms->crtc_id, 0, 0, 0, NULL, 0, NULL) != 0) {
+            LOGW("Failed to disable CRTC during restore");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+void modeset_result_cleanup(ModesetResult *ms) {
+    if (ms == NULL) {
+        return;
+    }
+    free(ms->prev_connectors);
+    ms->prev_connectors = NULL;
+    ms->prev_connector_count = 0;
+    ms->prev_mode_valid = 0;
+    memset(&ms->prev_mode, 0, sizeof(ms->prev_mode));
+    ms->prev_fb_id = 0;
+    ms->prev_x = 0;
+    ms->prev_y = 0;
 }

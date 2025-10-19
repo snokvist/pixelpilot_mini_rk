@@ -644,6 +644,8 @@ int main(int argc, char **argv) {
         udev_monitor_close(&um);
     }
     osd_external_stop(&ext_bridge);
+    atomic_modeset_restore(fd, &ms);
+    modeset_result_cleanup(&ms);
     close(fd);
     PipelineRecordingStats rec_stats = {0};
     sse_streamer_publish(&sse_streamer, NULL, FALSE, cfg.record.enable ? TRUE : FALSE, &rec_stats);
