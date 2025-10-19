@@ -5,164 +5,102 @@
 #include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
-#include <time.h>
 #include <signal.h>
 #include <errno.h>
+#include <ctype.h>
 #include <limits.h>
+#include <math.h>
+#include <poll.h>
+#include <getopt.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <getopt.h>
-#include <math.h>
-#include <poll.h>
-#include <ctype.h>
+#include <time.h>
+
+#define SLOT_COUNT 8
+#define MAX_TEXT_LEN 64
+#define UDP_BUFFER 1024
+#define JSON_BUFFER 1024
+#define DEFAULT_POLL_INTERVAL_MS 200
 
 static volatile sig_atomic_t g_stop = 0;
 static bool g_verbose = false;
-static void on_sigint(int sig) { (void)sig; g_stop = 1; }
 
-static uint64_t now_ms(void) {
+static void on_signal(int sig)
+{
+    (void)sig;
+    g_stop = 1;
+}
+
+static uint64_t now_ms(void)
+{
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
 
-static void usage(const char *argv0) {
-    fprintf(stderr,
-        "Usage: %s [-s SOCKET] [-p PORT] [-b ADDR] [-T TTL_MS] [-v]\n"
-        "  -s, --socket   Path to UNIX DGRAM socket (default: /run/pixelpilot/osd.sock)\n"
-        "  -p, --port     UDP port to listen on (default: 5005)\n"
-        "  -b, --bind     UDP bind address (default: 0.0.0.0)\n"
-        "  -T, --ttl      Include ttl_ms in JSON (default: 0 = omit)\n"
-        "  -v, --verbose  Enable verbose logging to stdout\n",
-        argv0);
-}
-
-static int send_json(int fd, const char *sock_path, const char *json)
+static void usage(const char *prog)
 {
-    size_t len = strlen(json);
-    ssize_t sent = send(fd, json, len, 0);
-    if (sent < 0) {
-        fprintf(stderr, "send() to %s failed: %s\n", sock_path, strerror(errno));
-        return -1;
-    }
-    return 0;
+    fprintf(stderr,
+            "Usage: %s [options]\n"
+            "  -s, --socket PATH   UNIX datagram socket path (default: /run/pixelpilot/osd.sock)\n"
+            "  -b, --bind ADDR     UDP bind address (default: 0.0.0.0)\n"
+            "  -p, --port PORT     UDP port (default: 5005)\n"
+            "  -T, --ttl  MS       Default ttl_ms to include when none active (default: 0)\n"
+            "  -v, --verbose       Verbose logging\n"
+            "  -h, --help          Show this help\n",
+            prog);
 }
 
-#define MAX_ENTRIES 8
+struct slot_state {
+    bool has_text;
+    char text[MAX_TEXT_LEN];
+    uint64_t text_expiry; // 0 means no TTL tracking
 
-static void copy_label(char *dst, size_t dst_len, const char *src) {
-    if (!dst || dst_len == 0) {
-        return;
-    }
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-    size_t len = strnlen(src, dst_len - 1);
-    memcpy(dst, src, len);
-    dst[len] = '\0';
-}
-
-struct feed_slot {
-    bool is_metric;
-    bool text_active;
-    bool value_active;
-    char text[64];
+    bool has_value;
     double value;
-    uint64_t text_ttl_ms;
-    uint64_t value_ttl_ms;
-    uint64_t last_emit_ms;
-    unsigned long long send_counter;
+    uint64_t value_expiry; // 0 means no TTL tracking
 };
 
-static bool parse_metric(const char *payload, const char *key, double *out) {
-    char pattern[32];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-    const char *pos = strstr(payload, pattern);
-    if (!pos) return false;
-    pos += strlen(pattern);
-    while (*pos == ' ' || *pos == '\t') {
-        pos++;
+static void clear_text(struct slot_state *slot)
+{
+    if (!slot->has_text) {
+        return;
     }
-    errno = 0;
-    char *endptr = NULL;
-    double value = strtod(pos, &endptr);
-    if (errno != 0 || endptr == pos) {
-        return false;
-    }
-    *out = value;
-    return true;
+    slot->has_text = false;
+    slot->text[0] = '\0';
+    slot->text_expiry = 0;
 }
 
-static size_t parse_string_array(const char *payload, const char *key, char out[][64], size_t max) {
-    char pattern[32];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-    const char *pos = strstr(payload, pattern);
-    if (!pos) return 0;
-    pos = strchr(pos, '[');
-    if (!pos) return 0;
-    pos++;
-    size_t count = 0;
-    while (*pos && count < max) {
-        while (*pos && isspace((unsigned char)*pos)) pos++;
-        if (*pos == ']') break;
-        if (*pos != '"') break;
-        pos++;
-        size_t len = 0;
-        while (pos[len] && pos[len] != '"') {
-            if (pos[len] == '\\' && pos[len + 1]) {
-                len += 2;
-            } else {
-                len++;
-            }
-        }
-        size_t copy = 0;
-        for (size_t i = 0; i < len && copy + 1 < 64; ++i) {
-            if (pos[i] == '\\' && i + 1 < len) {
-                out[count][copy++] = pos[i + 1];
-                ++i;
-            } else {
-                out[count][copy++] = pos[i];
-            }
-        }
-        out[count][copy] = '\0';
-        pos += len;
-        if (*pos == '"') pos++;
-        while (*pos && *pos != ',' && *pos != ']') pos++;
-        if (*pos == ',') pos++;
-        count++;
+static void clear_value(struct slot_state *slot)
+{
+    if (!slot->has_value) {
+        return;
     }
-    return count;
+    slot->has_value = false;
+    slot->value = 0.0;
+    slot->value_expiry = 0;
 }
 
-static size_t parse_number_array(const char *payload, const char *key, double out[], size_t max) {
-    char pattern[32];
-    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
-    const char *pos = strstr(payload, pattern);
-    if (!pos) return 0;
-    pos = strchr(pos, '[');
-    if (!pos) return 0;
-    pos++;
-    size_t count = 0;
-    while (*pos && count < max) {
-        while (*pos && isspace((unsigned char)*pos)) pos++;
-        if (*pos == ']') break;
-        char *endptr = NULL;
-        double value = strtod(pos, &endptr);
-        if (endptr == pos) {
-            break;
-        }
-        out[count++] = value;
-        pos = endptr;
-        while (*pos && *pos != ',' && *pos != ']') pos++;
-        if (*pos == ',') pos++;
+static uint64_t add_ttl(uint64_t base, uint64_t ttl_ms)
+{
+    if (ttl_ms == 0) {
+        return 0;
     }
-    return count;
+    if (UINT64_MAX - base <= ttl_ms) {
+        return UINT64_MAX;
+    }
+    return base + ttl_ms;
 }
 
-static bool parse_uint_field(const char *payload, const char *key, uint64_t *out) {
+static bool ttl_active(uint64_t expiry, uint64_t now)
+{
+    return expiry > 0 && expiry > now;
+}
+
+static bool parse_uint_field(const char *payload, const char *key, uint64_t *value)
+{
     char pattern[32];
     snprintf(pattern, sizeof(pattern), "\"%s\":", key);
     const char *pos = strstr(payload, pattern);
@@ -170,181 +108,520 @@ static bool parse_uint_field(const char *payload, const char *key, uint64_t *out
         return false;
     }
     pos += strlen(pattern);
-    while (*pos && isspace((unsigned char)*pos)) pos++;
+    while (*pos && isspace((unsigned char)*pos)) {
+        pos++;
+    }
     errno = 0;
-    char *endptr = NULL;
-    unsigned long long value = strtoull(pos, &endptr, 10);
-    if (errno != 0 || endptr == pos) {
+    char *end = NULL;
+    unsigned long long tmp = strtoull(pos, &end, 10);
+    if (errno != 0 || end == pos) {
         return false;
     }
-    *out = (uint64_t)value;
+    *value = (uint64_t)tmp;
     return true;
 }
 
-static size_t extract_known_metrics(const char *payload, char labels[][64], double values[], size_t max) {
-    struct key_map { const char *key; const char *label; };
-    static const struct key_map fallback_keys[] = {
-        {"rssi", "RSSI"},
-        {"link_tx", "Link TX"},
-        {"link_rx", "Link RX"},
-        {"link_all", "Link ALL"},
-        {"link", "Link"}
-    };
+static int append_json_string(char *dst, size_t dst_len, const char *src)
+{
+    size_t off = 0;
+    if (dst_len < 3) {
+        return -1;
+    }
+    dst[off++] = '"';
+    for (const unsigned char *p = (const unsigned char *)src; *p; ++p) {
+        unsigned char c = *p;
+        if (c == '\"' || c == '\\') {
+            if (off + 2 >= dst_len) {
+                return -1;
+            }
+            dst[off++] = '\\';
+            dst[off++] = (char)c;
+        } else if (c == '\n') {
+            if (off + 2 >= dst_len) {
+                return -1;
+            }
+            dst[off++] = '\\';
+            dst[off++] = 'n';
+        } else if (c == '\r') {
+            if (off + 2 >= dst_len) {
+                return -1;
+            }
+            dst[off++] = '\\';
+            dst[off++] = 'r';
+        } else if (c == '\t') {
+            if (off + 2 >= dst_len) {
+                return -1;
+            }
+            dst[off++] = '\\';
+            dst[off++] = 't';
+        } else if (c < 0x20) {
+            if (off + 6 >= dst_len) {
+                return -1;
+            }
+            int written = snprintf(dst + off, dst_len - off, "\\u%04x", c);
+            if (written < 0 || (size_t)written >= dst_len - off) {
+                return -1;
+            }
+            off += (size_t)written;
+        } else {
+            if (off + 1 >= dst_len) {
+                return -1;
+            }
+            dst[off++] = (char)c;
+        }
+    }
+    if (off + 2 > dst_len) {
+        return -1;
+    }
+    dst[off++] = '"';
+    dst[off] = '\0';
+    return (int)off;
+}
+
+static size_t parse_string_array(const char *payload, const char *key, char out[][MAX_TEXT_LEN], size_t max_count)
+{
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *pos = strstr(payload, pattern);
+    if (!pos) {
+        return 0;
+    }
+    pos = strchr(pos, '[');
+    if (!pos) {
+        return 0;
+    }
+    pos++;
 
     size_t count = 0;
-    for (size_t i = 0; i < sizeof(fallback_keys)/sizeof(fallback_keys[0]) && count < max; ++i) {
-        double value;
-        if (parse_metric(payload, fallback_keys[i].key, &value)) {
-            bool duplicate = false;
-            for (size_t j = 0; j < count; ++j) {
-                if (strcmp(labels[j], fallback_keys[i].label) == 0) {
-                    duplicate = true;
-                    break;
-                }
+    while (*pos && count < max_count) {
+        while (*pos && isspace((unsigned char)*pos)) {
+            pos++;
+        }
+        if (*pos == ']') {
+            pos++;
+            break;
+        }
+        if (*pos != '\"') {
+            break;
+        }
+        pos++;
+        size_t len = 0;
+        const char *start = pos;
+        while (pos[len] && pos[len] != '\"') {
+            if (pos[len] == '\\' && pos[len + 1]) {
+                len += 2;
+            } else {
+                len++;
             }
-            if (duplicate) continue;
-            copy_label(labels[count], sizeof(labels[count]), fallback_keys[i].label);
-            values[count] = value;
-            count++;
+        }
+        size_t dst_i = 0;
+        for (size_t i = 0; i < len && dst_i + 1 < MAX_TEXT_LEN; ++i) {
+            char ch = start[i];
+            if (ch == '\\' && i + 1 < len) {
+                char next = start[i + 1];
+                switch (next) {
+                    case '\\': out[count][dst_i++] = '\\'; break;
+                    case '\"': out[count][dst_i++] = '\"'; break;
+                    case 'n': out[count][dst_i++] = '\n'; break;
+                    case 'r': out[count][dst_i++] = '\r'; break;
+                    case 't': out[count][dst_i++] = '\t'; break;
+                    default: out[count][dst_i++] = next; break;
+                }
+                ++i;
+            } else {
+                out[count][dst_i++] = ch;
+            }
+        }
+        out[count][dst_i] = '\0';
+        pos += len;
+        if (*pos == '\"') {
+            pos++;
+        }
+        while (*pos && *pos != ',' && *pos != ']') {
+            pos++;
+        }
+        if (*pos == ',') {
+            pos++;
+        }
+        count++;
+    }
+    return count;
+}
+
+static size_t parse_number_array(const char *payload, const char *key, double out[], size_t max_count)
+{
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    const char *pos = strstr(payload, pattern);
+    if (!pos) {
+        return 0;
+    }
+    pos = strchr(pos, '[');
+    if (!pos) {
+        return 0;
+    }
+    pos++;
+    size_t count = 0;
+    while (*pos && count < max_count) {
+        while (*pos && isspace((unsigned char)*pos)) {
+            pos++;
+        }
+        if (*pos == ']') {
+            pos++;
+            break;
+        }
+        errno = 0;
+        char *end = NULL;
+        double value = strtod(pos, &end);
+        if (end == pos || errno != 0) {
+            break;
+        }
+        out[count++] = value;
+        pos = end;
+        while (*pos && *pos != ',' && *pos != ']') {
+            pos++;
+        }
+        if (*pos == ',') {
+            pos++;
         }
     }
     return count;
 }
 
-static int build_osd_payload(const char *texts[], const double values[],
-                             const bool present[], size_t count,
-                             int ttl_ms, char *out, size_t out_len) {
-    char text_part[256] = "[";
-    char value_part[256] = "[";
-    size_t text_off = 1;
-    size_t value_off = 1;
-    bool first = true;
-    for (size_t i = 0; i < count; i++) {
-        if (!present[i]) continue;
-        if (!texts[i]) continue;
-        if (!first) {
-            if (text_off + 1 >= sizeof(text_part) || value_off + 1 >= sizeof(value_part)) {
-                return -1;
-            }
-            text_part[text_off++] = ',';
-            value_part[value_off++] = ',';
-        }
-        int written_text = snprintf(text_part + text_off, sizeof(text_part) - text_off,
-                                    "\"%s\"", texts[i]);
-        if (written_text < 0 || text_off + (size_t)written_text >= sizeof(text_part)) {
-            return -1;
-        }
-        text_off += (size_t)written_text;
-
-        int written_value = snprintf(value_part + value_off, sizeof(value_part) - value_off,
-                                     "%.2f", values[i]);
-        if (written_value < 0 || value_off + (size_t)written_value >= sizeof(value_part)) {
-            return -1;
-        }
-        value_off += (size_t)written_value;
-        first = false;
+static bool parse_metric(const char *payload, const char *key, double *value)
+{
+    char pattern[32];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char *pos = strstr(payload, pattern);
+    if (!pos) {
+        return false;
     }
-
-    if (text_off + 1 >= sizeof(text_part) || value_off + 1 >= sizeof(value_part)) {
-        return -1;
+    pos += strlen(pattern);
+    while (*pos && isspace((unsigned char)*pos)) {
+        pos++;
     }
-    text_part[text_off++] = ']';
-    text_part[text_off] = '\0';
-    value_part[value_off++] = ']';
-    value_part[value_off] = '\0';
-
-    if (ttl_ms > 0) {
-        return snprintf(out, out_len,
-                        "{\"text\":%s,\"value\":%s,\"ttl_ms\":%d}\n",
-                        text_part, value_part, ttl_ms);
+    errno = 0;
+    char *end = NULL;
+    double v = strtod(pos, &end);
+    if (end == pos || errno != 0) {
+        return false;
     }
-    return snprintf(out, out_len,
-                    "{\"text\":%s,\"value\":%s}\n",
-                    text_part, value_part);
+    *value = v;
+    return true;
 }
 
-static int ensure_unix_connection(int *fd, const char *sock_path)
+static void apply_text_update(struct slot_state *slots,
+                              size_t index,
+                              const char *text,
+                              uint64_t now,
+                              uint64_t ttl_ms,
+                              bool has_ttl,
+                              bool *changed)
+{
+    if (index >= SLOT_COUNT || !text) {
+        return;
+    }
+    if (text[0] == '\0') {
+        // Treat empty strings as no-op to avoid wiping other publishers unintentionally.
+        return;
+    }
+
+    struct slot_state *slot = &slots[index];
+    bool protect = has_ttl ? false : ttl_active(slot->text_expiry, now);
+    if (protect) {
+        if (g_verbose) {
+            fprintf(stdout, "Skip text slot %zu update because TTL protected (%.0f ms left)\n",
+                    index + 1,
+                    (double)(slot->text_expiry - now));
+            fflush(stdout);
+        }
+        return;
+    }
+
+    if (!slot->has_text || strcmp(slot->text, text) != 0) {
+        *changed = true;
+    }
+
+    slot->has_text = true;
+    strncpy(slot->text, text, MAX_TEXT_LEN - 1);
+    slot->text[MAX_TEXT_LEN - 1] = '\0';
+    slot->text_expiry = add_ttl(now, ttl_ms);
+}
+
+static void apply_value_update(struct slot_state *slots,
+                               size_t index,
+                               double value,
+                               uint64_t now,
+                               uint64_t ttl_ms,
+                               bool has_ttl,
+                               bool *changed)
+{
+    if (index >= SLOT_COUNT) {
+        return;
+    }
+    struct slot_state *slot = &slots[index];
+    bool protect = has_ttl ? false : ttl_active(slot->value_expiry, now);
+    if (protect) {
+        if (g_verbose) {
+            fprintf(stdout, "Skip value slot %zu update because TTL protected (%.0f ms left)\n",
+                    index + 1,
+                    (double)(slot->value_expiry - now));
+            fflush(stdout);
+        }
+        return;
+    }
+
+    if (!slot->has_value || fabs(slot->value - value) > 1e-6) {
+        *changed = true;
+    }
+    slot->has_value = true;
+    slot->value = value;
+    slot->value_expiry = add_ttl(now, ttl_ms);
+}
+
+static void apply_text_array(struct slot_state *slots,
+                             char texts[][MAX_TEXT_LEN],
+                             size_t count,
+                             uint64_t now,
+                             uint64_t ttl_ms,
+                             bool has_ttl,
+                             bool *changed)
+{
+    for (size_t i = 0; i < count && i < SLOT_COUNT; ++i) {
+        apply_text_update(slots, i, texts[i], now, ttl_ms, has_ttl, changed);
+    }
+}
+
+static void apply_value_array(struct slot_state *slots,
+                              const double values[],
+                              size_t count,
+                              uint64_t now,
+                              uint64_t ttl_ms,
+                              bool has_ttl,
+                              bool *changed)
+{
+    for (size_t i = 0; i < count && i < SLOT_COUNT; ++i) {
+        apply_value_update(slots, i, values[i], now, ttl_ms, has_ttl, changed);
+    }
+}
+
+static bool apply_fallback_metrics(const char *payload,
+                                   struct slot_state *slots,
+                                   uint64_t now,
+                                   uint64_t ttl_ms,
+                                   bool has_ttl,
+                                   bool *changed)
+{
+    static const struct {
+        const char *key;
+        const char *label;
+    } metrics[] = {
+        {"rssi", "RSSI"},
+        {"link_tx", "Link TX"},
+        {"link_rx", "Link RX"},
+        {"link_all", "Link ALL"},
+        {"link", "Link"},
+    };
+
+    size_t slot_index = 0;
+    bool applied = false;
+    for (size_t i = 0; i < sizeof(metrics) / sizeof(metrics[0]) && slot_index < SLOT_COUNT; ++i) {
+        double value;
+        if (!parse_metric(payload, metrics[i].key, &value)) {
+            continue;
+        }
+        apply_text_update(slots, slot_index, metrics[i].label, now, ttl_ms, has_ttl, changed);
+        apply_value_update(slots, slot_index, value, now, ttl_ms, has_ttl, changed);
+        slot_index++;
+        applied = true;
+    }
+    return applied;
+}
+
+static int ensure_unix_socket(int *fd, const char *path)
 {
     if (*fd >= 0) {
         return 0;
     }
 
-    int new_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
-    if (new_fd < 0) {
-        fprintf(stderr, "socket(AF_UNIX,SOCK_DGRAM) failed: %s\n", strerror(errno));
+    int sock = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        fprintf(stderr, "socket(AF_UNIX, SOCK_DGRAM) failed: %s\n", strerror(errno));
         return -1;
     }
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    if (strlen(sock_path) >= sizeof(addr.sun_path)) {
-        fprintf(stderr, "Socket path too long: %s\n", sock_path);
-        close(new_fd);
+    if (strlen(path) >= sizeof(addr.sun_path)) {
+        fprintf(stderr, "Socket path too long: %s\n", path);
+        close(sock);
         return -1;
     }
-    strcpy(addr.sun_path, sock_path);
+    strcpy(addr.sun_path, path);
 
-    if (connect(new_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "connect(%s) failed: %s\n", sock_path, strerror(errno));
-        close(new_fd);
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "connect(%s) failed: %s\n", path, strerror(errno));
+        close(sock);
         return -1;
     }
 
-    *fd = new_fd;
+    *fd = sock;
     if (g_verbose) {
-        fprintf(stdout, "Connected to UNIX socket %s\n", sock_path);
+        fprintf(stdout, "Connected to UNIX socket %s\n", path);
         fflush(stdout);
     }
     return 0;
 }
 
-int main(int argc, char **argv)
+static bool build_payload(const struct slot_state *slots,
+                          uint64_t now,
+                          int default_ttl_ms,
+                          char *out,
+                          size_t out_len)
 {
-    const char *sock_path = "/run/pixelpilot/osd.sock";
-    const char *bind_addr = "0.0.0.0";
-    int udp_port = 5005;
-    int ttl_ms = 0;
+    size_t off = 0;
+    if (out_len == 0) {
+        return false;
+    }
 
-    static struct option long_opts[] = {
-        {"socket", required_argument, 0, 's'},
-        {"port",   required_argument, 0, 'p'},
-        {"bind",   required_argument, 0, 'b'},
-        {"ttl",    required_argument, 0, 'T'},
-        {"verbose",no_argument,       0, 'v'},
-        {"help",   no_argument,       0, 'h'},
-        {0,0,0,0}
-    };
+    int written = snprintf(out + off, out_len - off, "{\"text\":[");
+    if (written < 0 || (size_t)written >= out_len - off) {
+        return false;
+    }
+    off += (size_t)written;
 
-    for (;;) {
-        int opt, idx=0;
-        opt = getopt_long(argc, argv, "s:p:b:T:vh", long_opts, &idx);
-        if (opt == -1) break;
-        switch (opt) {
-            case 's': sock_path = optarg; break;
-            case 'p': udp_port = atoi(optarg); break;
-            case 'b': bind_addr = optarg; break;
-            case 'T': ttl_ms = atoi(optarg); break;
-            case 'v': g_verbose = true; break;
-            case 'h': usage(argv[0]); return 0;
-            default:  usage(argv[0]); return 1;
+    for (size_t i = 0; i < SLOT_COUNT; ++i) {
+        if (i > 0) {
+            if (off + 1 >= out_len) {
+                return false;
+            }
+            out[off++] = ',';
+        }
+        char buffer[MAX_TEXT_LEN * 2];
+        int str_len = append_json_string(buffer, sizeof(buffer), slots[i].has_text ? slots[i].text : "");
+        if (str_len < 0) {
+            return false;
+        }
+        if ((size_t)str_len >= out_len - off) {
+            return false;
+        }
+        memcpy(out + off, buffer, (size_t)str_len);
+        off += (size_t)str_len;
+    }
+
+    if (off + 11 >= out_len) {
+        return false;
+    }
+    memcpy(out + off, "],\"value\":[", 11);
+    off += 11;
+
+    for (size_t i = 0; i < SLOT_COUNT; ++i) {
+        if (i > 0) {
+            if (off + 1 >= out_len) {
+                return false;
+            }
+            out[off++] = ',';
+        }
+        double value = slots[i].has_value ? slots[i].value : 0.0;
+        written = snprintf(out + off, out_len - off, "%.2f", value);
+        if (written < 0 || (size_t)written >= out_len - off) {
+            return false;
+        }
+        off += (size_t)written;
+    }
+
+    uint64_t max_remaining = 0;
+    for (size_t i = 0; i < SLOT_COUNT; ++i) {
+        if (slots[i].has_text && slots[i].text_expiry > now) {
+            uint64_t remain = slots[i].text_expiry - now;
+            if (remain > max_remaining) {
+                max_remaining = remain;
+            }
+        }
+        if (slots[i].has_value && slots[i].value_expiry > now) {
+            uint64_t remain = slots[i].value_expiry - now;
+            if (remain > max_remaining) {
+                max_remaining = remain;
+            }
         }
     }
 
-    signal(SIGINT, on_sigint);
-    signal(SIGTERM, on_sigint);
+    if (default_ttl_ms > 0 && (uint64_t)default_ttl_ms > max_remaining) {
+        max_remaining = (uint64_t)default_ttl_ms;
+    }
 
-    int unix_fd = -1;
+    if (max_remaining > 0) {
+        uint64_t ttl_to_emit = max_remaining;
+        if (ttl_to_emit > (uint64_t)INT_MAX) {
+            ttl_to_emit = (uint64_t)INT_MAX;
+        }
+        written = snprintf(out + off, out_len - off, "],\"ttl_ms\":%llu}\n", (unsigned long long)ttl_to_emit);
+        if (written < 0 || (size_t)written >= out_len - off) {
+            return false;
+        }
+        off += (size_t)written;
+    } else {
+        if (off + 3 >= out_len) {
+            return false;
+        }
+        out[off++] = ']';
+        out[off++] = '}';
+        out[off++] = '\n';
+        out[off] = '\0';
+        return true;
+    }
+
+    return true;
+}
+
+int main(int argc, char **argv)
+{
+    const char *socket_path = "/run/pixelpilot/osd.sock";
+    const char *bind_addr = "0.0.0.0";
+    int port = 5005;
+    int default_ttl_ms = 0;
+
+    static const struct option long_opts[] = {
+        {"socket", required_argument, NULL, 's'},
+        {"bind", required_argument, NULL, 'b'},
+        {"port", required_argument, NULL, 'p'},
+        {"ttl", required_argument, NULL, 'T'},
+        {"verbose", no_argument, NULL, 'v'},
+        {"help", no_argument, NULL, 'h'},
+        {0, 0, 0, 0},
+    };
+
+    for (;;) {
+        int opt_index = 0;
+        int c = getopt_long(argc, argv, "s:b:p:T:vh", long_opts, &opt_index);
+        if (c == -1) {
+            break;
+        }
+        switch (c) {
+            case 's': socket_path = optarg; break;
+            case 'b': bind_addr = optarg; break;
+            case 'p': port = atoi(optarg); break;
+            case 'T': default_ttl_ms = atoi(optarg); if (default_ttl_ms < 0) default_ttl_ms = 0; break;
+            case 'v': g_verbose = true; break;
+            case 'h': usage(argv[0]); return 0;
+            default: usage(argv[0]); return 1;
+        }
+    }
+
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+
     int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp_fd < 0) {
-        fprintf(stderr, "socket(AF_INET,SOCK_DGRAM) failed: %s\n", strerror(errno));
+        fprintf(stderr, "socket(AF_INET, SOCK_DGRAM) failed: %s\n", strerror(errno));
         return 1;
     }
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)udp_port);
+    addr.sin_port = htons((uint16_t)port);
     if (strcmp(bind_addr, "*") == 0) {
         addr.sin_addr.s_addr = INADDR_ANY;
     } else if (inet_pton(AF_INET, bind_addr, &addr.sin_addr) != 1) {
@@ -353,33 +630,35 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (bind(udp_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(udp_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "bind() failed: %s\n", strerror(errno));
         close(udp_fd);
         return 1;
     }
 
     if (g_verbose) {
-        fprintf(stdout, "Listening on %s:%d for UDP metrics\n", bind_addr, udp_port);
+        fprintf(stdout, "Listening on %s:%d\n", bind_addr, port);
         fflush(stdout);
     }
 
-    struct feed_slot slots[MAX_ENTRIES] = {0};
+    struct slot_state slots[SLOT_COUNT];
+    memset(slots, 0, sizeof(slots));
 
-    const uint64_t connect_retry_ms = 1000;
-    uint64_t last_connect_attempt_ms = 0;
-    uint64_t last_tick_ms = now_ms();
+    int unix_fd = -1;
+    uint64_t last_connect_attempt = 0;
+    const uint64_t reconnect_interval = 1000;
 
-    char udp_buf[512];
-    char json_buf[512];
+    char udp_buf[UDP_BUFFER];
+    char json_buf[JSON_BUFFER];
+
     while (!g_stop) {
         struct pollfd pfd = {
             .fd = udp_fd,
-            .events = POLLIN
+            .events = POLLIN,
         };
 
-        int poll_rc = poll(&pfd, 1, 1000);
-        if (poll_rc < 0) {
+        int rc = poll(&pfd, 1, DEFAULT_POLL_INTERVAL_MS);
+        if (rc < 0) {
             if (errno == EINTR) {
                 continue;
             }
@@ -388,342 +667,86 @@ int main(int argc, char **argv)
         }
 
         uint64_t now = now_ms();
-        uint64_t elapsed_ms = now >= last_tick_ms ? now - last_tick_ms : 0;
-        last_tick_ms = now;
-
-        bool packet_updated = false;
-        bool state_changed = false;
-
-        if (elapsed_ms > 0) {
-            for (size_t i = 0; i < MAX_ENTRIES; ++i) {
-                struct feed_slot *slot = &slots[i];
-                bool slot_changed = false;
-
-                if (slot->text_active && slot->text_ttl_ms > 0) {
-                    if (elapsed_ms >= slot->text_ttl_ms) {
-                        slot->text_active = false;
-                        slot->text_ttl_ms = 0;
-                        slot->text[0] = '\0';
-                        slot_changed = true;
-                    } else {
-                        slot->text_ttl_ms -= elapsed_ms;
-                    }
+        bool ttl_changed = false;
+        for (size_t i = 0; i < SLOT_COUNT; ++i) {
+            struct slot_state *slot = &slots[i];
+            if (slot->has_text && slot->text_expiry > 0 && slot->text_expiry <= now) {
+                if (g_verbose) {
+                    fprintf(stdout, "Text slot %zu expired\n", i + 1);
+                    fflush(stdout);
                 }
-
-                if (slot->value_active && slot->value_ttl_ms > 0) {
-                    if (elapsed_ms >= slot->value_ttl_ms) {
-                        slot->value_active = false;
-                        slot->value_ttl_ms = 0;
-                        slot->value = 0.0;
-                        slot_changed = true;
-                    } else {
-                        slot->value_ttl_ms -= elapsed_ms;
-                    }
+                clear_text(slot);
+                ttl_changed = true;
+            }
+            if (slot->has_value && slot->value_expiry > 0 && slot->value_expiry <= now) {
+                if (g_verbose) {
+                    fprintf(stdout, "Value slot %zu expired\n", i + 1);
+                    fflush(stdout);
                 }
-
-                if (!slot->text_active && !slot->value_active) {
-                    if (slot->is_metric) {
-                        slot->is_metric = false;
-                    }
-                    if (slot_changed) {
-                        slot->last_emit_ms = 0;
-                        slot->send_counter = 0;
-                    }
-                }
-
-                if (slot_changed) {
-                    state_changed = true;
-                }
+                clear_value(slot);
+                ttl_changed = true;
             }
         }
 
-        if (poll_rc > 0 && (pfd.revents & POLLIN)) {
+        bool packet_applied = false;
+        if (rc > 0 && (pfd.revents & POLLIN)) {
             ssize_t n = recvfrom(udp_fd, udp_buf, sizeof(udp_buf) - 1, 0, NULL, NULL);
             if (n < 0) {
-                if (errno == EINTR) continue;
-                fprintf(stderr, "recvfrom() failed: %s\n", strerror(errno));
-            } else {
-                udp_buf[n] = '\0';
-
-                char parsed_texts[MAX_ENTRIES][64];
-                double parsed_values[MAX_ENTRIES];
-                size_t text_count = parse_string_array(udp_buf, "text", parsed_texts, MAX_ENTRIES);
-                size_t value_count = parse_number_array(udp_buf, "value", parsed_values, MAX_ENTRIES);
-                uint64_t ttl_ms_field = 0;
-                bool has_ttl_field = parse_uint_field(udp_buf, "ttl_ms", &ttl_ms_field);
-
-                if (text_count > 0 || value_count > 0) {
-                    size_t count = text_count > value_count ? text_count : value_count;
-                    for (size_t i = 0; i < count && i < MAX_ENTRIES; ++i) {
-                        const char *incoming_text = (i < text_count) ? parsed_texts[i] : "";
-                        bool text_nonempty = incoming_text && incoming_text[0] != '\0';
-                        bool has_value_component = (i < value_count);
-                        double value = has_value_component ? parsed_values[i] : 0.0;
-
-                        if (!text_nonempty && !has_value_component) {
-                            continue;
-                        }
-
-                        struct feed_slot *slot = &slots[i];
-                        bool prev_text_active = slot->text_active;
-                        bool prev_value_active = slot->value_active;
-                        bool prev_metric = slot->is_metric;
-                        double prev_value = slot->value;
-                        char prev_text[64];
-                        copy_label(prev_text, sizeof(prev_text), slot->text);
-
-                        bool slot_active_before = prev_text_active || prev_value_active;
-                        bool text_applied = false;
-                        bool value_applied = false;
-
-                        if (text_nonempty) {
-                            bool ttl_guard = slot->text_active && slot->text_ttl_ms > 0 && !has_ttl_field;
-                            if (ttl_guard) {
-                                if (g_verbose) {
-                                    fprintf(stdout,
-                                            "Ignoring slot %zu text update while TTL active\n",
-                                            i + 1);
-                                    fflush(stdout);
-                                }
-                            } else {
-                                copy_label(slot->text, sizeof(slot->text), incoming_text);
-                                slot->text_active = true;
-                                slot->text_ttl_ms = (has_ttl_field && ttl_ms_field > 0) ? ttl_ms_field : 0;
-                                if (!has_value_component) {
-                                    slot->is_metric = false;
-                                    slot->value_active = false;
-                                    slot->value_ttl_ms = 0;
-                                    slot->value = 0.0;
-                                }
-                                text_applied = true;
-                            }
-                        }
-
-                        if (has_value_component) {
-                            bool ttl_guard = slot->value_active && slot->value_ttl_ms > 0 && !has_ttl_field;
-                            bool locked_by_text = slot->text_active && slot->text_ttl_ms > 0 && !slot->is_metric && !has_ttl_field;
-                            if (ttl_guard || locked_by_text) {
-                                if (g_verbose) {
-                                    fprintf(stdout,
-                                            "Ignoring slot %zu value update while TTL active\n",
-                                            i + 1);
-                                    fflush(stdout);
-                                }
-                            } else {
-                                slot->value = value;
-                                slot->value_active = true;
-                                slot->value_ttl_ms = (has_ttl_field && ttl_ms_field > 0) ? ttl_ms_field : 0;
-                                slot->is_metric = true;
-                                value_applied = true;
-                            }
-                        }
-
-                        bool slot_active_after = slot->text_active || slot->value_active;
-
-                        if (slot_active_after && !slot_active_before) {
-                            slot->send_counter = 0;
-                            slot->last_emit_ms = 0;
-                        }
-
-                        if (!slot_active_after) {
-                            slot->is_metric = false;
-                            slot->value = 0.0;
-                            slot->text[0] = '\0';
-                            slot->text_ttl_ms = 0;
-                            slot->value_ttl_ms = 0;
-                        }
-
-                        if (slot_active_before != slot_active_after ||
-                            prev_metric != slot->is_metric ||
-                            (prev_text_active != slot->text_active) ||
-                            (slot->text_active && strcmp(prev_text, slot->text) != 0) ||
-                            (prev_value_active != slot->value_active) ||
-                            (slot->value_active && fabs(prev_value - slot->value) > 0.0001)) {
-                            state_changed = true;
-                        }
-
-                        if (text_applied || value_applied) {
-                            packet_updated = true;
-                        }
-                    }
-                } else {
-                    char fallback_labels[MAX_ENTRIES][64];
-                    double fallback_values[MAX_ENTRIES];
-                    size_t fallback_count = extract_known_metrics(udp_buf, fallback_labels, fallback_values, MAX_ENTRIES);
-                    if (fallback_count > 0) {
-                        for (size_t i = 0; i < fallback_count && i < MAX_ENTRIES; ++i) {
-                            struct feed_slot *slot = &slots[i];
-                            bool prev_text_active = slot->text_active;
-                            bool prev_value_active = slot->value_active;
-                            bool prev_metric = slot->is_metric;
-                            double prev_value = slot->value;
-                            char prev_text[64];
-                            copy_label(prev_text, sizeof(prev_text), slot->text);
-
-                            bool slot_active_before = prev_text_active || prev_value_active;
-                            bool text_applied = false;
-                            bool value_applied = false;
-
-                            bool text_guard = slot->text_active && slot->text_ttl_ms > 0 && !has_ttl_field;
-                            bool value_guard = slot->value_active && slot->value_ttl_ms > 0 && !has_ttl_field;
-                            bool locked_by_text = slot->text_active && slot->text_ttl_ms > 0 && !slot->is_metric && !has_ttl_field;
-
-                            if (text_guard) {
-                                if (g_verbose) {
-                                    fprintf(stdout,
-                                            "Ignoring slot %zu metric label update while TTL active\n",
-                                            i + 1);
-                                    fflush(stdout);
-                                }
-                            } else {
-                                copy_label(slot->text, sizeof(slot->text), fallback_labels[i]);
-                                slot->text_active = true;
-                                slot->text_ttl_ms = (has_ttl_field && ttl_ms_field > 0) ? ttl_ms_field : 0;
-                                text_applied = true;
-                            }
-
-                            if (value_guard || locked_by_text) {
-                                if (g_verbose) {
-                                    fprintf(stdout,
-                                            "Ignoring slot %zu metric value update while TTL active\n",
-                                            i + 1);
-                                    fflush(stdout);
-                                }
-                            } else {
-                                slot->value = fallback_values[i];
-                                slot->value_active = true;
-                                slot->value_ttl_ms = (has_ttl_field && ttl_ms_field > 0) ? ttl_ms_field : 0;
-                                slot->is_metric = true;
-                                value_applied = true;
-                            }
-
-                            bool slot_active_after = slot->text_active || slot->value_active;
-
-                            if (slot_active_after && !slot_active_before) {
-                                slot->send_counter = 0;
-                                slot->last_emit_ms = 0;
-                            }
-
-                            if (!slot_active_after) {
-                                slot->is_metric = false;
-                                slot->value = 0.0;
-                                slot->text[0] = '\0';
-                                slot->text_ttl_ms = 0;
-                                slot->value_ttl_ms = 0;
-                            }
-
-                            if (slot_active_before != slot_active_after ||
-                                prev_metric != slot->is_metric ||
-                                (prev_text_active != slot->text_active) ||
-                                (slot->text_active && strcmp(prev_text, slot->text) != 0) ||
-                                (prev_value_active != slot->value_active) ||
-                                (slot->value_active && fabs(prev_value - slot->value) > 0.0001)) {
-                                state_changed = true;
-                            }
-
-                            if (text_applied || value_applied) {
-                                packet_updated = true;
-                            }
-                        }
-                    }
+                if (errno == EINTR) {
+                    continue;
                 }
+                fprintf(stderr, "recvfrom() failed: %s\n", strerror(errno));
+                break;
             }
+            udp_buf[n] = '\0';
+
+            if (g_verbose) {
+                fprintf(stdout, "UDP: %s\n", udp_buf);
+                fflush(stdout);
+            }
+
+            uint64_t ttl_ms_field = 0;
+            bool has_ttl = parse_uint_field(udp_buf, "ttl_ms", &ttl_ms_field);
+            if (ttl_ms_field > (uint64_t)INT_MAX) {
+                ttl_ms_field = (uint64_t)INT_MAX;
+            }
+
+            bool changed = false;
+            char texts[SLOT_COUNT][MAX_TEXT_LEN];
+            size_t text_count = parse_string_array(udp_buf, "text", texts, SLOT_COUNT);
+            if (text_count > 0) {
+                apply_text_array(slots, texts, text_count, now, ttl_ms_field, has_ttl, &changed);
+            }
+
+            double values[SLOT_COUNT];
+            size_t value_count = parse_number_array(udp_buf, "value", values, SLOT_COUNT);
+            if (value_count > 0) {
+                apply_value_array(slots, values, value_count, now, ttl_ms_field, has_ttl, &changed);
+            }
+
+            bool fallback_used = false;
+            if (text_count == 0 && value_count == 0) {
+                fallback_used = apply_fallback_metrics(udp_buf, slots, now, ttl_ms_field, has_ttl, &changed);
+            }
+
+            packet_applied = changed || text_count > 0 || value_count > 0 || fallback_used;
         }
 
-        if (!packet_updated && !state_changed) {
+        if (!ttl_changed && !packet_applied) {
             continue;
         }
 
-        char text_buf[MAX_ENTRIES][64];
-        const char *text_ptrs[MAX_ENTRIES];
-        bool present_arr[MAX_ENTRIES];
-        double values_arr[MAX_ENTRIES];
-        size_t emit_count = MAX_ENTRIES;
-        bool any_ttl_slots = false;
-        uint64_t max_remaining_ttl_ms = 0;
-
-        for (size_t i = 0; i < MAX_ENTRIES; ++i) {
-            struct feed_slot *slot = &slots[i];
-
-            text_ptrs[i] = text_buf[i];
-            present_arr[i] = true;
-
-            bool slot_active = slot->text_active || slot->value_active;
-            if (!slot_active) {
-                text_buf[i][0] = '\0';
-                values_arr[i] = 0.0;
-                continue;
-            }
-
-            if (slot->text_active && slot->text_ttl_ms > 0) {
-                any_ttl_slots = true;
-                if (slot->text_ttl_ms > max_remaining_ttl_ms) {
-                    max_remaining_ttl_ms = slot->text_ttl_ms;
-                }
-            }
-
-            if (slot->value_active && slot->value_ttl_ms > 0) {
-                any_ttl_slots = true;
-                if (slot->value_ttl_ms > max_remaining_ttl_ms) {
-                    max_remaining_ttl_ms = slot->value_ttl_ms;
-                }
-            }
-
-            double freq_hz = 0.0;
-            if (slot->value_active && slot->last_emit_ms != 0) {
-                uint64_t delta_ms = now - slot->last_emit_ms;
-                if (delta_ms > 0) {
-                    freq_hz = 1000.0 / (double)delta_ms;
-                }
-            }
-
-            if (slot->is_metric && slot->value_active) {
-                snprintf(text_buf[i], sizeof(text_buf[i]),
-                         "%.32s #%llu @ %.2f Hz",
-                         slot->text[0] ? slot->text : "Metric",
-                         slot->send_counter + 1,
-                         freq_hz);
-            } else {
-                copy_label(text_buf[i], sizeof(text_buf[i]), slot->text_active ? slot->text : "");
-            }
-
-            values_arr[i] = slot->value_active ? slot->value : 0.0;
-
-            slot->last_emit_ms = now;
-            slot->send_counter++;
-        }
-
-        int message_ttl_ms = ttl_ms;
-        if (any_ttl_slots) {
-            uint64_t chosen = max_remaining_ttl_ms;
-            if (ttl_ms > 0 && (uint64_t)ttl_ms > chosen) {
-                chosen = (uint64_t)ttl_ms;
-            }
-            if (chosen > (uint64_t)INT_MAX) {
-                chosen = (uint64_t)INT_MAX;
-            }
-            if (chosen > 0 && chosen < (uint64_t)INT_MAX) {
-                message_ttl_ms = (int)chosen;
-            } else if (chosen == 0) {
-                message_ttl_ms = 1;
-            } else {
-                message_ttl_ms = INT_MAX;
-            }
-        }
-
-        int written = build_osd_payload(text_ptrs, values_arr, present_arr,
-                                        emit_count, message_ttl_ms, json_buf, sizeof(json_buf));
-        if (written < 0 || (size_t)written >= sizeof(json_buf)) {
+        if (!build_payload(slots, now, default_ttl_ms, json_buf, sizeof(json_buf))) {
             fprintf(stderr, "Failed to build JSON payload\n");
             continue;
         }
 
         if (unix_fd < 0) {
-            if (last_connect_attempt_ms == 0 || (now - last_connect_attempt_ms) >= connect_retry_ms) {
-                if (ensure_unix_connection(&unix_fd, sock_path) != 0) {
-                    last_connect_attempt_ms = now;
+            if (last_connect_attempt == 0 || now - last_connect_attempt >= reconnect_interval) {
+                if (ensure_unix_socket(&unix_fd, socket_path) != 0) {
+                    last_connect_attempt = now;
                 } else {
-                    last_connect_attempt_ms = now;
+                    last_connect_attempt = now;
                 }
             }
         }
@@ -732,10 +755,12 @@ int main(int argc, char **argv)
             continue;
         }
 
-        if (send_json(unix_fd, sock_path, json_buf) != 0) {
+        ssize_t sent = send(unix_fd, json_buf, strlen(json_buf), 0);
+        if (sent < 0) {
+            fprintf(stderr, "send() failed: %s\n", strerror(errno));
             close(unix_fd);
             unix_fd = -1;
-            last_connect_attempt_ms = now;
+            last_connect_attempt = now;
             continue;
         }
 
