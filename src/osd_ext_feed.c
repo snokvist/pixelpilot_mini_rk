@@ -23,6 +23,7 @@
 #define UDP_BUFFER 1024
 #define JSON_BUFFER 1024
 #define DEFAULT_POLL_INTERVAL_MS 200
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
 static volatile sig_atomic_t g_stop = 0;
 static bool g_verbose = false;
@@ -62,6 +63,26 @@ struct slot_state {
     double value;
     uint64_t value_expiry; // 0 means no TTL tracking
 };
+
+struct metric_stat {
+    uint64_t count;
+    uint64_t last_update_ms;
+};
+
+struct fallback_metric {
+    const char *key;
+    const char *label;
+};
+
+static const struct fallback_metric g_fallback_metrics[] = {
+    {"rssi", "RSSI"},
+    {"link_tx", "Link TX"},
+    {"link_rx", "Link RX"},
+    {"link_all", "Link ALL"},
+    {"link", "Link"},
+};
+
+static struct metric_stat g_fallback_stats[ARRAY_SIZE(g_fallback_metrics)];
 
 static void clear_text(struct slot_state *slot)
 {
@@ -412,25 +433,35 @@ static bool apply_fallback_metrics(const char *payload,
                                    bool has_ttl,
                                    bool *changed)
 {
-    static const struct {
-        const char *key;
-        const char *label;
-    } metrics[] = {
-        {"rssi", "RSSI"},
-        {"link_tx", "Link TX"},
-        {"link_rx", "Link RX"},
-        {"link_all", "Link ALL"},
-        {"link", "Link"},
-    };
-
     size_t slot_index = 0;
     bool applied = false;
-    for (size_t i = 0; i < sizeof(metrics) / sizeof(metrics[0]) && slot_index < SLOT_COUNT; ++i) {
+    for (size_t i = 0; i < ARRAY_SIZE(g_fallback_metrics) && slot_index < SLOT_COUNT; ++i) {
         double value;
-        if (!parse_metric(payload, metrics[i].key, &value)) {
+        if (!parse_metric(payload, g_fallback_metrics[i].key, &value)) {
             continue;
         }
-        apply_text_update(slots, slot_index, metrics[i].label, now, ttl_ms, has_ttl, changed);
+
+        struct metric_stat *stat = &g_fallback_stats[i];
+        uint64_t next_count = stat->count + 1;
+        double freq_hz = 0.0;
+        if (stat->last_update_ms != 0 && now > stat->last_update_ms) {
+            uint64_t delta_ms = now - stat->last_update_ms;
+            if (delta_ms > 0) {
+                freq_hz = 1000.0 / (double)delta_ms;
+            }
+        }
+        stat->count = next_count;
+        stat->last_update_ms = now;
+
+        char label_buf[MAX_TEXT_LEN];
+        snprintf(label_buf,
+                 sizeof(label_buf),
+                 "%.32s #%llu @ %.2f Hz",
+                 g_fallback_metrics[i].label,
+                 (unsigned long long)next_count,
+                 freq_hz);
+
+        apply_text_update(slots, slot_index, label_buf, now, ttl_ms, has_ttl, changed);
         apply_value_update(slots, slot_index, value, now, ttl_ms, has_ttl, changed);
         slot_index++;
         applied = true;
