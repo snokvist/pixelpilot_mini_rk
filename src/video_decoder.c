@@ -3,6 +3,7 @@
 #include "drm_props.h"
 #include "idr_requester.h"
 #include "logging.h"
+#include "stabilizer.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -102,6 +103,8 @@ struct VideoDecoder {
     GThread *display_thread;
 
     IdrRequester *idr_requester;
+
+    struct Stabilizer *stabilizer;
 };
 
 VideoDecoder *video_decoder_new(void) {
@@ -120,6 +123,12 @@ static inline guint64 get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (guint64)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
+}
+
+static inline guint64 get_time_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (guint64)ts.tv_sec * 1000000000ull + (guint64)ts.tv_nsec;
 }
 
 static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size) {
@@ -976,6 +985,25 @@ static gpointer frame_thread_func(gpointer data) {
 
             MppBuffer buffer = mpp_frame_get_buffer(frame);
             if (buffer != NULL) {
+                volatile gpointer *slot = (volatile gpointer *)&vd->stabilizer;
+                struct Stabilizer *stabilizer = (struct Stabilizer *)g_atomic_pointer_get(slot);
+                if (stabilizer != NULL) {
+                    const guint8 *base = (const guint8 *)mpp_buffer_get_ptr(buffer);
+                    RK_U32 stride = mpp_frame_get_hor_stride(frame);
+                    RK_U32 width = mpp_frame_get_width(frame);
+                    RK_U32 height = mpp_frame_get_height(frame);
+                    if (base != NULL && stride >= width && width > 0 && height > 0) {
+                        StabilizerFrameDescriptor desc = {0};
+                        desc.y_plane = base;
+                        desc.stride = stride;
+                        desc.width = width;
+                        desc.height = height;
+                        desc.pts = mpp_frame_get_pts(frame);
+                        desc.capture_ns = get_time_ns();
+                        stabilizer_submit_frame(stabilizer, &desc);
+                    }
+                }
+
                 MppBufferInfo info;
                 memset(&info, 0, sizeof(info));
                 if (mpp_buffer_info_get(buffer, &info) == MPP_OK) {
@@ -1141,6 +1169,7 @@ void video_decoder_deinit(VideoDecoder *vd) {
     }
 
     video_decoder_stop(vd);
+    vd->stabilizer = NULL;
 
     if (vd->packet) {
         mpp_packet_deinit(&vd->packet);
@@ -1420,6 +1449,14 @@ int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecode
              applied_center_x, applied_center_y, VIDEO_DECODER_MAX_PLANE_UPSCALE);
     }
     return 0;
+}
+
+void video_decoder_set_stabilizer(VideoDecoder *vd, struct Stabilizer *stabilizer) {
+    if (vd == NULL) {
+        return;
+    }
+    volatile gpointer *slot = (volatile gpointer *)&vd->stabilizer;
+    g_atomic_pointer_set(slot, stabilizer);
 }
 
 void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester) {

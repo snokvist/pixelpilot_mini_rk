@@ -60,6 +60,16 @@ typedef struct {
 } IdrCfg;
 
 typedef struct {
+    int enable;
+    unsigned int queue_depth;
+    unsigned int downscale_width;
+    unsigned int downscale_height;
+    unsigned int search_radius;
+    unsigned int inset_percent;
+    double smoothing_factor;
+} StabilizerCfg;
+
+typedef struct {
     char card_path[64];
     char connector_name[32];
     char config_path[PATH_MAX];
@@ -102,6 +112,7 @@ typedef struct {
     RecordCfg record;
     SseCfg sse;
     IdrCfg idr;
+    StabilizerCfg stabilizer;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);

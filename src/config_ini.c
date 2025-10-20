@@ -892,6 +892,70 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "stabilizer") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->stabilizer.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "queue-depth") == 0 || strcasecmp(key, "queue_depth") == 0) {
+            int depth = atoi(value);
+            if (depth < 1) {
+                LOGE("config: stabilizer.queue-depth must be positive");
+                depth = 1;
+            }
+            cfg->stabilizer.queue_depth = (unsigned int)depth;
+            return 0;
+        }
+        if (strcasecmp(key, "downscale") == 0 || strcasecmp(key, "grid") == 0) {
+            int w = 0, h = 0;
+            if (parse_size(value, &w, &h) != 0 || w <= 0 || h <= 0) {
+                LOGE("config: stabilizer.downscale expects WxH");
+                return -1;
+            }
+            cfg->stabilizer.downscale_width = (unsigned int)w;
+            cfg->stabilizer.downscale_height = (unsigned int)h;
+            return 0;
+        }
+        if (strcasecmp(key, "search-radius") == 0 || strcasecmp(key, "search_radius") == 0) {
+            int radius = atoi(value);
+            if (radius < 1) {
+                LOGE("config: stabilizer.search-radius must be positive");
+                radius = 1;
+            }
+            cfg->stabilizer.search_radius = (unsigned int)radius;
+            return 0;
+        }
+        if (strcasecmp(key, "inset-percent") == 0 || strcasecmp(key, "inset_percent") == 0) {
+            int inset = atoi(value);
+            if (inset < 0) {
+                inset = 0;
+            }
+            if (inset > 45) {
+                inset = 45;
+            }
+            cfg->stabilizer.inset_percent = (unsigned int)inset;
+            return 0;
+        }
+        if (strcasecmp(key, "smoothing") == 0 || strcasecmp(key, "smoothing-factor") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                return -1;
+            }
+            if (v < 0.0) {
+                v = 0.0;
+            }
+            if (v > 0.99) {
+                v = 0.99;
+            }
+            cfg->stabilizer.smoothing_factor = v;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "audio") == 0) {
         if (strcasecmp(key, "device") == 0) {
             ini_copy_string(cfg->aud_dev, sizeof(cfg->aud_dev), value);

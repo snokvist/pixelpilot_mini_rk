@@ -54,6 +54,12 @@ to the defaults listed in `src/config.c` when omitted.
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
 | `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
+| `[stabilizer].enable` | `true` enables the translation-only electronic stabilizer that nudges the decoder crop window each frame. |
+| `[stabilizer].queue-depth` | Number of downsampled frames buffered for motion analysis (default `3`). |
+| `[stabilizer].downscale` | Resolution of the luma grid used for block matching, e.g. `96x54`. |
+| `[stabilizer].search-radius` | Maximum translation (in grid pixels) scanned while matching successive frames. |
+| `[stabilizer].inset-percent` | Percent of the frame cropped on each edge to provide motion headroom (default `8`). |
+| `[stabilizer].smoothing` | Exponential smoothing factor (0.0–0.99) applied to the integrated offsets. |
 | `[idr].enable` | `true` enables the automatic IDR requester that fires HTTP recovery bursts when decode warnings appear. |
 | `[idr].port` | HTTP port that exposes the IDR trigger endpoint (default `80`). |
 | `[idr].path` | HTTP path used when issuing the inline request (default `/request/idr`). |

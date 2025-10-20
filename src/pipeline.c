@@ -1163,6 +1163,15 @@ static void cleanup_pipeline(PipelineState *ps) {
     ps->appsink_thread_running = FALSE;
 
     if (ps->decoder != NULL) {
+        video_decoder_set_stabilizer(ps->decoder, NULL);
+    }
+
+    if (ps->stabilizer != NULL) {
+        stabilizer_free(ps->stabilizer);
+        ps->stabilizer = NULL;
+    }
+
+    if (ps->decoder != NULL) {
         video_decoder_free(ps->decoder);
         ps->decoder = NULL;
     }
@@ -1312,6 +1321,27 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     }
     ps->decoder_initialized = TRUE;
 
+    if (cfg->stabilizer.enable) {
+        if (ps->stabilizer == NULL) {
+            ps->stabilizer = stabilizer_new();
+            if (ps->stabilizer == NULL) {
+                LOGE("Failed to allocate stabilizer state");
+                goto fail;
+            }
+        }
+        if (stabilizer_configure(ps->stabilizer, &cfg->stabilizer) != 0) {
+            LOGE("Failed to configure stabilizer");
+            goto fail;
+        }
+        video_decoder_set_stabilizer(ps->decoder, ps->stabilizer);
+    } else {
+        if (ps->stabilizer != NULL) {
+            stabilizer_free(ps->stabilizer);
+            ps->stabilizer = NULL;
+        }
+        video_decoder_set_stabilizer(ps->decoder, NULL);
+    }
+
     video_decoder_set_idr_requester(ps->decoder, ps->idr_requester);
 
     if (video_decoder_start(ps->decoder) != 0) {
@@ -1319,6 +1349,15 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         goto fail;
     }
     ps->decoder_running = TRUE;
+
+    if (ps->stabilizer != NULL && cfg->stabilizer.enable) {
+        if (stabilizer_start(ps->stabilizer, ps->decoder) != 0) {
+            LOGW("Failed to start stabilizer worker; continuing without stabilization");
+            stabilizer_free(ps->stabilizer);
+            ps->stabilizer = NULL;
+            video_decoder_set_stabilizer(ps->decoder, NULL);
+        }
+    }
 
     if (cfg->record.enable && cfg->record.output_path[0] != '\0') {
         if (pipeline_enable_recording(ps, &cfg->record) != 0) {

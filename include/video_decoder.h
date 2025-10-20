@@ -10,6 +10,7 @@
 #include "idr_requester.h"
 
 typedef struct VideoDecoder VideoDecoder;
+struct Stabilizer;
 
 typedef struct {
     guint32 scale_x_percent;
@@ -40,6 +41,8 @@ void video_decoder_send_eos(VideoDecoder *vd);
 void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester);
 
 int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecoderZoomRequest *request);
+
+void video_decoder_set_stabilizer(VideoDecoder *vd, struct Stabilizer *stabilizer);
 
 size_t video_decoder_max_packet_size(const VideoDecoder *vd);
 
