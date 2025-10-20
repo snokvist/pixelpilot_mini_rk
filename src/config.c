@@ -35,6 +35,13 @@ static void usage(const char *prog) {
             "  --record-video [PATH]        (enable MP4 capture; optional PATH or directory, default /media)\n"
             "  --record-mode MODE           (standard|sequential|fragmented; default: sequential)\n"
             "  --no-record-video            (disable MP4 recording)\n"
+            "  --stabilizer-enable          (enable electronic stabilization)\n"
+            "  --stabilizer-disable         (disable electronic stabilization)\n"
+            "  --stabilizer-queue-depth N   (analysis queue depth; default: 3)\n"
+            "  --stabilizer-downscale WxH   (downsample grid, default: 96x54)\n"
+            "  --stabilizer-search-radius N (search radius in grid pixels; default: 6)\n"
+            "  --stabilizer-inset-percent N (crop inset percent; default: 8)\n"
+            "  --stabilizer-smoothing F     (smoothing factor 0.0-0.99; default: 0.4)\n"
             "  --sse-enable                 (enable stats SSE streamer)\n"
             "  --sse-bind ADDR              (bind address for SSE streamer; default: 127.0.0.1)\n"
             "  --sse-port N                 (TCP port for SSE streamer; default: 8080)\n"
@@ -191,6 +198,14 @@ void cfg_defaults(AppCfg *c) {
     c->idr.http_port = 80;
     c->idr.http_timeout_ms = 200;
     strcpy(c->idr.http_path, "/request/idr");
+
+    c->stabilizer.enable = 0;
+    c->stabilizer.queue_depth = 3;
+    c->stabilizer.downscale_width = 96;
+    c->stabilizer.downscale_height = 54;
+    c->stabilizer.search_radius = 6;
+    c->stabilizer.inset_percent = 8;
+    c->stabilizer.smoothing_factor = 0.4;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -271,6 +286,24 @@ static void cli_copy_string(char *dst, size_t dst_size, const char *src) {
     }
     memcpy(dst, src, copy_len);
     dst[copy_len] = '\0';
+}
+
+static int cli_parse_dimensions(const char *value, unsigned int *w_out, unsigned int *h_out) {
+    if (value == NULL || w_out == NULL || h_out == NULL) {
+        return -1;
+    }
+    unsigned int w = 0;
+    unsigned int h = 0;
+    if (sscanf(value, "%ux%u", &w, &h) != 2 && sscanf(value, "%uX%u", &w, &h) != 2 &&
+        sscanf(value, "%u,%u", &w, &h) != 2) {
+        return -1;
+    }
+    if (w == 0 || h == 0) {
+        return -1;
+    }
+    *w_out = w;
+    *h_out = h;
+    return 0;
 }
 
 int parse_cli(int argc, char **argv, AppCfg *cfg) {
@@ -378,6 +411,68 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--no-record-video")) {
             cfg->record.enable = 0;
             cfg->record.output_path[0] = '\0';
+        } else if (!strcmp(argv[i], "--stabilizer-enable")) {
+            cfg->stabilizer.enable = 1;
+        } else if (!strcmp(argv[i], "--stabilizer-disable")) {
+            cfg->stabilizer.enable = 0;
+        } else if (!strcmp(argv[i], "--stabilizer-queue-depth") && i + 1 < argc) {
+            int depth = atoi(argv[++i]);
+            if (depth < 1) {
+                LOGW("--stabilizer-queue-depth must be at least 1; clamping to 1");
+                depth = 1;
+            }
+            cfg->stabilizer.queue_depth = (unsigned int)depth;
+        } else if (!strcmp(argv[i], "--stabilizer-queue-depth")) {
+            LOGE("--stabilizer-queue-depth requires a positive integer");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-downscale") && i + 1 < argc) {
+            unsigned int w = 0, h = 0;
+            if (cli_parse_dimensions(argv[++i], &w, &h) != 0) {
+                LOGE("--stabilizer-downscale expects WxH");
+                return -1;
+            }
+            cfg->stabilizer.downscale_width = w;
+            cfg->stabilizer.downscale_height = h;
+        } else if (!strcmp(argv[i], "--stabilizer-downscale")) {
+            LOGE("--stabilizer-downscale requires WxH");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-search-radius") && i + 1 < argc) {
+            int radius = atoi(argv[++i]);
+            if (radius < 1) {
+                LOGW("--stabilizer-search-radius must be positive; clamping to 1");
+                radius = 1;
+            }
+            cfg->stabilizer.search_radius = (unsigned int)radius;
+        } else if (!strcmp(argv[i], "--stabilizer-search-radius")) {
+            LOGE("--stabilizer-search-radius requires a positive integer");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-inset-percent") && i + 1 < argc) {
+            int inset = atoi(argv[++i]);
+            if (inset < 0) {
+                inset = 0;
+            }
+            if (inset > 45) {
+                LOGW("--stabilizer-inset-percent capped to 45");
+                inset = 45;
+            }
+            cfg->stabilizer.inset_percent = (unsigned int)inset;
+        } else if (!strcmp(argv[i], "--stabilizer-inset-percent")) {
+            LOGE("--stabilizer-inset-percent requires a value between 0 and 45");
+            return -1;
+        } else if (!strcmp(argv[i], "--stabilizer-smoothing") && i + 1 < argc) {
+            char *endptr = NULL;
+            double smoothing = strtod(argv[++i], &endptr);
+            if (endptr == argv[i] || smoothing < 0.0) {
+                LOGE("--stabilizer-smoothing requires a numeric value");
+                return -1;
+            }
+            if (smoothing > 0.99) {
+                smoothing = 0.99;
+            }
+            cfg->stabilizer.smoothing_factor = smoothing;
+        } else if (!strcmp(argv[i], "--stabilizer-smoothing")) {
+            LOGE("--stabilizer-smoothing requires a numeric argument");
+            return -1;
         } else if (!strcmp(argv[i], "--sse-enable")) {
             cfg->sse.enable = 1;
         } else if (!strcmp(argv[i], "--sse-bind") && i + 1 < argc) {

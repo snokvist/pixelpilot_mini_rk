@@ -7,6 +7,7 @@
 #include "udp_receiver.h"
 #include "video_decoder.h"
 #include "idr_requester.h"
+#include "stabilizer.h"
 
 typedef enum {
     PIPELINE_STOPPED = 0,
@@ -52,6 +53,7 @@ typedef struct {
     guint64 last_udp_activity_ns;
     struct VideoRecorder *recorder;
     GMutex recorder_lock;
+    Stabilizer *stabilizer;
 } PipelineState;
 
 #include <limits.h>
