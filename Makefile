@@ -94,60 +94,47 @@ endif
 LDFLAGS += -lpthread -lm
 
 TARGET := pixelpilot_mini_rk
-COMPANION := osd_ext_feed
 
 SRC := $(wildcard src/*.c)
-APP_SRC := $(filter-out src/osd_ext_feed.c,$(SRC))
-APP_OBJ := $(APP_SRC:.c=.o)
-COMPANION_SRC := src/osd_ext_feed.c
-COMPANION_OBJ := $(COMPANION_SRC:.c=.o)
+OBJ := $(SRC:.c=.o)
 
-COMPANION_LDFLAGS := -lm
+all: $(TARGET)
 
-all: $(TARGET) $(COMPANION)
-
-$(TARGET): $(APP_OBJ)
-	$(CC) $(APP_OBJ) -o $@ $(LDFLAGS)
-
-$(COMPANION): $(COMPANION_OBJ)
-	$(CC) $(CFLAGS) $(COMPANION_OBJ) -o $@ $(COMPANION_LDFLAGS)
+$(TARGET): $(OBJ)
+	$(CC) $(OBJ) -o $@ $(LDFLAGS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(APP_OBJ) $(COMPANION_OBJ) $(TARGET) $(COMPANION)
+	rm -f $(OBJ) $(TARGET)
 
 install: all
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 0755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
-	install -m 0755 $(COMPANION) $(DESTDIR)$(BINDIR)/$(COMPANION)
-	ln -sf $(COMPANION) $(DESTDIR)$(BINDIR)/osd_external_feed
 	install -d $(DESTDIR)$(SYSCONFDIR)
 	sed -e 's|@ASSETDIR@|$(ASSETDIR)|g' config/pixelpilot_mini.ini > $(DESTDIR)$(SYSCONFDIR)/pixelpilot_mini.ini
 	chmod 0644 $(DESTDIR)$(SYSCONFDIR)/pixelpilot_mini.ini
 	install -d $(DESTDIR)$(SYSTEMD_DIR)
 	sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@SYSCONFDIR@|$(SYSCONFDIR)|g' systemd/pixelpilot_mini_rk.service > $(DESTDIR)$(SYSTEMD_DIR)/pixelpilot_mini_rk.service
-	sed -e 's|@BINDIR@|$(BINDIR)|g' systemd/osd_external_feed.service > $(DESTDIR)$(SYSTEMD_DIR)/osd_external_feed.service
-	chmod 0644 $(DESTDIR)$(SYSTEMD_DIR)/pixelpilot_mini_rk.service $(DESTDIR)$(SYSTEMD_DIR)/osd_external_feed.service
+	chmod 0644 $(DESTDIR)$(SYSTEMD_DIR)/pixelpilot_mini_rk.service
 	install -d $(DESTDIR)$(ASSETDIR)
 	install -m 0644 assets/spinner_ai_1080p30.h265 $(DESTDIR)$(ASSETDIR)/spinner_ai_1080p30.h265
 	@if [ -z "$(DESTDIR)" ] && command -v systemctl >/dev/null 2>&1; then \
-		systemctl daemon-reload; \
-		systemctl enable pixelpilot_mini_rk.service osd_external_feed.service; \
+	systemctl daemon-reload; \
+	systemctl enable pixelpilot_mini_rk.service; \
 	fi
 
 uninstall:
 	@if [ -z "$(DESTDIR)" ] && command -v systemctl >/dev/null 2>&1; then \
-		systemctl disable --now osd_external_feed.service 2>/dev/null || true; \
-		systemctl disable --now pixelpilot_mini_rk.service 2>/dev/null || true; \
+	systemctl disable --now pixelpilot_mini_rk.service 2>/dev/null || true; \
 	fi
-	rm -f $(DESTDIR)$(BINDIR)/$(TARGET) $(DESTDIR)$(BINDIR)/$(COMPANION) $(DESTDIR)$(BINDIR)/osd_external_feed
-	rm -f $(DESTDIR)$(SYSTEMD_DIR)/pixelpilot_mini_rk.service $(DESTDIR)$(SYSTEMD_DIR)/osd_external_feed.service
+	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
+	rm -f $(DESTDIR)$(SYSTEMD_DIR)/pixelpilot_mini_rk.service
 	rm -f $(DESTDIR)$(SYSCONFDIR)/pixelpilot_mini.ini
 	rm -f $(DESTDIR)$(ASSETDIR)/spinner_ai_1080p30.h265
 	@if [ -z "$(DESTDIR)" ] && command -v systemctl >/dev/null 2>&1; then \
-		systemctl daemon-reload; \
+	systemctl daemon-reload; \
 	fi
 
 .PHONY: all clean install uninstall

@@ -4,13 +4,13 @@ PixelPilot Mini RK is a lightweight receiver that ingests RTP video/audio over U
 
 ## Systemd service integration
 
-The project ships with systemd units for both the primary `pixelpilot_mini_rk` pipeline and the companion `osd_external_feed` helper. On Debian 11 (or other systemd-based distributions) install and enable them with:
+The project ships with a systemd unit for the primary `pixelpilot_mini_rk` pipeline. On Debian 11 (or other systemd-based distributions) install and enable it with:
 
 ```sh
 sudo make install
 ```
 
-This copies the binaries to `/usr/local/bin`, installs the unit files into `/etc/systemd/system`, reloads the systemd daemon, and enables both services so they start automatically on the next boot. The install target also writes a default `/etc/pixelpilot_mini.ini` configuration and places the bundled idle spinner at `/usr/local/share/pixelpilot_mini_rk/spinner_ai_1080p30.h265`. Adjust the INI after installation to tune the pipeline.
+This copies the binary to `/usr/local/bin`, installs the unit file into `/etc/systemd/system`, reloads the systemd daemon, and enables the service so it starts automatically on the next boot. The install target also writes a default `/etc/pixelpilot_mini.ini` configuration and places the bundled idle spinner at `/usr/local/share/pixelpilot_mini_rk/spinner_ai_1080p30.h265`. Adjust the INI after installation to tune the pipeline.
 
 To remove the services and binaries later, run:
 
@@ -18,7 +18,7 @@ To remove the services and binaries later, run:
 sudo make uninstall
 ```
 
-The uninstall target disables the services, removes the installed files (including the default INI and spinner asset), and reloads the systemd daemon to pick up the changes.
+The uninstall target disables the service, removes the installed files (including the default INI and spinner asset), and reloads the systemd daemon to pick up the changes.
 
 ## Configuration via INI
 

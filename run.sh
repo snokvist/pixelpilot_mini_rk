@@ -1,11 +1,10 @@
 #!/bin/sh
 
 # Usage:
-#   ./run.sh                          # starts OSD + pixelpilot with no config
+#   ./run.sh                          # starts pixelpilot with no config
 #   ./run.sh /path/to/config.ini      # starts with --config /path/to/config.ini
 #   ./run.sh /path/to/config.ini --verbose   # passes extra args to pixelpilot
 
-OSD_CMD="./osd_ext_feed"
 PIXEL_CMD="./pixelpilot_mini_rk"
 
 cleanup() {
@@ -19,23 +18,12 @@ cleanup() {
         wait "$PIXEL_PID" 2>/dev/null || true
     fi
 
-    if [ -n "${OSD_PID:-}" ]; then
-        if kill -0 "$OSD_PID" 2>/dev/null; then
-            kill "$OSD_PID" 2>/dev/null
-        fi
-        wait "$OSD_PID" 2>/dev/null || true
-    fi
-
     exit "$exit_code"
 }
 
 trap 'cleanup $?' EXIT
 trap 'cleanup 130' INT
 trap 'cleanup 143' TERM
-
-# Start OSD feeder
-"$OSD_CMD" &
-OSD_PID=$!
 
 # If an argument is provided, treat the FIRST as a config path for pixelpilot.
 # Any additional args after the first are passed through to pixelpilot.
