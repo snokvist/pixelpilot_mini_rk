@@ -95,7 +95,8 @@ typedef struct {
     struct {
         int enable;
         int enable_set;
-        char socket_path[PATH_MAX];
+        char bind_address[64];
+        int udp_port;
     } osd_external;
 
     SplashCfg splash;

@@ -334,11 +334,18 @@ int main(int argc, char **argv) {
     }
 
     if (cfg.osd_external.enable) {
-        if (cfg.osd_external.socket_path[0] == '\0') {
-            LOGW("External OSD feed enabled but no socket path configured; disabling listener");
+        if (cfg.osd_external.udp_port <= 0 || cfg.osd_external.udp_port > 65535) {
+            LOGW("External OSD feed enabled but invalid UDP port configured; disabling listener");
             cfg.osd_external.enable = 0;
-        } else if (osd_external_start(&ext_bridge, cfg.osd_external.socket_path) != 0) {
-            LOGW("Failed to start external OSD feed listener; continuing without external data");
+        } else {
+            const char *bind_addr = cfg.osd_external.bind_address;
+            char default_bind[] = "0.0.0.0";
+            if (!bind_addr || bind_addr[0] == '\0') {
+                bind_addr = default_bind;
+            }
+            if (osd_external_start(&ext_bridge, bind_addr, cfg.osd_external.udp_port) != 0) {
+                LOGW("Failed to start external OSD feed listener; continuing without external data");
+            }
         }
     }
 

@@ -955,11 +955,21 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->osd_external.enable_set = 1;
             return 0;
         }
-        if (strcasecmp(key, "socket") == 0 || strcasecmp(key, "path") == 0) {
-            ini_copy_string(cfg->osd_external.socket_path, sizeof(cfg->osd_external.socket_path), value);
-            if (!cfg->osd_external.enable_set && cfg->osd_external.socket_path[0] != '\0') {
-                cfg->osd_external.enable = 1;
+        if (strcasecmp(key, "udp-port") == 0 || strcasecmp(key, "port") == 0) {
+            cfg->osd_external.udp_port = atoi(value);
+            if (cfg->osd_external.udp_port > 0 && cfg->osd_external.udp_port <= 65535) {
+                if (!cfg->osd_external.enable_set) {
+                    cfg->osd_external.enable = 1;
+                }
+            } else {
+                LOGW("Ignoring invalid osd.external port value: %s", value);
+                cfg->osd_external.udp_port = 0;
             }
+            return 0;
+        }
+        if (strcasecmp(key, "bind") == 0 || strcasecmp(key, "address") == 0 ||
+            strcasecmp(key, "host") == 0) {
+            ini_copy_string(cfg->osd_external.bind_address, sizeof(cfg->osd_external.bind_address), value);
             return 0;
         }
         return -1;

@@ -1,5 +1,5 @@
 // osd_feed_test.c
-// Send dummy data for {ext.text1..8} and {ext.value1..8} to a UNIX DGRAM socket.
+// Send dummy data for {ext.text1..8} and {ext.value1..8} to the external OSD UDP port.
 // - Text rows show TICK that increments by 1 each second.
 // - Values follow sine curves (0.5 Hz) with per-channel phase offsets.
 // Build:  gcc -O2 -Wall -std=c11 osd_feed_test.c -o osd_feed_test -lm
@@ -16,7 +16,8 @@
 #include <errno.h>
 #include <math.h>
 #include <sys/socket.h>
-#include <sys/un.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <getopt.h>
 
 static volatile sig_atomic_t g_stop = 0;
@@ -30,8 +31,9 @@ static uint64_t now_ms(void) {
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-        "Usage: %s [-s SOCKET] [-i MS] [-n COUNT] [-T TTL_MS] [--clear]\n"
-        "  -s, --socket   Path to UNIX DGRAM socket (default: /run/pixelpilot/osd.sock)\n"
+        "Usage: %s [--host ADDR] [--port N] [-i MS] [-n COUNT] [-T TTL_MS] [--clear]\n"
+        "      --host     UDP host to send to (default: 127.0.0.1)\n"
+        "      --port     UDP port to send to (default: 5005)\n"
         "  -i, --interval Send every N milliseconds (default: 0 = send once)\n"
         "  -n, --count    Send this many messages (default: 0 = infinite if interval>0, else 1)\n"
         "  -T, --ttl      Include ttl_ms in JSON (default: 0 = omit)\n"
@@ -39,19 +41,10 @@ static void usage(const char *argv0) {
         argv0);
 }
 
-static int send_json(int fd, const char *sock_path, const char *json)
+static int send_json(int fd, const struct sockaddr_in *addr, const char *json)
 {
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    if (strlen(sock_path) >= sizeof(addr.sun_path)) {
-        fprintf(stderr, "Socket path too long: %s\n", sock_path);
-        return -1;
-    }
-    strcpy(addr.sun_path, sock_path);
-
     size_t len = strlen(json);
-    ssize_t sent = sendto(fd, json, len, 0, (struct sockaddr*)&addr, sizeof(addr));
+    ssize_t sent = sendto(fd, json, len, 0, (const struct sockaddr*)addr, sizeof(*addr));
     if (sent < 0) {
         fprintf(stderr, "sendto() failed: %s\n", strerror(errno));
         return -1;
@@ -61,7 +54,8 @@ static int send_json(int fd, const char *sock_path, const char *json)
 
 int main(int argc, char **argv)
 {
-    const char *sock_path = "/run/pixelpilot/osd.sock";
+    const char *host = "127.0.0.1";
+    int port = 5005;
     int interval_ms = 0;
     int count = 0;            // 0 = single shot if interval==0, infinite if interval>0
     int ttl_ms = 0;           // 0 = omit
@@ -69,7 +63,8 @@ int main(int argc, char **argv)
 
     // --clear handled via custom return code 1000
     static struct option long_opts[] = {
-        {"socket",   required_argument, 0, 's'},
+        {"host",     required_argument, 0, 1001},
+        {"port",     required_argument, 0, 1002},
         {"interval", required_argument, 0, 'i'},
         {"count",    required_argument, 0, 'n'},
         {"ttl",      required_argument, 0, 'T'},
@@ -80,10 +75,11 @@ int main(int argc, char **argv)
 
     for (;;) {
         int opt, idx=0;
-        opt = getopt_long(argc, argv, "s:i:n:T:h", long_opts, &idx);
+        opt = getopt_long(argc, argv, "i:n:T:h", long_opts, &idx);
         if (opt == -1) break;
         switch (opt) {
-            case 's': sock_path = optarg; break;
+            case 1001: host = optarg; break;
+            case 1002: port = atoi(optarg); break;
             case 'i': interval_ms = atoi(optarg); break;
             case 'n': count = atoi(optarg); break;
             case 'T': ttl_ms = atoi(optarg); break;
@@ -96,9 +92,19 @@ int main(int argc, char **argv)
     signal(SIGINT, on_sigint);
     signal(SIGTERM, on_sigint);
 
-    int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
-        fprintf(stderr, "socket(AF_UNIX,SOCK_DGRAM) failed: %s\n", strerror(errno));
+        fprintf(stderr, "socket(AF_INET,SOCK_DGRAM) failed: %s\n", strerror(errno));
+        return 1;
+    }
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons((uint16_t)port);
+    if (inet_pton(AF_INET, host, &dest.sin_addr) != 1) {
+        fprintf(stderr, "Invalid host address: %s\n", host);
+        close(fd);
         return 1;
     }
 
@@ -163,7 +169,7 @@ int main(int argc, char **argv)
                          text_part, value_part);
         }
 
-        if (send_json(fd, sock_path, buf) != 0) {
+        if (send_json(fd, &dest, buf) != 0) {
             // Non-fatal; prints error inside send_json
         } else {
             fprintf(stdout, "Sent: %s", buf);
