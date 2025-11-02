@@ -78,7 +78,11 @@ When the helper thread observes that `clock_gettime(CLOCK_MONOTONIC)` exceeds
 
   * `SCALE_X` / `SCALE_Y` request the window size as a percentage of the decoded
     frame. `100,100` shows the full frame; `50,50` crops to half the width and
-    height. Values below 1 are rejected. Values above 100 are clamped to 100.
+    height. Values below 1 are rejected. Values above 100 keep sampling the full
+    frame but shrink the plane on screen, centring it with black borders. For
+    example `zoom=150,150,50,50` renders the full frame at roughly two thirds of
+    the output size. When the axes differ, the larger percentage (smaller
+    shrink factor) wins so the picture stays proportional.
   * `CENTER_X` / `CENTER_Y` position the window by expressing its centre as a
     percentage of the frame. `50,50` keeps the crop centred, while `0,100` anchors
     it to the bottom-left. Positions above 100 are clamped toward the edges.
