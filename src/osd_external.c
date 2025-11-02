@@ -2,12 +2,13 @@
 #include "logging.h"
 
 #include <errno.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <time.h>
@@ -29,50 +30,37 @@ static uint64_t monotonic_ns(void) {
     return timespec_to_ns(&ts);
 }
 
-static int mkdir_p(const char *path, mode_t mode) {
-    if (!path || path[0] == '\0') {
+static uint64_t ttl_ms_to_ns(uint64_t ttl_ms) {
+    if (ttl_ms == 0) {
         return 0;
     }
-    char tmp[UNIX_PATH_MAX];
-    snprintf(tmp, sizeof(tmp), "%s", path);
-    size_t len = strnlen(tmp, sizeof(tmp));
-    if (len == 0) {
+    uint64_t ttl_ns = ttl_ms * 1000000ull;
+    if (ttl_ns / 1000000ull != ttl_ms) {
         return 0;
     }
-    if (tmp[len - 1] == '/') {
-        tmp[len - 1] = '\0';
-    }
-    for (char *p = tmp + 1; *p; ++p) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
-                *p = '/';
-                return -1;
-            }
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
-        return -1;
-    }
-    return 0;
+    return ttl_ns;
 }
 
-static int ensure_socket_directory(const char *socket_path) {
-    if (!socket_path || socket_path[0] == '\0') {
-        return 0;
+static void osd_external_update_expiry_locked(OsdExternalBridge *bridge) {
+    if (!bridge) {
+        return;
     }
-    char dir[UNIX_PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s", socket_path);
-    char *slash = strrchr(dir, '/');
-    if (!slash) {
-        return 0;
+    uint64_t next_expiry = 0;
+    for (size_t i = 0; i < OSD_EXTERNAL_MAX_TEXT; ++i) {
+        OsdExternalSlotState *slot = &bridge->slots[i];
+        if (slot->text_active && slot->text_expiry_ns > 0) {
+            if (next_expiry == 0 || slot->text_expiry_ns < next_expiry) {
+                next_expiry = slot->text_expiry_ns;
+            }
+        }
+        if (i < OSD_EXTERNAL_MAX_VALUES && slot->value_active && slot->value_expiry_ns > 0) {
+            if (next_expiry == 0 || slot->value_expiry_ns < next_expiry) {
+                next_expiry = slot->value_expiry_ns;
+            }
+        }
     }
-    if (slash == dir) {
-        return 0;
-    }
-    *slash = '\0';
-    return mkdir_p(dir, 0755);
+    bridge->expiry_ns = next_expiry;
+    bridge->snapshot.expiry_ns = next_expiry;
 }
 
 static void osd_external_reset_locked(OsdExternalBridge *bridge) {
@@ -85,17 +73,47 @@ static void osd_external_reset_locked(OsdExternalBridge *bridge) {
     }
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
+    bridge->expiry_ns = 0;
+    memset(bridge->slots, 0, sizeof(bridge->slots));
 }
 
 static void osd_external_expire_locked(OsdExternalBridge *bridge, uint64_t now_ns) {
     if (!bridge) {
         return;
     }
-    if (bridge->expiry_ns > 0 && now_ns >= bridge->expiry_ns) {
-        osd_external_reset_locked(bridge);
-        bridge->expiry_ns = 0;
+    int changed = 0;
+    for (size_t i = 0; i < OSD_EXTERNAL_MAX_TEXT; ++i) {
+        OsdExternalSlotState *slot = &bridge->slots[i];
+        if (slot->text_active && slot->text_expiry_ns > 0 && now_ns >= slot->text_expiry_ns) {
+            slot->text_active = 0;
+            slot->text_expiry_ns = 0;
+            if (bridge->snapshot.text[i][0] != '\0') {
+                bridge->snapshot.text[i][0] = '\0';
+                changed = 1;
+            }
+            if (!slot->value_active) {
+                slot->is_metric = 0;
+            }
+        }
+        if (slot->value_active && slot->value_expiry_ns > 0 && now_ns >= slot->value_expiry_ns && i < OSD_EXTERNAL_MAX_VALUES) {
+            slot->value_active = 0;
+            slot->value_expiry_ns = 0;
+            bridge->snapshot.value[i] = 0.0;
+            if (!slot->text_active) {
+                slot->is_metric = 0;
+            }
+            changed = 1;
+        }
+        if (!slot->text_active && !slot->value_active) {
+            slot->text_expiry_ns = 0;
+            slot->value_expiry_ns = 0;
+            slot->is_metric = 0;
+        }
     }
-    bridge->snapshot.expiry_ns = bridge->expiry_ns;
+    osd_external_update_expiry_locked(bridge);
+    if (changed) {
+        bridge->snapshot.last_update_ns = now_ns;
+    }
 }
 
 static int should_log_error(OsdExternalBridge *bridge, uint64_t now_ns) {
@@ -358,47 +376,136 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
         return;
     }
     pthread_mutex_lock(&bridge->lock);
-    if (msg->has_text) {
-        if (msg->text_count == 0) {
-            memset(bridge->snapshot.text, 0, sizeof(bridge->snapshot.text));
-        } else {
-            int i = 0;
-            for (; i < msg->text_count && i < OSD_EXTERNAL_MAX_TEXT; ++i) {
-                snprintf(bridge->snapshot.text[i], sizeof(bridge->snapshot.text[i]), "%s", msg->text[i]);
+    osd_external_expire_locked(bridge, now_ns);
+
+    size_t slot_count = OSD_EXTERNAL_MAX_TEXT;
+    size_t value_limit = OSD_EXTERNAL_MAX_VALUES;
+    if (value_limit > slot_count) {
+        value_limit = slot_count;
+    }
+
+    int has_ttl_field = msg->has_ttl;
+    uint64_t ttl_ns = ttl_ms_to_ns(msg->ttl_ms);
+    int changed = 0;
+
+    if (msg->has_text && msg->text_count == 0) {
+        for (size_t i = 0; i < OSD_EXTERNAL_MAX_TEXT; ++i) {
+            OsdExternalSlotState *slot = &bridge->slots[i];
+            if (slot->text_active || bridge->snapshot.text[i][0] != '\0') {
+                changed = 1;
             }
-            for (; i < OSD_EXTERNAL_MAX_TEXT; ++i) {
+            slot->text_active = 0;
+            slot->text_expiry_ns = 0;
+            bridge->snapshot.text[i][0] = '\0';
+            if (!slot->value_active) {
+                slot->is_metric = 0;
+            }
+        }
+    }
+
+    if (msg->has_value && msg->value_count == 0) {
+        for (size_t i = 0; i < value_limit; ++i) {
+            OsdExternalSlotState *slot = &bridge->slots[i];
+            if (slot->value_active || bridge->snapshot.value[i] != 0.0) {
+                changed = 1;
+            }
+            slot->value_active = 0;
+            slot->value_expiry_ns = 0;
+            bridge->snapshot.value[i] = 0.0;
+            if (!slot->text_active) {
+                slot->is_metric = 0;
+            }
+        }
+    }
+
+    size_t count = msg->text_count > msg->value_count ? msg->text_count : msg->value_count;
+    if (count > slot_count) {
+        count = slot_count;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        OsdExternalSlotState *slot = &bridge->slots[i];
+        const char *incoming_text = (i < (size_t)msg->text_count) ? msg->text[i] : "";
+        int text_nonempty = incoming_text && incoming_text[0] != '\0';
+        int value_present = (i < (size_t)msg->value_count);
+        double incoming_value = (value_present && i < value_limit) ? msg->value[i] : 0.0;
+
+        if (text_nonempty) {
+            int ttl_guard = slot->text_active && slot->text_expiry_ns > now_ns && !has_ttl_field;
+            if (!ttl_guard) {
+                if (!slot->text_active || strncmp(bridge->snapshot.text[i], incoming_text, sizeof(bridge->snapshot.text[i])) != 0) {
+                    changed = 1;
+                }
+                snprintf(bridge->snapshot.text[i], sizeof(bridge->snapshot.text[i]), "%s", incoming_text);
+                slot->text_active = 1;
+                if (has_ttl_field) {
+                    if (ttl_ns > 0 && ttl_ns <= UINT64_MAX - now_ns) {
+                        slot->text_expiry_ns = now_ns + ttl_ns;
+                    } else if (ttl_ns > 0) {
+                        slot->text_expiry_ns = 0;
+                    } else {
+                        slot->text_expiry_ns = 0;
+                    }
+                } else {
+                    slot->text_expiry_ns = 0;
+                }
+                if (!value_present || i >= value_limit) {
+                    if (slot->value_active) {
+                        changed = 1;
+                    }
+                    slot->value_active = 0;
+                    slot->value_expiry_ns = 0;
+                    if (i < value_limit) {
+                        bridge->snapshot.value[i] = 0.0;
+                    }
+                    slot->is_metric = 0;
+                }
+            }
+        }
+
+        if (value_present && i < value_limit) {
+            int ttl_guard = slot->value_active && slot->value_expiry_ns > now_ns && !has_ttl_field;
+            int locked_by_text = slot->text_active && slot->text_expiry_ns > now_ns && !slot->is_metric && !has_ttl_field;
+            if (!ttl_guard && !locked_by_text) {
+                if (!slot->value_active || bridge->snapshot.value[i] != incoming_value) {
+                    changed = 1;
+                }
+                bridge->snapshot.value[i] = incoming_value;
+                slot->value_active = 1;
+                slot->is_metric = 1;
+                if (has_ttl_field) {
+                    if (ttl_ns > 0 && ttl_ns <= UINT64_MAX - now_ns) {
+                        slot->value_expiry_ns = now_ns + ttl_ns;
+                    } else if (ttl_ns > 0) {
+                        slot->value_expiry_ns = 0;
+                    } else {
+                        slot->value_expiry_ns = 0;
+                    }
+                } else {
+                    slot->value_expiry_ns = 0;
+                }
+            }
+        }
+
+        if (!slot->text_active && !slot->value_active) {
+            slot->is_metric = 0;
+            slot->text_expiry_ns = 0;
+            slot->value_expiry_ns = 0;
+            if (bridge->snapshot.text[i][0] != '\0') {
                 bridge->snapshot.text[i][0] = '\0';
+                changed = 1;
             }
-        }
-    }
-    if (msg->has_value) {
-        if (msg->value_count == 0) {
-            for (int i = 0; i < OSD_EXTERNAL_MAX_VALUES; ++i) {
+            if (i < value_limit && bridge->snapshot.value[i] != 0.0) {
                 bridge->snapshot.value[i] = 0.0;
-            }
-        } else {
-            for (int i = 0; i < msg->value_count && i < OSD_EXTERNAL_MAX_VALUES; ++i) {
-                bridge->snapshot.value[i] = msg->value[i];
+                changed = 1;
             }
         }
     }
-    bridge->snapshot.last_update_ns = now_ns;
-    if (msg->has_ttl && msg->ttl_ms > 0) {
-        uint64_t ttl_ns = msg->ttl_ms * 1000000ull;
-        if (ttl_ns / 1000000ull != msg->ttl_ms) {
-            ttl_ns = 0;
-        }
-        if (ttl_ns > 0) {
-            bridge->expiry_ns = now_ns + ttl_ns;
-        } else {
-            bridge->expiry_ns = 0;
-        }
-    } else if (msg->has_ttl && msg->ttl_ms == 0) {
-        bridge->expiry_ns = now_ns;
-    } else {
-        bridge->expiry_ns = 0;
+
+    osd_external_update_expiry_locked(bridge);
+    if (changed) {
+        bridge->snapshot.last_update_ns = now_ns;
     }
-    bridge->snapshot.expiry_ns = bridge->expiry_ns;
     pthread_mutex_unlock(&bridge->lock);
 }
 
@@ -497,26 +604,23 @@ static void close_socket(OsdExternalBridge *bridge) {
         close(bridge->sock_fd);
         bridge->sock_fd = -1;
     }
-    if (bridge->socket_path[0] != '\0') {
-        unlink(bridge->socket_path);
-        bridge->socket_path[0] = '\0';
-    }
+    bridge->bind_address[0] = '\0';
+    bridge->udp_port = 0;
 }
 
-int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
+int osd_external_start(OsdExternalBridge *bridge, const char *bind_address, int udp_port) {
     if (!bridge) {
         return -1;
     }
     osd_external_stop(bridge);
-    if (!socket_path || socket_path[0] == '\0') {
-        return 0;
+    if (!bind_address || bind_address[0] == '\0') {
+        bind_address = "0.0.0.0";
     }
-    size_t path_len = strnlen(socket_path, UNIX_PATH_MAX - 1);
-    if (path_len == 0 || path_len >= UNIX_PATH_MAX) {
-        LOGW("OSD external feed: socket path too long: %s", socket_path);
+    if (udp_port <= 0 || udp_port > 65535) {
+        LOGW("OSD external feed: invalid UDP port %d", udp_port);
         return -1;
     }
-    int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
     if (fd < 0) {
         LOGW("OSD external feed: socket() failed: %s", strerror(errno));
         pthread_mutex_lock(&bridge->lock);
@@ -524,13 +628,19 @@ int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
         pthread_mutex_unlock(&bridge->lock);
         return -1;
     }
-    struct sockaddr_un addr;
+    int reuse = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) != 0) {
+        LOGW("OSD external feed: setsockopt(SO_REUSEADDR) failed: %s", strerror(errno));
+        // continue despite failure
+    }
+    struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, socket_path, sizeof(addr.sun_path) - 1);
-    unlink(addr.sun_path);
-    if (ensure_socket_directory(socket_path) != 0) {
-        LOGW("OSD external feed: unable to create parent directory for %s", socket_path);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)udp_port);
+    if (strcmp(bind_address, "*") == 0) {
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    } else if (inet_pton(AF_INET, bind_address, &addr.sin_addr) != 1) {
+        LOGW("OSD external feed: inet_pton failed for %s", bind_address);
         close(fd);
         pthread_mutex_lock(&bridge->lock);
         bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
@@ -538,7 +648,7 @@ int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
         return -1;
     }
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        LOGW("OSD external feed: bind(%s) failed: %s", socket_path, strerror(errno));
+        LOGW("OSD external feed: bind(%s:%d) failed: %s", bind_address, udp_port, strerror(errno));
         close(fd);
         pthread_mutex_lock(&bridge->lock);
         bridge->snapshot.status = OSD_EXTERNAL_STATUS_ERROR;
@@ -547,8 +657,8 @@ int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
     }
     pthread_mutex_lock(&bridge->lock);
     bridge->sock_fd = fd;
-    strncpy(bridge->socket_path, socket_path, sizeof(bridge->socket_path) - 1);
-    bridge->socket_path[sizeof(bridge->socket_path) - 1] = '\0';
+    snprintf(bridge->bind_address, sizeof(bridge->bind_address), "%s", bind_address);
+    bridge->udp_port = udp_port;
     bridge->stop_flag = 0;
     bridge->snapshot.status = OSD_EXTERNAL_STATUS_LISTENING;
     pthread_mutex_unlock(&bridge->lock);
@@ -563,7 +673,7 @@ int osd_external_start(OsdExternalBridge *bridge, const char *socket_path) {
     pthread_mutex_lock(&bridge->lock);
     bridge->thread_started = 1;
     pthread_mutex_unlock(&bridge->lock);
-    LOGI("OSD external feed: listening on %s", socket_path);
+    LOGI("OSD external feed: listening on %s:%d", bridge->bind_address, bridge->udp_port);
     return 0;
 }
 

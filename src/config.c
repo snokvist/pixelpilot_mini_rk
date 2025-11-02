@@ -30,8 +30,10 @@ static void usage(const char *prog) {
             "  --osd                        (enable OSD overlay plane with stats)\n"
             "  --osd-plane-id N             (force OSD plane id; default auto)\n"
             "  --osd-refresh-ms N           (default: 500)\n"
-            "  --osd-external-socket PATH   (UNIX datagram socket for external OSD data)\n"
-            "  --no-osd-external            (disable external OSD feed)\n"
+            "  --osd-external              (enable external OSD feed listener)\n"
+            "  --osd-external-udp-port N   (UDP port for external OSD data; default: 5005)\n"
+            "  --osd-external-bind ADDR    (bind address for external OSD data; default: 0.0.0.0)\n"
+            "  --no-osd-external           (disable external OSD feed)\n"
             "  --record-video [PATH]        (enable MP4 capture; optional PATH or directory, default /media)\n"
             "  --record-mode MODE           (standard|sequential|fragmented; default: sequential)\n"
             "  --no-record-video            (disable MP4 recording)\n"
@@ -155,7 +157,8 @@ void cfg_defaults(AppCfg *c) {
     c->osd_refresh_ms = 500;
     c->osd_external.enable = 0;
     c->osd_external.enable_set = 0;
-    c->osd_external.socket_path[0] = '\0';
+    strcpy(c->osd_external.bind_address, "0.0.0.0");
+    c->osd_external.udp_port = 5005;
 
     c->gst_log = 0;
 
@@ -346,17 +349,31 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->osd_plane_id = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--osd-refresh-ms") && i + 1 < argc) {
             cfg->osd_refresh_ms = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--osd-external-socket") && i + 1 < argc) {
+        } else if (!strcmp(argv[i], "--osd-external")) {
             cfg->osd_external.enable = 1;
             cfg->osd_external.enable_set = 1;
-            cli_copy_string(cfg->osd_external.socket_path, sizeof(cfg->osd_external.socket_path), argv[++i]);
-        } else if (!strcmp(argv[i], "--osd-external-socket")) {
-            LOGE("--osd-external-socket requires a path");
+        } else if (!strcmp(argv[i], "--osd-external-udp-port") && i + 1 < argc) {
+            cfg->osd_external.udp_port = atoi(argv[++i]);
+            if (cfg->osd_external.udp_port <= 0 || cfg->osd_external.udp_port > 65535) {
+                LOGW("--osd-external-udp-port must be between 1 and 65535; disabling external feed");
+                cfg->osd_external.udp_port = 0;
+                cfg->osd_external.enable = 0;
+            } else {
+                cfg->osd_external.enable = 1;
+                cfg->osd_external.enable_set = 1;
+            }
+        } else if (!strcmp(argv[i], "--osd-external-udp-port")) {
+            LOGE("--osd-external-udp-port requires a port number");
+            return -1;
+        } else if (!strcmp(argv[i], "--osd-external-bind") && i + 1 < argc) {
+            cli_copy_string(cfg->osd_external.bind_address, sizeof(cfg->osd_external.bind_address), argv[++i]);
+        } else if (!strcmp(argv[i], "--osd-external-bind")) {
+            LOGE("--osd-external-bind requires an address");
             return -1;
         } else if (!strcmp(argv[i], "--no-osd-external")) {
             cfg->osd_external.enable = 0;
             cfg->osd_external.enable_set = 1;
-            cfg->osd_external.socket_path[0] = '\0';
+            cfg->osd_external.udp_port = 0;
         } else if (!strcmp(argv[i], "--record-video")) {
             cfg->record.enable = 1;
             if (i + 1 < argc && argv[i + 1][0] != '-') {

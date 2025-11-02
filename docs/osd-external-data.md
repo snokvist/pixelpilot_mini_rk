@@ -9,10 +9,9 @@ metrics that downstream OSD widgets can render or plot through the existing
 ## Transport and lifecycle
 
 * Introduce a small helper module (for example `src/osd_bridge.c`) that owns a
-  UNIX domain datagram socket. The socket path is supplied via an INI/CLI option
-  such as `[osd.external].socket = /run/pixelpilot/osd.sock` so the feature can
-  be disabled by default.
-* The helper runs on a lightweight thread that blocks in `recvmsg()` and parses
+  UDP socket. The bind address and port are supplied via INI/CLI options such as
+  `[osd.external].port = 5005` so the feature can be disabled by default.
+* The helper runs on a lightweight thread that blocks in `recvfrom()` and parses
   newline-delimited JSON payloads (any JSON library already linked in the
   project can be reused; otherwise a tiny hand-written parser that only handles
   the expected schema is enough).
@@ -32,16 +31,16 @@ metrics that downstream OSD widgets can render or plot through the existing
 
 ### Configuration
 
-Enable the listener either by passing `--osd-external-socket /run/pixelpilot/osd.sock`
+Enable the listener either by passing `--osd-external --osd-external-udp-port 5005`
 on the command line or by adding the following to the INI file:
 
 ```ini
 [osd.external]
 enable = true
-socket = /run/pixelpilot/osd.sock
+port = 5005
 ```
 
-Leaving the path blank keeps the helper disabled so existing deployments are not
+Leaving the port blank keeps the helper disabled so existing deployments are not
 affected until they opt in.
 
 ## Message format
@@ -56,14 +55,18 @@ looks like:
 If fewer than eight entries are present, the remaining slots keep their prior
 contents. Including an empty array clears previously published data. Optional
 `ttl_ms` lets publishers request automatic expiry so stale telemetry does not
-linger:
+linger. The receiver tracks TTL per text/value slot so independent publishers
+can multiplex the feed without clobbering each other:
 
 ```json
 {"value":[42.0], "ttl_ms": 5000}
 ```
 
 When the helper thread observes that `clock_gettime(CLOCK_MONOTONIC)` exceeds
-`last_update_ns + ttl_ms`, it zeroes the snapshot before the next OSD refresh.
+the stored expiry for a slot, it clears only that entry before the next OSD
+refresh. While a slot has an active TTL, updates that omit `ttl_ms` leave the
+existing value untouched so time-limited overlays stay visible for their full
+duration.
 
 ### Zoom/crop control channel
 
@@ -141,7 +144,7 @@ bridge.
    (arrays longer than eight entries, missing fields, TTL expiry).
 2. Run the binary with the feature enabled and pipe updates manually:
    ```sh
-   socat - UNIX-SENDTO:/run/pixelpilot/osd.sock <<<'{"text":["BATTERY 12.6V"]}'
+   printf '%s' '{"text":["BATTERY 12.6V"]}' | socat - UDP-DATAGRAM:127.0.0.1:5005
    ```
    Confirm the OSD text widget renders the injected string and that a line plot
    bound to `ext.value1` responds to subsequent updates.
