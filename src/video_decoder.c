@@ -502,12 +502,6 @@ static gboolean sanitize_zoom_request(VideoDecoderZoomRequest *request) {
     if (request->scale_x_percent == 0 || request->scale_y_percent == 0) {
         return FALSE;
     }
-    if (request->scale_x_percent > 100) {
-        request->scale_x_percent = 100;
-    }
-    if (request->scale_y_percent > 100) {
-        request->scale_y_percent = 100;
-    }
     if (request->center_x_percent > 100) {
         request->center_x_percent = 100;
     }
@@ -714,6 +708,7 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     uint32_t base_src_h = 0;
     gboolean zoom_enabled = FALSE;
     VideoDecoderZoomRect zoom_rect = {0};
+    VideoDecoderZoomRequest zoom_request = {0};
 
     g_mutex_lock(&vd->lock);
     base_src_w = vd->src_w;
@@ -730,6 +725,7 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     }
     zoom_enabled = vd->zoom_enabled;
     zoom_rect = vd->zoom_rect;
+    zoom_request = vd->zoom_request;
     g_mutex_unlock(&vd->lock);
 
     if (base_src_w == 0) {
@@ -755,39 +751,60 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         display_src_h = 1;
     }
 
+    uint32_t dst_w_u32 = (vd->mode_w > 0) ? (uint32_t)vd->mode_w : 0;
+    uint32_t dst_h_u32 = (vd->mode_h > 0) ? (uint32_t)vd->mode_h : 0;
+    if (display_src_w > 0 && display_src_h > 0 && dst_w_u32 > 0 && dst_h_u32 > 0) {
+        compute_plane_destination(dst_w_u32, dst_h_u32, display_src_w, display_src_h, &dst_w_u32, &dst_h_u32);
+    }
+
+    int dst_w = (int)dst_w_u32;
+    int dst_h = (int)dst_h_u32;
+    if (dst_w <= 0) {
+        dst_w = 1;
+    }
+    if (dst_h <= 0) {
+        dst_h = 1;
+    }
+
+    double zoom_out_scale = 1.0;
+    if (zoom_enabled) {
+        double shrink_x = 1.0;
+        double shrink_y = 1.0;
+        if (zoom_request.scale_x_percent > 100u) {
+            shrink_x = 100.0 / (double)zoom_request.scale_x_percent;
+        }
+        if (zoom_request.scale_y_percent > 100u) {
+            shrink_y = 100.0 / (double)zoom_request.scale_y_percent;
+        }
+        zoom_out_scale = MIN(shrink_x, shrink_y);
+        if (zoom_out_scale <= 0.0) {
+            zoom_out_scale = 1.0;
+        }
+        if (zoom_out_scale > 1.0) {
+            zoom_out_scale = 1.0;
+        }
+    }
+
+    if (zoom_out_scale < 1.0 && vd->mode_w > 0 && vd->mode_h > 0) {
+        int scaled_w = (int)lround((double)dst_w * zoom_out_scale);
+        int scaled_h = (int)lround((double)dst_h * zoom_out_scale);
+        if (scaled_w <= 0) {
+            scaled_w = 1;
+        }
+        if (scaled_h <= 0) {
+            scaled_h = 1;
+        }
+        dst_w = scaled_w;
+        dst_h = scaled_h;
+    }
+
     int dst_x = 0;
     int dst_y = 0;
-    int dst_w = vd->mode_w;
-    int dst_h = vd->mode_h;
-
-    if (display_src_w > 0 && display_src_h > 0 && vd->mode_w > 0 && vd->mode_h > 0) {
-        double src_ar = (double)display_src_w / (double)display_src_h;
-        double mode_ar = (double)vd->mode_w / (double)vd->mode_h;
-
-        if (src_ar > 0.0 && mode_ar > 0.0) {
-            if (src_ar > mode_ar) {
-                dst_w = vd->mode_w;
-                dst_h = (int)lround((double)vd->mode_w / src_ar);
-                if (dst_h > vd->mode_h) {
-                    dst_h = vd->mode_h;
-                }
-                dst_y = (vd->mode_h - dst_h) / 2;
-            } else {
-                dst_h = vd->mode_h;
-                dst_w = (int)lround((double)vd->mode_h * src_ar);
-                if (dst_w > vd->mode_w) {
-                    dst_w = vd->mode_w;
-                }
-                dst_x = (vd->mode_w - dst_w) / 2;
-            }
-        }
-
-        if (dst_w <= 0) {
-            dst_w = 1;
-        }
-        if (dst_h <= 0) {
-            dst_h = 1;
-        }
+    if (vd->mode_w > 0) {
+        dst_x = (vd->mode_w - dst_w) / 2;
+    }
+    if (vd->mode_h > 0) {
+        dst_y = (vd->mode_h - dst_h) / 2;
     }
 
     uint64_t src_x_q16 = use_zoom ? ((uint64_t)zoom_local.x << 16) : 0;
