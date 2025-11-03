@@ -38,9 +38,7 @@
 #endif
 
 #ifndef PIXELPILOT_HAVE_DRM_COLOR_MGMT
-struct drm_color_ctm {
-    int64_t matrix[9];
-};
+#  include <drm/drm_mode.h>
 #endif
 #include <drm_fourcc.h>
 #include <xf86drm.h>
