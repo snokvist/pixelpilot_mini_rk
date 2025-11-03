@@ -47,6 +47,11 @@ typedef struct {
 
 typedef struct {
     int enable;
+    double matrix[9];
+} VideoCtmCfg;
+
+typedef struct {
+    int enable;
     char bind_address[64];
     int port;
     unsigned int interval_ms;
@@ -103,6 +108,7 @@ typedef struct {
     RecordCfg record;
     SseCfg sse;
     IdrCfg idr;
+    VideoCtmCfg video_ctm;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);

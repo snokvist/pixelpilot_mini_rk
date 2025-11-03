@@ -2,6 +2,21 @@
 
 PixelPilot Mini RK is a lightweight receiver that ingests RTP video/audio over UDP and drives a KMS plane on Rockchip-based devices. The application wraps a GStreamer pipeline with DRM/KMS, OSD, and udev helpers.
 
+## Build prerequisites
+
+PixelPilot Mini RK depends on the Rockchip MPP stack together with the usual DRM, GLib, and GStreamer development headers. Install the packaged components on Debian/Ubuntu hosts with:
+
+```sh
+sudo apt-get install \
+    build-essential pkg-config \
+    libdrm-dev libudev-dev \
+    libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+```
+
+Rockchip's `librga` interface powers the optional video color-transformation matrix (CTM) path. When `pkg-config --exists librga` succeeds the build defines `HAVE_LIBRGA` and the decoder enables CTM processing. If the headers or library are unavailable the feature is disabled automatically at runtime. Most distributions do not ship a `librga-dev` package; use the Rockchip BSP source release or the standalone [librga](https://github.com/rockchip-linux/rga) project to build and install it locally when hardware color transforms are required.
+
+The Rockchip MPP headers and libraries are also distributed outside the standard repositories. Fetch them from the [rockchip-mpp](https://github.com/rockchip-linux/mpp) project and install them into a prefix on your build host (for example `/usr/local`). Expose the headers to the compiler either through `pkg-config` (`rockchip-mpp.pc`) or by ensuring they reside in `/usr/include/rockchip` as expected by the default Makefile fallbacks.
+
 ## Systemd service integration
 
 The project ships with systemd units for both the primary `pixelpilot_mini_rk` pipeline and the companion `osd_external_feed` helper. On Debian 11 (or other systemd-based distributions) install and enable them with:

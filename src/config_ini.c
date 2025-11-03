@@ -11,6 +11,30 @@
 
 #define MAX_INI_LINE 512
 
+static int parse_double_list(const char *value, double *out, size_t count) {
+    if (value == NULL || out == NULL || count == 0) {
+        return -1;
+    }
+    const char *p = value;
+    size_t idx = 0;
+    while (*p != '\0' && idx < count) {
+        while (isspace((unsigned char)*p) || *p == ',') {
+            ++p;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        char *end = NULL;
+        double v = strtod(p, &end);
+        if (end == p) {
+            break;
+        }
+        out[idx++] = v;
+        p = end;
+    }
+    return idx == count ? 0 : -1;
+}
+
 static void ini_copy_string(char *dst, size_t dst_sz, const char *src) {
     if (dst == NULL || dst_sz == 0) {
         return;
@@ -911,6 +935,44 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
                 return -1;
             }
             cfg->audio_optional = v;
+            return 0;
+        }
+        return -1;
+    }
+    if (strcasecmp(section, "video") == 0 || strcasecmp(section, "video.ctm") == 0 ||
+        strcasecmp(section, "video_ctm") == 0) {
+        if (strcasecmp(key, "ctm-enable") == 0 || strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->video_ctm.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "ctm-matrix") == 0 || strcasecmp(key, "matrix") == 0) {
+            double coeffs[9];
+            if (parse_double_list(value, coeffs, 9) != 0) {
+                LOGE("config: video.ctm matrix expects 9 coefficients");
+                return -1;
+            }
+            for (int i = 0; i < 9; ++i) {
+                cfg->video_ctm.matrix[i] = coeffs[i];
+            }
+            return 0;
+        }
+        if (strncasecmp(key, "matrix-row", 10) == 0 && strlen(key) == 11 && isdigit((unsigned char)key[10])) {
+            int row = key[10] - '0';
+            if (row < 0 || row > 2) {
+                return -1;
+            }
+            double row_vals[3];
+            if (parse_double_list(value, row_vals, 3) != 0) {
+                LOGE("config: video.ctm %s expects 3 coefficients", key);
+                return -1;
+            }
+            for (int col = 0; col < 3; ++col) {
+                cfg->video_ctm.matrix[row * 3 + col] = row_vals[col];
+            }
             return 0;
         }
         return -1;
