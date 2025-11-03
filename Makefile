@@ -19,6 +19,8 @@ PKG_MPPCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags rockchip-mpp)
 PKG_MPPLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs rockchip-mpp)
 PKG_RGACFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags librga)
 PKG_RGALIBS := $(shell $(PKG_CONFIG) --silence-errors --libs librga)
+PKG_EGLCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags egl glesv2 gbm)
+PKG_EGLLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs egl glesv2 gbm)
 
 CFLAGS ?= -O2 -Wall
 CFLAGS += -Iinclude -Ithird_party/minimp4
@@ -79,6 +81,10 @@ ifneq ($(strip $(PKG_RGACFLAGS)),)
 CFLAGS += $(PKG_RGACFLAGS) -DHAVE_LIBRGA
 endif
 
+ifneq ($(strip $(PKG_EGLCFLAGS)),)
+CFLAGS += $(PKG_EGLCFLAGS) -DHAVE_GBM_GLES2
+endif
+
 ifneq ($(strip $(PKG_DRMLIBS)),)
 LDFLAGS += $(PKG_DRMLIBS)
 else
@@ -99,6 +105,10 @@ endif
 
 ifneq ($(strip $(PKG_RGALIBS)),)
 LDFLAGS += $(PKG_RGALIBS)
+endif
+
+ifneq ($(strip $(PKG_EGLLIBS)),)
+LDFLAGS += $(PKG_EGLLIBS)
 endif
 
 LDFLAGS += -lpthread -lm

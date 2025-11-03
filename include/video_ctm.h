@@ -10,9 +10,12 @@
 #include <im2d.h>
 #endif
 
+struct VideoCtmGpuState;
+
 typedef struct VideoCtm {
     gboolean enabled;
     double matrix[9];
+    VideoCtmBackend backend;
     gboolean hw_supported;
     gboolean hw_applied;
     int hw_fd;
@@ -20,7 +23,11 @@ typedef struct VideoCtm {
     uint32_t hw_object_type;
     uint32_t hw_prop_id;
     uint32_t hw_blob_id;
+    int render_fd;
 #if defined(HAVE_LIBRGA)
+    gboolean gpu_active;
+    gboolean gpu_forced_off;
+    struct VideoCtmGpuState *gpu_state;
     guint8 *rgba_buf;
     size_t rgba_buf_size;
     uint32_t rgba_width;
@@ -34,6 +41,7 @@ typedef struct VideoCtm {
 
 void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg);
 void video_ctm_reset(VideoCtm *ctm);
+void video_ctm_set_render_fd(VideoCtm *ctm, int drm_fd);
 void video_ctm_use_drm_property(VideoCtm *ctm, int drm_fd, uint32_t object_id,
                                 uint32_t object_type, uint32_t prop_id);
 void video_ctm_disable_drm(VideoCtm *ctm);

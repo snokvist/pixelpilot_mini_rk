@@ -196,6 +196,7 @@ void cfg_defaults(AppCfg *c) {
     strcpy(c->idr.http_path, "/request/idr");
 
     c->video_ctm.enable = 0;
+    c->video_ctm.backend = VIDEO_CTM_BACKEND_AUTO;
     for (int i = 0; i < 9; ++i) {
         c->video_ctm.matrix[i] = (i % 4 == 0) ? 1.0 : 0.0;
     }

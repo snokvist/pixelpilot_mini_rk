@@ -13,7 +13,9 @@ sudo apt-get install \
     libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 ```
 
-Rockchip's display pipeline exposes a DRM CTM property on RK356x platforms with recent `libmali` stacks. PixelPilot Mini RK programs that CTM directly when available so decoded frames stay in their original DMA-BUFs and the hardware applies the matrix with zero-copy throughput. When the property is absent the decoder falls back to Rockchip's `librga` interface. If `pkg-config --exists librga` succeeds the build defines `HAVE_LIBRGA` and the software path is enabled; otherwise the CTM feature is disabled automatically at runtime. Most distributions do not ship a `librga-dev` package, so use the Rockchip BSP source release or the standalone [librga](https://github.com/rockchip-linux/rga) project to build and install it locally when the fallback is required.
+For the GPU-accelerated CTM path, install the EGL/GBM headers that match your Mali userspace (for example `libegl1-mesa-dev`, `libgles2-mesa-dev`, and `libgbm-dev` on Debian/Ubuntu when testing with the Mesa stack).
+
+PixelPilot Mini RK can apply the optional color transformation matrix (CTM) entirely in hardware when both `librga` and the Mali EGL stack are available. If `pkg-config --exists librga` succeeds the build defines `HAVE_LIBRGA` so NV12 frames can be converted by Rockchip's RGA accelerator without touching the CPU. When `pkg-config` also locates `egl`, `glesv2`, and `gbm`, the Makefile enables `HAVE_GBM_GLES2`; at runtime the decoder imports the decoder's DMA-BUFs into an EGL context, applies the CTM through a fragment shader, and hands the intermediate buffer back to RGA for the final NV12 conversion. This path keeps the decode → color transform → display pipeline zero-copy. Most distributions do not ship `librga-dev` or the Mali headers, so pull them from the Rockchip BSP or the standalone [librga](https://github.com/rockchip-linux/rga) and [mali userspace](https://github.com/rockchip-linux/libmali) releases when building on bare Debian/Ubuntu hosts.
 
 The Rockchip MPP headers and libraries are also distributed outside the standard repositories. Fetch them from the [rockchip-mpp](https://github.com/rockchip-linux/mpp) project and install them into a prefix on your build host (for example `/usr/local`). Expose the headers to the compiler either through `pkg-config` (`rockchip-mpp.pc`) or by ensuring they reside in `/usr/include/rockchip` as expected by the default Makefile fallbacks.
 
@@ -64,6 +66,8 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].video-plane-id` | Numeric plane ID used for the decoded video plane. |
 | `[drm].use-udev` | `true` to enable the hotplug listener that reapplies modes when connectors change. |
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
+| `[video.ctm].enable` | Enable the 3×3 color transform matrix path before posting decoded frames. |
+| `[video.ctm].backend` | Choose the CTM backend: `auto` (default), `cpu` (librga only), or `gpu` (EGL + librga). |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |

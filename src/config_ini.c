@@ -35,6 +35,25 @@ static int parse_double_list(const char *value, double *out, size_t count) {
     return idx == count ? 0 : -1;
 }
 
+static int parse_video_ctm_backend(const char *value, VideoCtmBackend *backend) {
+    if (value == NULL || backend == NULL) {
+        return -1;
+    }
+    if (strcasecmp(value, "auto") == 0) {
+        *backend = VIDEO_CTM_BACKEND_AUTO;
+        return 0;
+    }
+    if (strcasecmp(value, "cpu") == 0 || strcasecmp(value, "librga") == 0) {
+        *backend = VIDEO_CTM_BACKEND_CPU;
+        return 0;
+    }
+    if (strcasecmp(value, "gpu") == 0 || strcasecmp(value, "mali") == 0) {
+        *backend = VIDEO_CTM_BACKEND_GPU;
+        return 0;
+    }
+    return -1;
+}
+
 static void ini_copy_string(char *dst, size_t dst_sz, const char *src) {
     if (dst == NULL || dst_sz == 0) {
         return;
@@ -947,6 +966,16 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
                 return -1;
             }
             cfg->video_ctm.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "backend") == 0 || strcasecmp(key, "mode") == 0 ||
+            strcasecmp(key, "hw-backend") == 0) {
+            VideoCtmBackend backend = VIDEO_CTM_BACKEND_AUTO;
+            if (parse_video_ctm_backend(value, &backend) != 0) {
+                LOGE("config: video.ctm backend must be one of auto,cpu,gpu");
+                return -1;
+            }
+            cfg->video_ctm.backend = backend;
             return 0;
         }
         if (strcasecmp(key, "ctm-matrix") == 0 || strcasecmp(key, "matrix") == 0) {
