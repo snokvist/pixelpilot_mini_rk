@@ -20,6 +20,8 @@ typedef struct VideoCtm {
     uint32_t rgba_height;
     uint32_t rgba_stride;
     uint32_t rgba_ver_stride;
+    gboolean lut_ready;
+    int32_t lut[3][3][256];
 #endif
 } VideoCtm;
 

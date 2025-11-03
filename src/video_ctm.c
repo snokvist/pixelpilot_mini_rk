@@ -2,11 +2,19 @@
 
 #include "logging.h"
 
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 
 #if defined(HAVE_LIBRGA)
 #include <drm_fourcc.h>
+#endif
+
+#if defined(HAVE_LIBRGA)
+/* Fixed-point lookup tables (10 fractional bits) avoid per-pixel multiplications. */
+#define CTM_LUT_SHIFT 10
+#define CTM_LUT_SCALE (1 << CTM_LUT_SHIFT)
+#define CTM_LUT_ROUND (1 << (CTM_LUT_SHIFT - 1))
 #endif
 
 static void video_ctm_set_identity(VideoCtm *ctm) {
@@ -38,6 +46,8 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
         LOGW("Video CTM requested but librga support is unavailable; disabling color transform");
         ctm->enabled = FALSE;
     }
+#else
+    ctm->lut_ready = FALSE;
 #endif
 }
 
@@ -55,51 +65,84 @@ void video_ctm_reset(VideoCtm *ctm) {
     ctm->rgba_height = 0;
     ctm->rgba_stride = 0;
     ctm->rgba_ver_stride = 0;
+    ctm->lut_ready = FALSE;
 #endif
 }
 
 #if defined(HAVE_LIBRGA)
-static inline double clamp_unit(double v) {
-    if (v < 0.0) {
-        return 0.0;
+static gboolean video_ctm_build_lut(VideoCtm *ctm) {
+    if (ctm == NULL) {
+        return FALSE;
     }
-    if (v > 1.0) {
-        return 1.0;
+
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) {
+            double coeff = ctm->matrix[row * 3 + col];
+            if (!isfinite(coeff)) {
+                LOGW("Video CTM: invalid coefficient (%d,%d); disabling transform", row, col);
+                ctm->enabled = FALSE;
+                ctm->lut_ready = FALSE;
+                return FALSE;
+            }
+            for (int value = 0; value < 256; ++value) {
+                double scaled = coeff * (double)value * (double)CTM_LUT_SCALE;
+                if (scaled > (double)INT32_MAX) {
+                    scaled = (double)INT32_MAX;
+                } else if (scaled < (double)INT32_MIN) {
+                    scaled = (double)INT32_MIN;
+                }
+                ctm->lut[row][col][value] = (int32_t)llround(scaled);
+            }
+        }
     }
-    return v;
+
+    ctm->lut_ready = TRUE;
+    return TRUE;
 }
 
-static inline guint8 clamp_byte_from_unit(double v) {
-    double scaled = v * 255.0;
-    if (scaled < 0.0) {
+static inline guint8 clamp_byte_from_shifted(int64_t value) {
+    int64_t shifted;
+    if (value >= 0) {
+        shifted = (value + CTM_LUT_ROUND) >> CTM_LUT_SHIFT;
+    } else {
+        shifted = (value - CTM_LUT_ROUND) >> CTM_LUT_SHIFT;
+    }
+    if (shifted < 0) {
         return 0;
     }
-    if (scaled > 255.0) {
+    if (shifted > 255) {
         return 255;
     }
-    return (guint8)lround(scaled);
+    return (guint8)shifted;
 }
 
 static void apply_rgba_matrix(VideoCtm *ctm, uint32_t width, uint32_t height) {
     if (ctm == NULL || ctm->rgba_buf == NULL || ctm->rgba_stride == 0) {
         return;
     }
+    if (!ctm->lut_ready && !video_ctm_build_lut(ctm)) {
+        return;
+    }
+
     guint8 *row = ctm->rgba_buf;
-    uint32_t stride = ctm->rgba_stride;
+    size_t stride_bytes = (size_t)ctm->rgba_stride * 4u;
     for (uint32_t y = 0; y < height; ++y) {
-        guint8 *pixel = row + (size_t)y * stride * 4u;
+        guint8 *pixel = row + (size_t)y * stride_bytes;
         for (uint32_t x = 0; x < width; ++x) {
-            double r = (double)pixel[0] / 255.0;
-            double g = (double)pixel[1] / 255.0;
-            double b = (double)pixel[2] / 255.0;
+            guint8 r = pixel[0];
+            guint8 g = pixel[1];
+            guint8 b = pixel[2];
 
-            double nr = clamp_unit(ctm->matrix[0] * r + ctm->matrix[1] * g + ctm->matrix[2] * b);
-            double ng = clamp_unit(ctm->matrix[3] * r + ctm->matrix[4] * g + ctm->matrix[5] * b);
-            double nb = clamp_unit(ctm->matrix[6] * r + ctm->matrix[7] * g + ctm->matrix[8] * b);
+            int64_t acc_r = (int64_t)ctm->lut[0][0][r] + (int64_t)ctm->lut[0][1][g] +
+                            (int64_t)ctm->lut[0][2][b];
+            int64_t acc_g = (int64_t)ctm->lut[1][0][r] + (int64_t)ctm->lut[1][1][g] +
+                            (int64_t)ctm->lut[1][2][b];
+            int64_t acc_b = (int64_t)ctm->lut[2][0][r] + (int64_t)ctm->lut[2][1][g] +
+                            (int64_t)ctm->lut[2][2][b];
 
-            pixel[0] = clamp_byte_from_unit(nr);
-            pixel[1] = clamp_byte_from_unit(ng);
-            pixel[2] = clamp_byte_from_unit(nb);
+            pixel[0] = clamp_byte_from_shifted(acc_r);
+            pixel[1] = clamp_byte_from_shifted(acc_g);
+            pixel[2] = clamp_byte_from_shifted(acc_b);
 
             pixel += 4;
         }
@@ -140,6 +183,10 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
         LOGW("Video CTM: invalid stride %u/%u for %ux%u frame; disabling transform", rgba_stride, rgba_ver_stride,
              width, height);
         ctm->enabled = FALSE;
+        return -1;
+    }
+
+    if (!ctm->lut_ready && !video_ctm_build_lut(ctm)) {
         return -1;
     }
 
