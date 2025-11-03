@@ -190,12 +190,12 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
         return -1;
     }
 
-    rga_buffer_t src = wrapbuffer_fd(src_fd, (int)width, (int)height, (int)hor_stride, (int)ver_stride,
-                                     RK_FORMAT_YCbCr_420_SP);
-    rga_buffer_t dst = wrapbuffer_fd(dst_fd, (int)width, (int)height, (int)hor_stride, (int)ver_stride,
-                                     RK_FORMAT_YCbCr_420_SP);
-    rga_buffer_t tmp = wrapbuffer_virtualaddr(ctm->rgba_buf, (int)width, (int)height, (int)ctm->rgba_stride,
-                                              (int)ctm->rgba_ver_stride, RK_FORMAT_RGBA_8888);
+    rga_buffer_t src = wrapbuffer_fd(src_fd, (int)width, (int)height, RK_FORMAT_YCbCr_420_SP,
+                                     (int)hor_stride, (int)ver_stride);
+    rga_buffer_t dst = wrapbuffer_fd(dst_fd, (int)width, (int)height, RK_FORMAT_YCbCr_420_SP,
+                                     (int)hor_stride, (int)ver_stride);
+    rga_buffer_t tmp = wrapbuffer_virtualaddr(ctm->rgba_buf, (int)width, (int)height, RK_FORMAT_RGBA_8888,
+                                              (int)ctm->rgba_stride, (int)ctm->rgba_ver_stride);
 
     IM_STATUS ret = imcvtcolor(src, tmp, src.format, tmp.format, IM_COLOR_SPACE_DEFAULT);
     if (ret != IM_STATUS_SUCCESS) {
