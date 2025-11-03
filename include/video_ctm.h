@@ -19,6 +19,7 @@ typedef struct VideoCtm {
     uint32_t rgba_width;
     uint32_t rgba_height;
     uint32_t rgba_stride;
+    uint32_t rgba_ver_stride;
 #endif
 } VideoCtm;
 

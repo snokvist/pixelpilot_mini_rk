@@ -54,6 +54,7 @@ void video_ctm_reset(VideoCtm *ctm) {
     ctm->rgba_width = 0;
     ctm->rgba_height = 0;
     ctm->rgba_stride = 0;
+    ctm->rgba_ver_stride = 0;
 #endif
 }
 
@@ -127,8 +128,22 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
     (void)hor_stride;
     (void)ver_stride;
 
-    uint32_t stride = width;
-    size_t needed = (size_t)stride * height * 4u;
+    if (width == 0 || height == 0) {
+        LOGW("Video CTM: refusing to prepare zero-sized buffer (%ux%u)", width, height);
+        ctm->enabled = FALSE;
+        return -1;
+    }
+
+    uint32_t rgba_stride = hor_stride != 0 ? hor_stride : width;
+    uint32_t rgba_ver_stride = ver_stride != 0 ? ver_stride : height;
+    if (rgba_stride < width || rgba_ver_stride < height) {
+        LOGW("Video CTM: invalid stride %u/%u for %ux%u frame; disabling transform", rgba_stride, rgba_ver_stride,
+             width, height);
+        ctm->enabled = FALSE;
+        return -1;
+    }
+
+    size_t needed = (size_t)rgba_stride * rgba_ver_stride * 4u;
     if (ctm->rgba_buf_size < needed) {
         guint8 *new_buf = g_try_malloc0(needed);
         if (new_buf == NULL) {
@@ -144,7 +159,8 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
     }
     ctm->rgba_width = width;
     ctm->rgba_height = height;
-    ctm->rgba_stride = stride;
+    ctm->rgba_stride = rgba_stride;
+    ctm->rgba_ver_stride = rgba_ver_stride;
     return 0;
 #endif
 }
@@ -179,11 +195,12 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
     rga_buffer_t dst = wrapbuffer_fd(dst_fd, (int)width, (int)height, (int)hor_stride, (int)ver_stride,
                                      RK_FORMAT_YCbCr_420_SP);
     rga_buffer_t tmp = wrapbuffer_virtualaddr(ctm->rgba_buf, (int)width, (int)height, (int)ctm->rgba_stride,
-                                              (int)height, RK_FORMAT_RGBA_8888);
+                                              (int)ctm->rgba_ver_stride, RK_FORMAT_RGBA_8888);
 
     IM_STATUS ret = imcvtcolor(src, tmp, src.format, tmp.format, IM_COLOR_SPACE_DEFAULT);
     if (ret != IM_STATUS_SUCCESS) {
         LOGW("Video CTM: imcvtcolor NV12->RGBA failed: %s", imStrError(ret));
+        ctm->enabled = FALSE;
         return -1;
     }
 
@@ -192,6 +209,7 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
     ret = imcvtcolor(tmp, dst, tmp.format, dst.format, IM_COLOR_SPACE_DEFAULT);
     if (ret != IM_STATUS_SUCCESS) {
         LOGW("Video CTM: imcvtcolor RGBA->NV12 failed: %s", imStrError(ret));
+        ctm->enabled = FALSE;
         return -1;
     }
 
