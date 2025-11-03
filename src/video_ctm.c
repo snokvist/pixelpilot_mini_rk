@@ -2,9 +2,14 @@
 
 #include "logging.h"
 
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <string.h>
+
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <drm/drm_mode.h>
 
 #if defined(HAVE_LIBRGA)
 #include <drm_fourcc.h>
@@ -26,12 +31,80 @@ static void video_ctm_set_identity(VideoCtm *ctm) {
     }
 }
 
+static gboolean video_ctm_hw_available(const VideoCtm *ctm) {
+    return (ctm != NULL && ctm->hw_supported && ctm->hw_fd >= 0 && ctm->hw_prop_id != 0 &&
+            ctm->hw_object_id != 0 && ctm->hw_object_type != 0);
+}
+
+static void video_ctm_destroy_blob(VideoCtm *ctm) {
+    if (ctm == NULL) {
+        return;
+    }
+    if (ctm->hw_blob_id != 0 && ctm->hw_fd >= 0) {
+        drmModeDestroyPropertyBlob(ctm->hw_fd, ctm->hw_blob_id);
+        ctm->hw_blob_id = 0;
+    }
+}
+
+static uint64_t video_ctm_to_s3132(double value) {
+    double abs_val = fabs(value);
+    const double max_val = ((double)((1ULL << 63) - 1)) / (double)(1ULL << 32);
+    if (abs_val > max_val) {
+        abs_val = max_val;
+    }
+    uint64_t magnitude = (uint64_t)llround(abs_val * (double)(1ULL << 32));
+    if (magnitude > ((1ULL << 63) - 1)) {
+        magnitude = (1ULL << 63) - 1;
+    }
+    if (value < 0.0) {
+        magnitude |= (1ULL << 63);
+    }
+    return magnitude;
+}
+
+static gboolean video_ctm_apply_hw(VideoCtm *ctm) {
+    if (!video_ctm_hw_available(ctm) || !ctm->enabled) {
+        return FALSE;
+    }
+
+    struct drm_color_ctm blob;
+    for (int i = 0; i < 9; ++i) {
+        blob.matrix[i] = video_ctm_to_s3132(ctm->matrix[i]);
+    }
+
+    video_ctm_destroy_blob(ctm);
+
+    if (drmModeCreatePropertyBlob(ctm->hw_fd, &blob, sizeof(blob), &ctm->hw_blob_id) != 0) {
+        LOGW("Video CTM: failed to create DRM CTM blob: %s", g_strerror(errno));
+        ctm->hw_blob_id = 0;
+        return FALSE;
+    }
+
+    if (drmModeObjectSetProperty(ctm->hw_fd, ctm->hw_object_id, ctm->hw_object_type, ctm->hw_prop_id,
+                                 ctm->hw_blob_id) != 0) {
+        LOGW("Video CTM: failed to set DRM CTM property: %s", g_strerror(errno));
+        drmModeDestroyPropertyBlob(ctm->hw_fd, ctm->hw_blob_id);
+        ctm->hw_blob_id = 0;
+        return FALSE;
+    }
+
+    ctm->hw_applied = TRUE;
+    return TRUE;
+}
+
 void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     if (ctm == NULL) {
         return;
     }
     memset(ctm, 0, sizeof(*ctm));
     video_ctm_set_identity(ctm);
+    ctm->hw_supported = FALSE;
+    ctm->hw_applied = FALSE;
+    ctm->hw_fd = -1;
+    ctm->hw_object_id = 0;
+    ctm->hw_object_type = 0;
+    ctm->hw_prop_id = 0;
+    ctm->hw_blob_id = 0;
 
     if (cfg != NULL) {
         if (cfg->video_ctm.enable) {
@@ -55,6 +128,7 @@ void video_ctm_reset(VideoCtm *ctm) {
     if (ctm == NULL) {
         return;
     }
+    video_ctm_disable_drm(ctm);
 #if defined(HAVE_LIBRGA)
     if (ctm->rgba_buf) {
         g_free(ctm->rgba_buf);
@@ -67,6 +141,35 @@ void video_ctm_reset(VideoCtm *ctm) {
     ctm->rgba_ver_stride = 0;
     ctm->lut_ready = FALSE;
 #endif
+}
+
+void video_ctm_use_drm_property(VideoCtm *ctm, int drm_fd, uint32_t object_id, uint32_t object_type,
+                                uint32_t prop_id) {
+    if (ctm == NULL) {
+        return;
+    }
+
+    video_ctm_disable_drm(ctm);
+
+    ctm->hw_fd = drm_fd;
+    ctm->hw_object_id = object_id;
+    ctm->hw_object_type = object_type;
+    ctm->hw_prop_id = prop_id;
+    ctm->hw_supported = (drm_fd >= 0 && object_id != 0 && prop_id != 0);
+}
+
+void video_ctm_disable_drm(VideoCtm *ctm) {
+    if (ctm == NULL) {
+        return;
+    }
+
+    if (ctm->hw_applied && video_ctm_hw_available(ctm)) {
+        if (drmModeObjectSetProperty(ctm->hw_fd, ctm->hw_object_id, ctm->hw_object_type, ctm->hw_prop_id, 0) != 0) {
+            LOGW("Video CTM: failed to clear DRM CTM property: %s", g_strerror(errno));
+        }
+    }
+    ctm->hw_applied = FALSE;
+    video_ctm_destroy_blob(ctm);
 }
 
 #if defined(HAVE_LIBRGA)
@@ -153,8 +256,18 @@ static void apply_rgba_matrix(VideoCtm *ctm, uint32_t width, uint32_t height) {
 int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t hor_stride,
                       uint32_t ver_stride, uint32_t fourcc) {
     if (ctm == NULL || !ctm->enabled) {
+        video_ctm_disable_drm(ctm);
         return 0;
     }
+    if (video_ctm_hw_available(ctm)) {
+        if (video_ctm_apply_hw(ctm)) {
+            return 0;
+        }
+        LOGW("Video CTM: falling back to software path after DRM CTM failure");
+        video_ctm_disable_drm(ctm);
+        ctm->hw_supported = FALSE;
+    }
+
 #if !defined(HAVE_LIBRGA)
     (void)width;
     (void)height;
@@ -163,6 +276,7 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
     (void)fourcc;
     return -1;
 #else
+
     if (fourcc != DRM_FORMAT_NV12) {
         LOGW("Video CTM: unsupported DRM format 0x%08x; disabling transform", fourcc);
         ctm->enabled = FALSE;
@@ -216,6 +330,9 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
                       uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc) {
     if (ctm == NULL || !ctm->enabled) {
         return -1;
+    }
+    if (video_ctm_hw_available(ctm)) {
+        return ctm->hw_applied ? 0 : -1;
     }
 #if !defined(HAVE_LIBRGA)
     (void)src_fd;

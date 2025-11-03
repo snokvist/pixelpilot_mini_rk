@@ -1219,6 +1219,26 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         return -1;
     }
 
+    uint32_t ctm_prop = 0;
+    static const char *ctm_prop_names[] = {"CTM", "COLOR_TRANSFORM", "COLOR_MATRIX"};
+    gboolean have_ctm = FALSE;
+    for (size_t i = 0; i < G_N_ELEMENTS(ctm_prop_names) && !have_ctm; ++i) {
+        const char *name = ctm_prop_names[i];
+        if (drm_get_prop_id(vd->drm_fd, vd->crtc_id, DRM_MODE_OBJECT_CRTC, name, &ctm_prop) == 0) {
+            video_ctm_use_drm_property(&vd->ctm, vd->drm_fd, vd->crtc_id, DRM_MODE_OBJECT_CRTC, ctm_prop);
+            LOGI("Video CTM: using DRM %s property on CRTC %u", name, vd->crtc_id);
+            have_ctm = TRUE;
+        }
+    }
+    for (size_t i = 0; i < G_N_ELEMENTS(ctm_prop_names) && !have_ctm; ++i) {
+        const char *name = ctm_prop_names[i];
+        if (drm_get_prop_id(vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, name, &ctm_prop) == 0) {
+            video_ctm_use_drm_property(&vd->ctm, vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, ctm_prop);
+            LOGI("Video CTM: using DRM %s property on plane %u", name, vd->plane_id);
+            have_ctm = TRUE;
+        }
+    }
+
     if (mpp_create(&vd->ctx, &vd->mpi) != MPP_OK) {
         LOGE("Video decoder: mpp_create failed");
         video_decoder_deinit(vd);
