@@ -30,7 +30,18 @@
 #include <arm_neon.h>
 #endif
 
-#include <drm/drm_color_mgmt.h>
+#if defined(__has_include)
+#  if __has_include(<drm/drm_color_mgmt.h>)
+#    include <drm/drm_color_mgmt.h>
+#    define PIXELPILOT_HAVE_DRM_COLOR_MGMT 1
+#  endif
+#endif
+
+#ifndef PIXELPILOT_HAVE_DRM_COLOR_MGMT
+struct drm_color_ctm {
+    int64_t matrix[9];
+};
+#endif
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
