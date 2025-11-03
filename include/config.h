@@ -47,6 +47,11 @@ typedef struct {
 
 typedef struct {
     int enable;
+    double matrix[9];
+} DrmColorMatrixCfg;
+
+typedef struct {
+    int enable;
     char bind_address[64];
     int port;
     unsigned int interval_ms;
@@ -91,6 +96,8 @@ typedef struct {
     int cpu_affinity_count;
 
     OsdLayout osd_layout;
+
+    DrmColorMatrixCfg color_matrix;
 
     struct {
         int enable;

@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
@@ -29,6 +30,7 @@
 #include <arm_neon.h>
 #endif
 
+#include <drm/drm_color_mgmt.h>
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -84,6 +86,12 @@ struct VideoDecoder {
     uint32_t prop_src_w;
     uint32_t prop_src_h;
 
+    gboolean ctm_enabled;
+    uint32_t ctm_obj_id;
+    uint32_t ctm_obj_type;
+    uint32_t ctm_prop_id;
+    uint32_t ctm_blob_id;
+
     MppCtx ctx;
     MppApi *mpi;
     MppBufferGroup frm_grp;
@@ -103,6 +111,124 @@ struct VideoDecoder {
 
     IdrRequester *idr_requester;
 };
+
+static gboolean property_name_has_ctm(const char *name) {
+    if (name == NULL) {
+        return FALSE;
+    }
+    for (const char *p = name; p[0] != '\0'; ++p) {
+        if ((p[0] == 'C' || p[0] == 'c') && (p[1] == 'T' || p[1] == 't') && (p[2] == 'M' || p[2] == 'm')) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static gboolean video_decoder_find_ctm_property(VideoDecoder *vd, uint32_t obj_id, uint32_t obj_type,
+                                                uint32_t *out_prop) {
+    if (vd == NULL || vd->drm_fd < 0 || out_prop == NULL) {
+        return FALSE;
+    }
+
+    drmModeObjectProperties *props = drmModeObjectGetProperties(vd->drm_fd, obj_id, obj_type);
+    if (!props) {
+        return FALSE;
+    }
+
+    gboolean found = FALSE;
+    for (uint32_t i = 0; i < props->count_props; ++i) {
+        drmModePropertyRes *p = drmModeGetProperty(vd->drm_fd, props->props[i]);
+        if (!p) {
+            continue;
+        }
+        if ((p->flags & DRM_MODE_PROP_BLOB) && property_name_has_ctm(p->name)) {
+            *out_prop = p->prop_id;
+            found = TRUE;
+            drmModeFreeProperty(p);
+            break;
+        }
+        drmModeFreeProperty(p);
+    }
+
+    drmModeFreeObjectProperties(props);
+    return found;
+}
+
+static int64_t ctm_double_to_s31_32(double value) {
+    const double min_v = -2.0;
+    const double max_v = 1.999999999;
+    if (value < min_v) {
+        value = min_v;
+    }
+    if (value > max_v) {
+        value = max_v;
+    }
+
+    double scaled = value * 4294967296.0; // 2^32
+    if (scaled >= (double)INT64_MAX) {
+        return INT64_MAX;
+    }
+    if (scaled <= (double)INT64_MIN) {
+        return INT64_MIN;
+    }
+    return (int64_t)llround(scaled);
+}
+
+static gboolean video_decoder_setup_ctm(VideoDecoder *vd, const AppCfg *cfg) {
+    if (vd == NULL || cfg == NULL || !cfg->color_matrix.enable) {
+        return FALSE;
+    }
+
+    uint32_t prop_id = 0;
+    uint32_t obj_id = 0;
+    uint32_t obj_type = 0;
+
+    if (vd->plane_id != 0 &&
+        video_decoder_find_ctm_property(vd, vd->plane_id, DRM_MODE_OBJECT_PLANE, &prop_id)) {
+        obj_id = vd->plane_id;
+        obj_type = DRM_MODE_OBJECT_PLANE;
+    } else if (vd->crtc_id != 0 &&
+               video_decoder_find_ctm_property(vd, vd->crtc_id, DRM_MODE_OBJECT_CRTC, &prop_id)) {
+        obj_id = vd->crtc_id;
+        obj_type = DRM_MODE_OBJECT_CRTC;
+    } else {
+        LOGW("Video decoder: CTM requested but no CTM property on plane %u or CRTC %u", vd->plane_id, vd->crtc_id);
+        return FALSE;
+    }
+
+    struct drm_color_ctm blob;
+    memset(&blob, 0, sizeof(blob));
+    for (size_t i = 0; i < sizeof(blob.matrix) / sizeof(blob.matrix[0]); ++i) {
+        blob.matrix[i] = ctm_double_to_s31_32(cfg->color_matrix.matrix[i]);
+    }
+
+    uint32_t blob_id = 0;
+    if (drmModeCreatePropertyBlob(vd->drm_fd, &blob, sizeof(blob), &blob_id) != 0) {
+        LOGW("Video decoder: failed to create CTM property blob: %s", g_strerror(errno));
+        return FALSE;
+    }
+
+    vd->ctm_enabled = TRUE;
+    vd->ctm_obj_id = obj_id;
+    vd->ctm_obj_type = obj_type;
+    vd->ctm_prop_id = prop_id;
+    vd->ctm_blob_id = blob_id;
+
+    const char *target = (obj_type == DRM_MODE_OBJECT_PLANE) ? "plane" : "CRTC";
+    LOGI("Video decoder: enabling CTM on %s %u", target, obj_id);
+
+    return TRUE;
+}
+
+static void video_decoder_append_ctm(VideoDecoder *vd, drmModeAtomicReq *req, uint32_t blob_id) {
+    if (!vd || !req) {
+        return;
+    }
+    if (!vd->ctm_enabled || vd->ctm_prop_id == 0 || vd->ctm_obj_id == 0) {
+        return;
+    }
+    drmModeAtomicAddProperty(req, vd->ctm_obj_id, vd->ctm_prop_id, blob_id);
+}
 
 VideoDecoder *video_decoder_new(void) {
     return g_new0(VideoDecoder, 1);
@@ -645,6 +771,10 @@ static void video_decoder_disable_plane(VideoDecoder *vd) {
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_fb_id, 0);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_crtc_id, 0);
 
+    if (vd->ctm_enabled) {
+        video_decoder_append_ctm(vd, req, 0);
+    }
+
     int ret = drmModeAtomicCommit(vd->drm_fd, req, 0, NULL);
     if (ret != 0) {
         LOGW("Video decoder: failed to release plane on shutdown: %s", g_strerror(errno));
@@ -822,6 +952,10 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_y, src_y_q16);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_w, src_w_q16);
     drmModeAtomicAddProperty(req, vd->plane_id, vd->prop_src_h, src_h_q16);
+
+    if (vd->ctm_blob_id != 0) {
+        video_decoder_append_ctm(vd, req, vd->ctm_blob_id);
+    }
 
     int ret = drmModeAtomicCommit(vd->drm_fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
     if (ret != 0 && errno == EBUSY) {
@@ -1103,6 +1237,8 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         return -1;
     }
 
+    video_decoder_setup_ctm(vd, cfg);
+
     if (mpp_create(&vd->ctx, &vd->mpi) != MPP_OK) {
         LOGE("Video decoder: mpp_create failed");
         video_decoder_deinit(vd);
@@ -1172,6 +1308,18 @@ void video_decoder_deinit(VideoDecoder *vd) {
     vd->mpi = NULL;
 
     video_decoder_disable_plane(vd);
+
+    if (vd->ctm_blob_id != 0 && vd->drm_fd >= 0) {
+        if (drmModeDestroyPropertyBlob(vd->drm_fd, vd->ctm_blob_id) != 0) {
+            LOGW("Video decoder: failed to destroy CTM blob: %s", g_strerror(errno));
+        }
+    }
+    vd->ctm_blob_id = 0;
+    vd->ctm_prop_id = 0;
+    vd->ctm_obj_id = 0;
+    vd->ctm_obj_type = 0;
+    vd->ctm_enabled = FALSE;
+
     release_frame_group(vd);
 
     if (vd->packet_buf) {

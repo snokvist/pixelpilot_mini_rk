@@ -252,6 +252,38 @@ static int parse_double(const char *value, double *out) {
     return 0;
 }
 
+static int parse_double_list(const char *value, double *out, size_t count) {
+    if (value == NULL || out == NULL || count == 0) {
+        return -1;
+    }
+
+    const char *p = value;
+    for (size_t i = 0; i < count; ++i) {
+        while (isspace((unsigned char)*p) || *p == ',') {
+            ++p;
+        }
+        if (*p == '\0') {
+            return -1;
+        }
+        char *end = NULL;
+        double v = strtod(p, &end);
+        if (end == NULL || end == p) {
+            return -1;
+        }
+        out[i] = v;
+        p = end;
+    }
+
+    while (isspace((unsigned char)*p) || *p == ',') {
+        ++p;
+    }
+    if (*p != '\0') {
+        return -1;
+    }
+
+    return 0;
+}
+
 static SplashSequenceCfg *splash_find_sequence(SplashCfg *splash, const char *name) {
     if (splash == NULL || name == NULL || *name == '\0') {
         return NULL;
@@ -828,6 +860,23 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         if (strcasecmp(key, "osd-plane-id") == 0) {
             cfg->osd_plane_id = atoi(value);
+            return 0;
+        }
+        if (strcasecmp(key, "color-matrix") == 0) {
+            double values[9];
+            if (parse_double_list(value, values, sizeof(values) / sizeof(values[0])) != 0) {
+                return -1;
+            }
+            memcpy(cfg->color_matrix.matrix, values, sizeof(values));
+            cfg->color_matrix.enable = 1;
+            return 0;
+        }
+        if (strcasecmp(key, "color-matrix-enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->color_matrix.enable = v;
             return 0;
         }
         if (strcasecmp(key, "use-udev") == 0) {

@@ -169,6 +169,11 @@ void cfg_defaults(AppCfg *c) {
 
     osd_layout_defaults(&c->osd_layout);
 
+    c->color_matrix.enable = 0;
+    for (int i = 0; i < 9; ++i) {
+        c->color_matrix.matrix[i] = (i % 4 == 0) ? 1.0 : 0.0;
+    }
+
     c->splash.enable = 0;
     c->splash.idle_timeout_ms = 2000;
     c->splash.fps = 30.0;
