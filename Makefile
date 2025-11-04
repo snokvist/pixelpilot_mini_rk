@@ -22,6 +22,11 @@ PKG_RGALIBS := $(shell $(PKG_CONFIG) --silence-errors --libs librga)
 PKG_EGLCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags egl glesv2 gbm)
 PKG_EGLLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs egl glesv2 gbm)
 
+# Allow manual overrides (or board-specific fallbacks) when pkg-config files are
+# unavailable for the Mali userspace stack.
+MALI_EGL_CFLAGS ?=
+MALI_EGL_LIBS ?=
+
 CFLAGS ?= -O2 -Wall
 CFLAGS += -Iinclude -Ithird_party/minimp4
 
@@ -81,8 +86,11 @@ ifneq ($(strip $(PKG_RGACFLAGS)),)
 CFLAGS += $(PKG_RGACFLAGS) -DHAVE_LIBRGA
 endif
 
+EGL_STACK_ENABLED := 0
+
 ifneq ($(strip $(PKG_EGLCFLAGS)),)
-CFLAGS += $(PKG_EGLCFLAGS) -DHAVE_GBM_GLES2
+CFLAGS += $(PKG_EGLCFLAGS)
+EGL_STACK_ENABLED := 1
 endif
 
 ifneq ($(strip $(PKG_DRMLIBS)),)
@@ -109,6 +117,43 @@ endif
 
 ifneq ($(strip $(PKG_EGLLIBS)),)
 LDFLAGS += $(PKG_EGLLIBS)
+EGL_STACK_ENABLED := 1
+endif
+
+ifeq ($(EGL_STACK_ENABLED),0)
+# Auto-detect a common libmali location when the caller did not provide
+# explicit overrides. This covers the Debian-style packaging used on many
+# RK3566 images (`/usr/lib/aarch64-linux-gnu/libmali.so`) as well as local
+# installs.
+MALI_LIB_CANDIDATES := \
+    /usr/lib/aarch64-linux-gnu/libmali.so \
+    /usr/lib64/libmali.so \
+    /usr/lib/libmali.so \
+    /usr/local/lib/libmali.so
+MALI_DETECTED_LIB := $(firstword $(foreach lib,$(MALI_LIB_CANDIDATES),$(wildcard $(lib))))
+ifeq ($(strip $(MALI_EGL_LIBS)),)
+  ifneq ($(strip $(MALI_DETECTED_LIB)),)
+MALI_EGL_LIBS := -L$(dir $(MALI_DETECTED_LIB)) -lEGL -lGLESv2 -lgbm
+  endif
+endif
+
+ifneq ($(strip $(MALI_EGL_CFLAGS)),)
+CFLAGS += $(MALI_EGL_CFLAGS)
+EGL_STACK_ENABLED := 1
+endif
+
+ifneq ($(strip $(MALI_EGL_LIBS)),)
+LDFLAGS += $(MALI_EGL_LIBS)
+EGL_STACK_ENABLED := 1
+endif
+endif
+
+ifneq ($(EGL_STACK_ENABLED),0)
+ifneq (,$(findstring -DHAVE_GBM_GLES2,$(CFLAGS)))
+# Already defined through pkg-config flags above.
+else
+CFLAGS += -DHAVE_GBM_GLES2
+endif
 endif
 
 LDFLAGS += -lpthread -lm
