@@ -3,6 +3,7 @@
 #include "drm_props.h"
 #include "idr_requester.h"
 #include "logging.h"
+#include "video_ctm.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -49,6 +50,9 @@ struct FrameSlot {
     int prime_fd;
     uint32_t fb_id;
     uint32_t handle;
+    int ctm_prime_fd;
+    uint32_t ctm_fb_id;
+    uint32_t ctm_handle;
 };
 
 struct VideoDecoder {
@@ -102,6 +106,11 @@ struct VideoDecoder {
     GThread *display_thread;
 
     IdrRequester *idr_requester;
+
+    VideoCtm ctm;
+    uint32_t frame_fourcc;
+    RK_U32 frame_hor_stride;
+    RK_U32 frame_ver_stride;
 };
 
 VideoDecoder *video_decoder_new(void) {
@@ -601,6 +610,9 @@ static void reset_frame_map(VideoDecoder *vd) {
         vd->frame_map[i].prime_fd = -1;
         vd->frame_map[i].fb_id = 0;
         vd->frame_map[i].handle = 0;
+        vd->frame_map[i].ctm_prime_fd = -1;
+        vd->frame_map[i].ctm_fb_id = 0;
+        vd->frame_map[i].ctm_handle = 0;
     }
 }
 
@@ -608,6 +620,7 @@ static void release_frame_group(VideoDecoder *vd) {
     if (vd->frm_grp == NULL) {
         return;
     }
+    video_ctm_reset(&vd->ctm);
     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
         if (vd->frame_map[i].fb_id) {
             drmModeRmFB(vd->drm_fd, vd->frame_map[i].fb_id);
@@ -622,12 +635,28 @@ static void release_frame_group(VideoDecoder *vd) {
             ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
             vd->frame_map[i].handle = 0;
         }
+        if (vd->frame_map[i].ctm_fb_id) {
+            drmModeRmFB(vd->drm_fd, vd->frame_map[i].ctm_fb_id);
+            vd->frame_map[i].ctm_fb_id = 0;
+        }
+        if (vd->frame_map[i].ctm_prime_fd >= 0) {
+            close(vd->frame_map[i].ctm_prime_fd);
+            vd->frame_map[i].ctm_prime_fd = -1;
+        }
+        if (vd->frame_map[i].ctm_handle) {
+            struct drm_mode_destroy_dumb dmd_ctm = {.handle = vd->frame_map[i].ctm_handle};
+            ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_ctm);
+            vd->frame_map[i].ctm_handle = 0;
+        }
     }
     mpp_buffer_group_clear(vd->frm_grp);
     mpp_buffer_group_put(vd->frm_grp);
     vd->frm_grp = NULL;
     vd->src_w = 0;
     vd->src_h = 0;
+    vd->frame_fourcc = 0;
+    vd->frame_hor_stride = 0;
+    vd->frame_ver_stride = 0;
 }
 
 static void video_decoder_disable_plane(VideoDecoder *vd) {
@@ -930,6 +959,68 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
             LOGW("drmModeAddFB2 failed: %s", g_strerror(errno));
             continue;
         }
+
+        if (vd->ctm.enabled && fmt == MPP_FMT_YUV420SP) {
+            struct drm_mode_create_dumb ctm_dmcd;
+            memset(&ctm_dmcd, 0, sizeof(ctm_dmcd));
+            ctm_dmcd.bpp = dmcd.bpp;
+            ctm_dmcd.width = hor_stride;
+            ctm_dmcd.height = ver_stride * 2;
+
+            do {
+                ret = ioctl(vd->drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &ctm_dmcd);
+            } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+            if (ret != 0) {
+                LOGW("Video CTM: failed to allocate dumb buffer: %s", g_strerror(errno));
+                continue;
+            }
+            vd->frame_map[i].ctm_handle = ctm_dmcd.handle;
+
+            struct drm_prime_handle ctm_prime;
+            memset(&ctm_prime, 0, sizeof(ctm_prime));
+            ctm_prime.handle = ctm_dmcd.handle;
+            ctm_prime.fd = -1;
+            do {
+                ret = ioctl(vd->drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ctm_prime);
+            } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+            if (ret != 0) {
+                LOGW("Video CTM: PRIME_HANDLE_TO_FD failed: %s", g_strerror(errno));
+                struct drm_mode_destroy_dumb dmd_fail = {.handle = ctm_dmcd.handle};
+                ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_fail);
+                vd->frame_map[i].ctm_handle = 0;
+                continue;
+            }
+            vd->frame_map[i].ctm_prime_fd = ctm_prime.fd;
+
+            uint32_t ctm_handles[4] = {0};
+            uint32_t ctm_pitches[4] = {0};
+            uint32_t ctm_offsets[4] = {0};
+            ctm_handles[0] = vd->frame_map[i].ctm_handle;
+            ctm_handles[1] = vd->frame_map[i].ctm_handle;
+            ctm_pitches[0] = ctm_dmcd.pitch;
+            ctm_pitches[1] = ctm_dmcd.pitch;
+            ctm_offsets[0] = 0;
+            ctm_offsets[1] = ctm_dmcd.pitch * ver_stride;
+
+            ret = drmModeAddFB2(vd->drm_fd, width, height, DRM_FORMAT_NV12, ctm_handles, ctm_pitches,
+                                ctm_offsets, &vd->frame_map[i].ctm_fb_id, 0);
+            if (ret != 0) {
+                LOGW("Video CTM: drmModeAddFB2 for transform buffer failed: %s", g_strerror(errno));
+                close(vd->frame_map[i].ctm_prime_fd);
+                vd->frame_map[i].ctm_prime_fd = -1;
+                struct drm_mode_destroy_dumb dmd_fail = {.handle = vd->frame_map[i].ctm_handle};
+                ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_fail);
+                vd->frame_map[i].ctm_handle = 0;
+                continue;
+            }
+        }
+    }
+
+    vd->frame_fourcc = DRM_FORMAT_NV12;
+    vd->frame_hor_stride = hor_stride;
+    vd->frame_ver_stride = ver_stride;
+    if (vd->ctm.enabled && fmt == MPP_FMT_YUV420SP) {
+        video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, vd->frame_fourcc);
     }
 
     vd->mpi->control(vd->ctx, MPP_DEC_SET_EXT_BUF_GROUP, vd->frm_grp);
@@ -991,6 +1082,12 @@ static gpointer frame_thread_func(gpointer data) {
                 continue;
             }
 
+            RK_U32 frame_w = mpp_frame_get_width(frame);
+            RK_U32 frame_h = mpp_frame_get_height(frame);
+            RK_U32 frame_stride_w = mpp_frame_get_hor_stride(frame);
+            RK_U32 frame_stride_h = mpp_frame_get_ver_stride(frame);
+            MppFrameFormat frame_fmt = mpp_frame_get_fmt(frame);
+
             MppBuffer buffer = mpp_frame_get_buffer(frame);
             if (buffer != NULL) {
                 MppBufferInfo info;
@@ -998,8 +1095,23 @@ static gpointer frame_thread_func(gpointer data) {
                 if (mpp_buffer_info_get(buffer, &info) == MPP_OK) {
                     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
                         if (vd->frame_map[i].prime_fd == info.fd) {
+                            uint32_t fb_to_post = vd->frame_map[i].fb_id;
+                            RK_U32 effective_w = frame_w != 0 ? frame_w : vd->src_w;
+                            RK_U32 effective_h = frame_h != 0 ? frame_h : vd->src_h;
+                            if (vd->ctm.enabled && vd->frame_map[i].ctm_fb_id != 0 &&
+                                vd->frame_map[i].ctm_prime_fd >= 0 && frame_fmt == MPP_FMT_YUV420SP &&
+                                effective_w != 0 && effective_h != 0) {
+                                uint32_t fourcc = vd->frame_fourcc != 0 ? vd->frame_fourcc : DRM_FORMAT_NV12;
+                                RK_U32 hor_stride = vd->frame_hor_stride != 0 ? vd->frame_hor_stride : frame_stride_w;
+                                RK_U32 ver_stride = vd->frame_ver_stride != 0 ? vd->frame_ver_stride : frame_stride_h;
+                                if (video_ctm_process(&vd->ctm, vd->frame_map[i].prime_fd,
+                                                      vd->frame_map[i].ctm_prime_fd, effective_w, effective_h,
+                                                      hor_stride, ver_stride, fourcc) == 0) {
+                                    fb_to_post = vd->frame_map[i].ctm_fb_id;
+                                }
+                            }
                             g_mutex_lock(&vd->lock);
-                            vd->pending_fb = vd->frame_map[i].fb_id;
+                            vd->pending_fb = fb_to_post;
                             vd->pending_pts = mpp_frame_get_pts(frame);
                             g_cond_signal(&vd->cond);
                             g_mutex_unlock(&vd->lock);
@@ -1072,6 +1184,10 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->crtc_id = ms->crtc_id;
     vd->mode_w = ms->mode_w;
     vd->mode_h = ms->mode_h;
+    video_ctm_init(&vd->ctm, cfg);
+    vd->frame_fourcc = 0;
+    vd->frame_hor_stride = 0;
+    vd->frame_ver_stride = 0;
     vd->packet_buf_size = DECODER_READ_BUF_SIZE;
     vd->packet_buf = g_malloc0(vd->packet_buf_size);
     if (vd->packet_buf == NULL) {
@@ -1087,6 +1203,7 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         return -1;
     }
     vd->drm_fd = dup_fd;
+    video_ctm_set_render_fd(&vd->ctm, vd->drm_fd);
 
     if (drm_get_prop_id(vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &vd->prop_fb_id) != 0 ||
         drm_get_prop_id(vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &vd->prop_crtc_id) != 0 ||
@@ -1101,6 +1218,26 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         LOGE("Video decoder: failed to query plane properties");
         video_decoder_deinit(vd);
         return -1;
+    }
+
+    uint32_t ctm_prop = 0;
+    static const char *ctm_prop_names[] = {"CTM", "COLOR_TRANSFORM", "COLOR_MATRIX"};
+    gboolean have_ctm = FALSE;
+    for (size_t i = 0; i < G_N_ELEMENTS(ctm_prop_names) && !have_ctm; ++i) {
+        const char *name = ctm_prop_names[i];
+        if (drm_get_prop_id(vd->drm_fd, vd->crtc_id, DRM_MODE_OBJECT_CRTC, name, &ctm_prop) == 0) {
+            video_ctm_use_drm_property(&vd->ctm, vd->drm_fd, vd->crtc_id, DRM_MODE_OBJECT_CRTC, ctm_prop);
+            LOGI("Video CTM: using DRM %s property on CRTC %u", name, vd->crtc_id);
+            have_ctm = TRUE;
+        }
+    }
+    for (size_t i = 0; i < G_N_ELEMENTS(ctm_prop_names) && !have_ctm; ++i) {
+        const char *name = ctm_prop_names[i];
+        if (drm_get_prop_id(vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, name, &ctm_prop) == 0) {
+            video_ctm_use_drm_property(&vd->ctm, vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, ctm_prop);
+            LOGI("Video CTM: using DRM %s property on plane %u", name, vd->plane_id);
+            have_ctm = TRUE;
+        }
     }
 
     if (mpp_create(&vd->ctx, &vd->mpi) != MPP_OK) {
@@ -1183,6 +1320,8 @@ void video_decoder_deinit(VideoDecoder *vd) {
         close(vd->drm_fd);
         vd->drm_fd = -1;
     }
+
+    video_ctm_reset(&vd->ctm);
 
     if (vd->lock_initialized) {
         g_mutex_clear(&vd->lock);
