@@ -45,6 +45,17 @@ typedef struct {
     RecordMode mode;
 } RecordCfg;
 
+typedef enum {
+    VIDEO_CTM_BACKEND_AUTO = 0,
+    VIDEO_CTM_BACKEND_GPU,
+} VideoCtmBackend;
+
+typedef struct {
+    int enable;
+    VideoCtmBackend backend;
+    double matrix[9];
+} VideoCtmCfg;
+
 typedef struct {
     int enable;
     char bind_address[64];
@@ -103,6 +114,7 @@ typedef struct {
     RecordCfg record;
     SseCfg sse;
     IdrCfg idr;
+    VideoCtmCfg video_ctm;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);
