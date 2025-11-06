@@ -686,7 +686,13 @@ void osd_external_stop(OsdExternalBridge *bridge) {
     if (running) {
         bridge->stop_flag = 1;
     }
+    int fd_to_close = bridge->sock_fd;
+    bridge->sock_fd = -1;
     pthread_mutex_unlock(&bridge->lock);
+    if (fd_to_close >= 0) {
+        shutdown(fd_to_close, SHUT_RDWR);
+        close(fd_to_close);
+    }
     if (running) {
         pthread_join(bridge->thread, NULL);
     }

@@ -23,6 +23,19 @@
 #endif
 
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
+#define VIDEO_CTM_GPU_IMAGE_CACHE_SIZE 8
+
+typedef struct {
+    int fd;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t offset;
+    uint32_t fourcc;
+    EGLImageKHR image;
+    uint64_t last_used;
+} VideoCtmGpuImageEntry;
+
 typedef struct VideoCtmGpuState {
     int drm_fd;
     struct gbm_device *gbm;
@@ -45,6 +58,9 @@ typedef struct VideoCtmGpuState {
     PFNEGLDESTROYIMAGEKHRPROC egl_destroy_image;
     PFNEGLGETPLATFORMDISPLAYEXTPROC egl_get_platform_display;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC gl_image_target_texture;
+    PFNEGLCREATESYNCKHRPROC egl_create_sync;
+    PFNEGLDESTROYSYNCKHRPROC egl_destroy_sync;
+    PFNEGLCLIENTWAITSYNCKHRPROC egl_client_wait_sync;
     GLint loc_matrix;
     GLint loc_tex_y;
     GLint loc_tex_uv;
@@ -63,6 +79,8 @@ typedef struct VideoCtmGpuState {
     float applied_gamma_lift;
     float applied_gamma_mult[3];
     gboolean gamma_valid;
+    VideoCtmGpuImageEntry image_cache[VIDEO_CTM_GPU_IMAGE_CACHE_SIZE];
+    uint64_t frame_counter;
 } VideoCtmGpuState;
 
 static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm);
@@ -74,6 +92,115 @@ static const GLfloat kCtmQuadVertices[] = {
     -1.0f,  1.0f, 0.0f, 0.0f,
      1.0f,  1.0f, 1.0f, 0.0f,
 };
+
+static void video_ctm_gpu_image_cache_touch(VideoCtmGpuState *gpu, VideoCtmGpuImageEntry *entry) {
+    if (gpu == NULL || entry == NULL) {
+        return;
+    }
+    entry->last_used = ++gpu->frame_counter;
+}
+
+static void video_ctm_gpu_image_cache_reset(VideoCtmGpuState *gpu) {
+    if (gpu == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < VIDEO_CTM_GPU_IMAGE_CACHE_SIZE; ++i) {
+        VideoCtmGpuImageEntry *entry = &gpu->image_cache[i];
+        if (entry->image != EGL_NO_IMAGE_KHR && gpu->egl_destroy_image != NULL &&
+            gpu->display != EGL_NO_DISPLAY) {
+            gpu->egl_destroy_image(gpu->display, entry->image);
+        }
+        entry->fd = -1;
+        entry->width = 0;
+        entry->height = 0;
+        entry->pitch = 0;
+        entry->offset = 0;
+        entry->fourcc = 0;
+        entry->image = EGL_NO_IMAGE_KHR;
+        entry->last_used = 0;
+    }
+    gpu->frame_counter = 0;
+}
+
+static gboolean video_ctm_gpu_image_matches(const VideoCtmGpuImageEntry *entry,
+                                            int fd,
+                                            uint32_t width,
+                                            uint32_t height,
+                                            uint32_t pitch,
+                                            uint32_t offset,
+                                            uint32_t fourcc) {
+    return entry != NULL && entry->fd == fd && entry->width == width && entry->height == height &&
+           entry->pitch == pitch && entry->offset == offset && entry->fourcc == fourcc &&
+           entry->image != EGL_NO_IMAGE_KHR;
+}
+
+static EGLImageKHR video_ctm_gpu_acquire_image(VideoCtm *ctm,
+                                               int fd,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               uint32_t pitch,
+                                               uint32_t offset,
+                                               uint32_t fourcc) {
+    VideoCtmGpuState *gpu = (ctm != NULL) ? ctm->gpu_state : NULL;
+    if (gpu == NULL || gpu->egl_create_image == NULL || gpu->display == EGL_NO_DISPLAY || fd < 0) {
+        return EGL_NO_IMAGE_KHR;
+    }
+
+    for (size_t i = 0; i < VIDEO_CTM_GPU_IMAGE_CACHE_SIZE; ++i) {
+        VideoCtmGpuImageEntry *entry = &gpu->image_cache[i];
+        if (video_ctm_gpu_image_matches(entry, fd, width, height, pitch, offset, fourcc)) {
+            video_ctm_gpu_image_cache_touch(gpu, entry);
+            return entry->image;
+        }
+    }
+
+    EGLint attrs[] = {
+        EGL_WIDTH, (EGLint)width,
+        EGL_HEIGHT, (EGLint)height,
+        EGL_LINUX_DRM_FOURCC_EXT, (EGLint)fourcc,
+        EGL_DMA_BUF_PLANE0_FD_EXT, fd,
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint)offset,
+        EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)pitch,
+        EGL_NONE,
+    };
+
+    EGLImageKHR image = gpu->egl_create_image(gpu->display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
+    if (image == EGL_NO_IMAGE_KHR) {
+        LOGW("Video CTM: failed to import plane fd=%d fourcc=0x%08x", fd, fourcc);
+        return EGL_NO_IMAGE_KHR;
+    }
+
+    VideoCtmGpuImageEntry *slot = NULL;
+    for (size_t i = 0; i < VIDEO_CTM_GPU_IMAGE_CACHE_SIZE; ++i) {
+        VideoCtmGpuImageEntry *entry = &gpu->image_cache[i];
+        if (entry->image == EGL_NO_IMAGE_KHR || entry->fd < 0) {
+            slot = entry;
+            break;
+        }
+    }
+    if (slot == NULL) {
+        slot = &gpu->image_cache[0];
+        for (size_t i = 1; i < VIDEO_CTM_GPU_IMAGE_CACHE_SIZE; ++i) {
+            if (gpu->image_cache[i].last_used < slot->last_used) {
+                slot = &gpu->image_cache[i];
+            }
+        }
+        if (slot->image != EGL_NO_IMAGE_KHR && gpu->egl_destroy_image != NULL &&
+            gpu->display != EGL_NO_DISPLAY) {
+            gpu->egl_destroy_image(gpu->display, slot->image);
+        }
+    }
+
+    slot->fd = fd;
+    slot->width = width;
+    slot->height = height;
+    slot->pitch = pitch;
+    slot->offset = offset;
+    slot->fourcc = fourcc;
+    slot->image = image;
+    video_ctm_gpu_image_cache_touch(gpu, slot);
+    return image;
+}
 
 static GLuint video_ctm_gpu_compile_shader(GLenum type, const char *source) {
     GLuint shader = glCreateShader(type);
@@ -197,6 +324,7 @@ static void video_ctm_gpu_destroy(VideoCtm *ctm) {
         return;
     }
     VideoCtmGpuState *gpu = ctm->gpu_state;
+    video_ctm_gpu_image_cache_reset(gpu);
     if (gpu->display != EGL_NO_DISPLAY && gpu->context != EGL_NO_CONTEXT && gpu->surface != EGL_NO_SURFACE) {
         eglMakeCurrent(gpu->display, gpu->surface, gpu->surface, gpu->context);
     }
@@ -338,10 +466,14 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->egl_create_image = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
     gpu->egl_destroy_image = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
     gpu->gl_image_target_texture = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    gpu->egl_create_sync = (PFNEGLCREATESYNCKHRPROC)eglGetProcAddress("eglCreateSyncKHR");
+    gpu->egl_destroy_sync = (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR");
+    gpu->egl_client_wait_sync = (PFNEGLCLIENTWAITSYNCKHRPROC)eglGetProcAddress("eglClientWaitSyncKHR");
     if (!gpu->egl_create_image || !gpu->egl_destroy_image || !gpu->gl_image_target_texture) {
         video_ctm_gpu_destroy(ctm);
         return FALSE;
     }
+    video_ctm_gpu_image_cache_reset(gpu);
     gpu->program = video_ctm_gpu_create_program();
     if (gpu->program == 0) {
         video_ctm_gpu_destroy(ctm);
@@ -620,33 +752,14 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     }
     uint32_t chroma_width = (width + 1u) / 2u;
     uint32_t chroma_height = (height + 1u) / 2u;
-    EGLint y_attrs[] = {
-        EGL_WIDTH, (EGLint)width,
-        EGL_HEIGHT, (EGLint)height,
-        EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_R8,
-        EGL_DMA_BUF_PLANE0_FD_EXT, src_fd,
-        EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
-        EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)hor_stride,
-        EGL_NONE
-    };
-    EGLint uv_attrs[] = {
-        EGL_WIDTH, (EGLint)chroma_width,
-        EGL_HEIGHT, (EGLint)chroma_height,
-        EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_GR88,
-        EGL_DMA_BUF_PLANE0_FD_EXT, src_fd,
-        EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint)(hor_stride * ver_stride),
-        EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)hor_stride,
-        EGL_NONE
-    };
-    EGLImageKHR y_image = gpu->egl_create_image(gpu->display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, y_attrs);
-    EGLImageKHR uv_image = gpu->egl_create_image(gpu->display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, uv_attrs);
-    if (y_image == EGL_NO_IMAGE_KHR || uv_image == EGL_NO_IMAGE_KHR) {
-        if (y_image != EGL_NO_IMAGE_KHR) {
-            gpu->egl_destroy_image(gpu->display, y_image);
-        }
-        if (uv_image != EGL_NO_IMAGE_KHR) {
-            gpu->egl_destroy_image(gpu->display, uv_image);
-        }
+    uint32_t uv_offset = hor_stride * ver_stride;
+    EGLImageKHR y_image = video_ctm_gpu_acquire_image(ctm, src_fd, width, height, hor_stride, 0, DRM_FORMAT_R8);
+    if (y_image == EGL_NO_IMAGE_KHR) {
+        return FALSE;
+    }
+    EGLImageKHR uv_image =
+        video_ctm_gpu_acquire_image(ctm, src_fd, chroma_width, chroma_height, hor_stride, uv_offset, DRM_FORMAT_GR88);
+    if (uv_image == EGL_NO_IMAGE_KHR) {
         return FALSE;
     }
     glActiveTexture(GL_TEXTURE0);
@@ -675,9 +788,22 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
-    gpu->egl_destroy_image(gpu->display, y_image);
-    gpu->egl_destroy_image(gpu->display, uv_image);
-    glFinish();
+    if (gpu->egl_create_sync != NULL && gpu->egl_client_wait_sync != NULL && gpu->egl_destroy_sync != NULL) {
+        EGLSyncKHR fence = gpu->egl_create_sync(gpu->display, EGL_SYNC_FENCE_KHR, NULL);
+        if (fence != EGL_NO_SYNC_KHR) {
+            glFlush();
+            EGLint wait = gpu->egl_client_wait_sync(gpu->display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
+            if (wait != EGL_CONDITION_SATISFIED_KHR) {
+                LOGW("Video CTM: eglClientWaitSyncKHR returned %d; forcing glFinish", wait);
+                glFinish();
+            }
+            gpu->egl_destroy_sync(gpu->display, fence);
+        } else {
+            glFinish();
+        }
+    } else {
+        glFinish();
+    }
     return TRUE;
 }
 
