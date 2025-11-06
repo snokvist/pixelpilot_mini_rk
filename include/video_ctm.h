@@ -15,7 +15,6 @@ typedef struct VideoCtm {
     gboolean enabled;
     double matrix[9];
     double sharpness;
-    gboolean sharpness_debug;
     VideoCtmBackend backend;
     gboolean hw_supported;
     gboolean hw_applied;
