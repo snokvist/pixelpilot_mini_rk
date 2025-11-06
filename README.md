@@ -49,6 +49,8 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].video-plane-id` | Numeric plane ID used for the decoded video plane. |
 | `[drm].use-udev` | `true` to enable the hotplug listener that reapplies modes when connectors change. |
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
+| `[drm].gamma-enable` | `true` uploads a hardware `GAMMA_LUT` on the active CRTC; defaults to `false`. |
+| `[drm].gamma-lut` | Path to a text file describing the LUT. Accepts one row per entry with `R G B` values (0-65535 or 0.0-1.0). Provide exactly the driver's reported size (1024 entries on RK). Relative paths resolve against the INI file. Use `identity` for the built-in passthrough curve. |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |

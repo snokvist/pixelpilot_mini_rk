@@ -160,6 +160,9 @@ void cfg_defaults(AppCfg *c) {
     strcpy(c->osd_external.bind_address, "0.0.0.0");
     c->osd_external.udp_port = 5005;
 
+    c->gamma.enable = 0;
+    c->gamma.lut_path[0] = '\0';
+
     c->gst_log = 0;
 
     c->cpu_affinity_present = 0;

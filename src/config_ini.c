@@ -830,6 +830,18 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->osd_plane_id = atoi(value);
             return 0;
         }
+        if (strcasecmp(key, "gamma-lut") == 0 || strcasecmp(key, "gamma_lut") == 0) {
+            ini_copy_string(cfg->gamma.lut_path, sizeof(cfg->gamma.lut_path), value);
+            return 0;
+        }
+        if (strcasecmp(key, "gamma-enable") == 0 || strcasecmp(key, "gamma") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->gamma.enable = v;
+            return 0;
+        }
         if (strcasecmp(key, "use-udev") == 0) {
             int v = 0;
             if (parse_bool(value, &v) != 0) {

@@ -60,6 +60,11 @@ typedef struct {
 } IdrCfg;
 
 typedef struct {
+    int enable;
+    char lut_path[PATH_MAX];
+} GammaCfg;
+
+typedef struct {
     char card_path[64];
     char connector_name[32];
     char config_path[PATH_MAX];
@@ -98,6 +103,8 @@ typedef struct {
         char bind_address[64];
         int udp_port;
     } osd_external;
+
+    GammaCfg gamma;
 
     SplashCfg splash;
     RecordCfg record;
