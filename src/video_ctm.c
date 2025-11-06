@@ -23,6 +23,20 @@
 #endif
 
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
+#define VIDEO_CTM_GPU_IMAGE_CACHE_SIZE 8
+#define VIDEO_CTM_DEFAULT_TRANSFER_GAMMA 2.2f
+
+typedef struct {
+    int fd;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch;
+    uint32_t offset;
+    uint32_t fourcc;
+    EGLImageKHR image;
+    uint64_t last_used;
+} VideoCtmGpuImageEntry;
+
 typedef struct VideoCtmGpuState {
     int drm_fd;
     struct gbm_device *gbm;
@@ -45,18 +59,35 @@ typedef struct VideoCtmGpuState {
     PFNEGLDESTROYIMAGEKHRPROC egl_destroy_image;
     PFNEGLGETPLATFORMDISPLAYEXTPROC egl_get_platform_display;
     PFNGLEGLIMAGETARGETTEXTURE2DOESPROC gl_image_target_texture;
+    PFNEGLCREATESYNCKHRPROC egl_create_sync;
+    PFNEGLDESTROYSYNCKHRPROC egl_destroy_sync;
+    PFNEGLCLIENTWAITSYNCKHRPROC egl_client_wait_sync;
     GLint loc_matrix;
     GLint loc_tex_y;
     GLint loc_tex_uv;
     GLint loc_texel;
     GLint loc_sharp_strength;
+    GLint loc_gamma;
+    GLint loc_gamma_inv;
+    GLint loc_gamma_gain;
+    GLint loc_gamma_lift;
+    GLint loc_gamma_mult;
     float applied_matrix[9];
     gboolean matrix_valid;
     float applied_sharp_strength;
     gboolean sharp_strength_valid;
+    float applied_gamma;
+    float applied_gamma_inv;
+    float applied_gamma_gain;
+    float applied_gamma_lift;
+    float applied_gamma_mult[3];
+    gboolean gamma_valid;
+    VideoCtmGpuImageEntry image_cache[VIDEO_CTM_GPU_IMAGE_CACHE_SIZE];
+    uint64_t frame_counter;
 } VideoCtmGpuState;
 
 static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm);
+static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm);
 
 static const GLfloat kCtmQuadVertices[] = {
     -1.0f, -1.0f, 0.0f, 1.0f,
@@ -64,6 +95,115 @@ static const GLfloat kCtmQuadVertices[] = {
     -1.0f,  1.0f, 0.0f, 0.0f,
      1.0f,  1.0f, 1.0f, 0.0f,
 };
+
+static void video_ctm_gpu_image_cache_touch(VideoCtmGpuState *gpu, VideoCtmGpuImageEntry *entry) {
+    if (gpu == NULL || entry == NULL) {
+        return;
+    }
+    entry->last_used = ++gpu->frame_counter;
+}
+
+static void video_ctm_gpu_image_cache_reset(VideoCtmGpuState *gpu) {
+    if (gpu == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < VIDEO_CTM_GPU_IMAGE_CACHE_SIZE; ++i) {
+        VideoCtmGpuImageEntry *entry = &gpu->image_cache[i];
+        if (entry->image != EGL_NO_IMAGE_KHR && gpu->egl_destroy_image != NULL &&
+            gpu->display != EGL_NO_DISPLAY) {
+            gpu->egl_destroy_image(gpu->display, entry->image);
+        }
+        entry->fd = -1;
+        entry->width = 0;
+        entry->height = 0;
+        entry->pitch = 0;
+        entry->offset = 0;
+        entry->fourcc = 0;
+        entry->image = EGL_NO_IMAGE_KHR;
+        entry->last_used = 0;
+    }
+    gpu->frame_counter = 0;
+}
+
+static gboolean video_ctm_gpu_image_matches(const VideoCtmGpuImageEntry *entry,
+                                            int fd,
+                                            uint32_t width,
+                                            uint32_t height,
+                                            uint32_t pitch,
+                                            uint32_t offset,
+                                            uint32_t fourcc) {
+    return entry != NULL && entry->fd == fd && entry->width == width && entry->height == height &&
+           entry->pitch == pitch && entry->offset == offset && entry->fourcc == fourcc &&
+           entry->image != EGL_NO_IMAGE_KHR;
+}
+
+static EGLImageKHR video_ctm_gpu_acquire_image(VideoCtm *ctm,
+                                               int fd,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               uint32_t pitch,
+                                               uint32_t offset,
+                                               uint32_t fourcc) {
+    VideoCtmGpuState *gpu = (ctm != NULL) ? ctm->gpu_state : NULL;
+    if (gpu == NULL || gpu->egl_create_image == NULL || gpu->display == EGL_NO_DISPLAY || fd < 0) {
+        return EGL_NO_IMAGE_KHR;
+    }
+
+    for (size_t i = 0; i < VIDEO_CTM_GPU_IMAGE_CACHE_SIZE; ++i) {
+        VideoCtmGpuImageEntry *entry = &gpu->image_cache[i];
+        if (video_ctm_gpu_image_matches(entry, fd, width, height, pitch, offset, fourcc)) {
+            video_ctm_gpu_image_cache_touch(gpu, entry);
+            return entry->image;
+        }
+    }
+
+    EGLint attrs[] = {
+        EGL_WIDTH, (EGLint)width,
+        EGL_HEIGHT, (EGLint)height,
+        EGL_LINUX_DRM_FOURCC_EXT, (EGLint)fourcc,
+        EGL_DMA_BUF_PLANE0_FD_EXT, fd,
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint)offset,
+        EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)pitch,
+        EGL_NONE,
+    };
+
+    EGLImageKHR image = gpu->egl_create_image(gpu->display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
+    if (image == EGL_NO_IMAGE_KHR) {
+        LOGW("Video CTM: failed to import plane fd=%d fourcc=0x%08x", fd, fourcc);
+        return EGL_NO_IMAGE_KHR;
+    }
+
+    VideoCtmGpuImageEntry *slot = NULL;
+    for (size_t i = 0; i < VIDEO_CTM_GPU_IMAGE_CACHE_SIZE; ++i) {
+        VideoCtmGpuImageEntry *entry = &gpu->image_cache[i];
+        if (entry->image == EGL_NO_IMAGE_KHR || entry->fd < 0) {
+            slot = entry;
+            break;
+        }
+    }
+    if (slot == NULL) {
+        slot = &gpu->image_cache[0];
+        for (size_t i = 1; i < VIDEO_CTM_GPU_IMAGE_CACHE_SIZE; ++i) {
+            if (gpu->image_cache[i].last_used < slot->last_used) {
+                slot = &gpu->image_cache[i];
+            }
+        }
+        if (slot->image != EGL_NO_IMAGE_KHR && gpu->egl_destroy_image != NULL &&
+            gpu->display != EGL_NO_DISPLAY) {
+            gpu->egl_destroy_image(gpu->display, slot->image);
+        }
+    }
+
+    slot->fd = fd;
+    slot->width = width;
+    slot->height = height;
+    slot->pitch = pitch;
+    slot->offset = offset;
+    slot->fourcc = fourcc;
+    slot->image = image;
+    video_ctm_gpu_image_cache_touch(gpu, slot);
+    return image;
+}
 
 static GLuint video_ctm_gpu_compile_shader(GLenum type, const char *source) {
     GLuint shader = glCreateShader(type);
@@ -107,6 +247,11 @@ static GLuint video_ctm_gpu_create_program(void) {
         "uniform mat3 u_matrix;\n"
         "uniform vec2 u_texel;\n"
         "uniform float u_sharp_strength;\n"
+        "uniform float u_gamma;\n"
+        "uniform float u_gamma_inv;\n"
+        "uniform float u_gamma_gain;\n"
+        "uniform float u_gamma_lift;\n"
+        "uniform vec3 u_gamma_mult;\n"
         "varying vec2 v_texcoord;\n"
         "void main() {\n"
         "    float y_center = texture2D(u_tex_y, v_texcoord).r;\n"
@@ -126,8 +271,14 @@ static GLuint video_ctm_gpu_create_program(void) {
         "        y_adj + 1.59602678 * v,\n"
         "        y_adj - 0.39176229 * u - 0.81296765 * v,\n"
         "        y_adj + 2.01723214 * u);\n"
-        "    vec3 transformed = clamp(u_matrix * rgb, 0.0, 1.0);\n"
-        "    gl_FragColor = vec4(transformed, 1.0);\n"
+        "    float safe_gamma = max(u_gamma, 1e-4);\n"
+        "    vec3 linear = pow(clamp(rgb, 0.0, 1.0), vec3(safe_gamma));\n"
+        "    vec3 transformed = clamp(u_matrix * linear, 0.0, 1.0);\n"
+        "    vec3 balanced = transformed * u_gamma_mult;\n"
+        "    vec3 lifted = clamp(balanced * u_gamma_gain + vec3(u_gamma_lift), 0.0, 1.0);\n"
+        "    vec3 toned = clamp(pow(lifted, vec3(u_gamma_inv)), 0.0, 1.0);\n"
+        "    vec3 gamma_corrected = pow(toned, vec3(1.0 / safe_gamma));\n"
+        "    gl_FragColor = vec4(gamma_corrected, 1.0);\n"
         "}\n";
 
     GLuint vs = video_ctm_gpu_compile_shader(GL_VERTEX_SHADER, vs_source);
@@ -180,6 +331,7 @@ static void video_ctm_gpu_destroy(VideoCtm *ctm) {
         return;
     }
     VideoCtmGpuState *gpu = ctm->gpu_state;
+    video_ctm_gpu_image_cache_reset(gpu);
     if (gpu->display != EGL_NO_DISPLAY && gpu->context != EGL_NO_CONTEXT && gpu->surface != EGL_NO_SURFACE) {
         eglMakeCurrent(gpu->display, gpu->surface, gpu->surface, gpu->context);
     }
@@ -321,10 +473,14 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->egl_create_image = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
     gpu->egl_destroy_image = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
     gpu->gl_image_target_texture = (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC)eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    gpu->egl_create_sync = (PFNEGLCREATESYNCKHRPROC)eglGetProcAddress("eglCreateSyncKHR");
+    gpu->egl_destroy_sync = (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR");
+    gpu->egl_client_wait_sync = (PFNEGLCLIENTWAITSYNCKHRPROC)eglGetProcAddress("eglClientWaitSyncKHR");
     if (!gpu->egl_create_image || !gpu->egl_destroy_image || !gpu->gl_image_target_texture) {
         video_ctm_gpu_destroy(ctm);
         return FALSE;
     }
+    video_ctm_gpu_image_cache_reset(gpu);
     gpu->program = video_ctm_gpu_create_program();
     if (gpu->program == 0) {
         video_ctm_gpu_destroy(ctm);
@@ -336,8 +492,26 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->loc_matrix = glGetUniformLocation(gpu->program, "u_matrix");
     gpu->loc_texel = glGetUniformLocation(gpu->program, "u_texel");
     gpu->loc_sharp_strength = glGetUniformLocation(gpu->program, "u_sharp_strength");
+    gpu->loc_gamma = glGetUniformLocation(gpu->program, "u_gamma");
+    gpu->loc_gamma_inv = glGetUniformLocation(gpu->program, "u_gamma_inv");
+    gpu->loc_gamma_gain = glGetUniformLocation(gpu->program, "u_gamma_gain");
+    gpu->loc_gamma_lift = glGetUniformLocation(gpu->program, "u_gamma_lift");
+    gpu->loc_gamma_mult = glGetUniformLocation(gpu->program, "u_gamma_mult");
     glUniform1i(gpu->loc_tex_y, 0);
     glUniform1i(gpu->loc_tex_uv, 1);
+    if (gpu->loc_gamma >= 0) {
+        glUniform1f(gpu->loc_gamma, VIDEO_CTM_DEFAULT_TRANSFER_GAMMA);
+    }
+    if (gpu->loc_gamma_gain >= 0) {
+        glUniform1f(gpu->loc_gamma_gain, 1.0f);
+    }
+    if (gpu->loc_gamma_lift >= 0) {
+        glUniform1f(gpu->loc_gamma_lift, 0.0f);
+    }
+    if (gpu->loc_gamma_mult >= 0) {
+        const GLfloat mult[3] = {1.0f, 1.0f, 1.0f};
+        glUniform3fv(gpu->loc_gamma_mult, 1, mult);
+    }
     glGenBuffers(1, &gpu->vbo);
     glBindBuffer(GL_ARRAY_BUFFER, gpu->vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(kCtmQuadVertices), kCtmQuadVertices, GL_STATIC_DRAW);
@@ -370,7 +544,16 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->matrix_valid = FALSE;
     gpu->sharp_strength_valid = FALSE;
     gpu->applied_sharp_strength = 0.0f;
+    gpu->gamma_valid = FALSE;
+    gpu->applied_gamma = 1.0f;
+    gpu->applied_gamma_inv = 1.0f;
+    gpu->applied_gamma_gain = 1.0f;
+    gpu->applied_gamma_lift = 0.0f;
+    gpu->applied_gamma_mult[0] = 1.0f;
+    gpu->applied_gamma_mult[1] = 1.0f;
+    gpu->applied_gamma_mult[2] = 1.0f;
     (void)video_ctm_gpu_upload_sharpness(ctm);
+    (void)video_ctm_gpu_upload_gamma(ctm);
     return TRUE;
 }
 
@@ -461,6 +644,93 @@ static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm) {
     return TRUE;
 }
 
+static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm) {
+    VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
+    if (gpu == NULL) {
+        return TRUE;
+    }
+    const float transfer_gamma = VIDEO_CTM_DEFAULT_TRANSFER_GAMMA;
+    float gamma_pow = (float)ctm->gamma_value;
+    if (!(gamma_pow > 0.0f)) {
+        gamma_pow = 1.0f;
+    }
+    float gamma_pow_inv = 1.0f / gamma_pow;
+    float gain = (float)ctm->gamma_gain;
+    if (!isfinite(gain)) {
+        gain = 1.0f;
+    }
+    float lift = (float)ctm->gamma_lift;
+    if (!isfinite(lift)) {
+        lift = 0.0f;
+    }
+    float mult[3] = {
+        (float)ctm->gamma_r_mult,
+        (float)ctm->gamma_g_mult,
+        (float)ctm->gamma_b_mult,
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        if (!isfinite(mult[i])) {
+            mult[i] = 1.0f;
+        }
+    }
+    if (gpu->gamma_valid && transfer_gamma == gpu->applied_gamma &&
+        gamma_pow_inv == gpu->applied_gamma_inv && gain == gpu->applied_gamma_gain &&
+        lift == gpu->applied_gamma_lift && mult[0] == gpu->applied_gamma_mult[0] &&
+        mult[1] == gpu->applied_gamma_mult[1] && mult[2] == gpu->applied_gamma_mult[2]) {
+        return TRUE;
+    }
+    glUseProgram(gpu->program);
+    if (gpu->loc_gamma >= 0) {
+        glUniform1f(gpu->loc_gamma, transfer_gamma);
+    }
+    if (gpu->loc_gamma_inv >= 0) {
+        glUniform1f(gpu->loc_gamma_inv, gamma_pow_inv);
+    }
+    if (gpu->loc_gamma_gain >= 0) {
+        glUniform1f(gpu->loc_gamma_gain, gain);
+    }
+    if (gpu->loc_gamma_lift >= 0) {
+        glUniform1f(gpu->loc_gamma_lift, lift);
+    }
+    if (gpu->loc_gamma_mult >= 0) {
+        glUniform3fv(gpu->loc_gamma_mult, 1, mult);
+    }
+    gpu->applied_gamma = transfer_gamma;
+    gpu->applied_gamma_inv = gamma_pow_inv;
+    gpu->applied_gamma_gain = gain;
+    gpu->applied_gamma_lift = lift;
+    gpu->applied_gamma_mult[0] = mult[0];
+    gpu->applied_gamma_mult[1] = mult[1];
+    gpu->applied_gamma_mult[2] = mult[2];
+    gpu->gamma_valid = TRUE;
+    return TRUE;
+}
+
+static gboolean video_ctm_gamma_active(const VideoCtm *ctm) {
+    if (ctm == NULL) {
+        return FALSE;
+    }
+    if (fabs(ctm->gamma_value - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_lift) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_gain - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_r_mult - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_g_mult - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_b_mult - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static gboolean video_ctm_gpu_upload_matrix(VideoCtm *ctm) {
     VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
     if (gpu == NULL) {
@@ -495,35 +765,19 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     if (!video_ctm_gpu_upload_sharpness(ctm)) {
         return FALSE;
     }
+    if (!video_ctm_gpu_upload_gamma(ctm)) {
+        return FALSE;
+    }
     uint32_t chroma_width = (width + 1u) / 2u;
     uint32_t chroma_height = (height + 1u) / 2u;
-    EGLint y_attrs[] = {
-        EGL_WIDTH, (EGLint)width,
-        EGL_HEIGHT, (EGLint)height,
-        EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_R8,
-        EGL_DMA_BUF_PLANE0_FD_EXT, src_fd,
-        EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
-        EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)hor_stride,
-        EGL_NONE
-    };
-    EGLint uv_attrs[] = {
-        EGL_WIDTH, (EGLint)chroma_width,
-        EGL_HEIGHT, (EGLint)chroma_height,
-        EGL_LINUX_DRM_FOURCC_EXT, DRM_FORMAT_GR88,
-        EGL_DMA_BUF_PLANE0_FD_EXT, src_fd,
-        EGL_DMA_BUF_PLANE0_OFFSET_EXT, (EGLint)(hor_stride * ver_stride),
-        EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)hor_stride,
-        EGL_NONE
-    };
-    EGLImageKHR y_image = gpu->egl_create_image(gpu->display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, y_attrs);
-    EGLImageKHR uv_image = gpu->egl_create_image(gpu->display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, uv_attrs);
-    if (y_image == EGL_NO_IMAGE_KHR || uv_image == EGL_NO_IMAGE_KHR) {
-        if (y_image != EGL_NO_IMAGE_KHR) {
-            gpu->egl_destroy_image(gpu->display, y_image);
-        }
-        if (uv_image != EGL_NO_IMAGE_KHR) {
-            gpu->egl_destroy_image(gpu->display, uv_image);
-        }
+    uint32_t uv_offset = hor_stride * ver_stride;
+    EGLImageKHR y_image = video_ctm_gpu_acquire_image(ctm, src_fd, width, height, hor_stride, 0, DRM_FORMAT_R8);
+    if (y_image == EGL_NO_IMAGE_KHR) {
+        return FALSE;
+    }
+    EGLImageKHR uv_image =
+        video_ctm_gpu_acquire_image(ctm, src_fd, chroma_width, chroma_height, hor_stride, uv_offset, DRM_FORMAT_GR88);
+    if (uv_image == EGL_NO_IMAGE_KHR) {
         return FALSE;
     }
     glActiveTexture(GL_TEXTURE0);
@@ -552,9 +806,22 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
-    gpu->egl_destroy_image(gpu->display, y_image);
-    gpu->egl_destroy_image(gpu->display, uv_image);
-    glFinish();
+    if (gpu->egl_create_sync != NULL && gpu->egl_client_wait_sync != NULL && gpu->egl_destroy_sync != NULL) {
+        EGLSyncKHR fence = gpu->egl_create_sync(gpu->display, EGL_SYNC_FENCE_KHR, NULL);
+        if (fence != EGL_NO_SYNC_KHR) {
+            glFlush();
+            EGLint wait = gpu->egl_client_wait_sync(gpu->display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
+            if (wait != EGL_CONDITION_SATISFIED_KHR) {
+                LOGW("Video CTM: eglClientWaitSyncKHR returned %d; forcing glFinish", wait);
+                glFinish();
+            }
+            gpu->egl_destroy_sync(gpu->display, fence);
+        } else {
+            glFinish();
+        }
+    } else {
+        glFinish();
+    }
     return TRUE;
 }
 
@@ -666,6 +933,12 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     memset(ctm, 0, sizeof(*ctm));
     video_ctm_set_identity(ctm);
     ctm->sharpness = 0.0;
+    ctm->gamma_value = 1.0;
+    ctm->gamma_lift = 0.0;
+    ctm->gamma_gain = 1.0;
+    ctm->gamma_r_mult = 1.0;
+    ctm->gamma_g_mult = 1.0;
+    ctm->gamma_b_mult = 1.0;
     ctm->backend = VIDEO_CTM_BACKEND_AUTO;
     ctm->hw_supported = FALSE;
     ctm->hw_applied = FALSE;
@@ -676,19 +949,46 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     ctm->hw_blob_id = 0;
     ctm->render_fd = -1;
 
+    gboolean config_enable = FALSE;
     if (cfg != NULL) {
-        if (cfg->video_ctm.enable) {
-            ctm->enabled = TRUE;
-        }
+        config_enable = cfg->video_ctm.enable != 0;
         ctm->backend = cfg->video_ctm.backend;
         for (int i = 0; i < 9; ++i) {
             ctm->matrix[i] = cfg->video_ctm.matrix[i];
         }
         ctm->sharpness = cfg->video_ctm.sharpness;
-        if (ctm->sharpness != 0.0) {
-            ctm->enabled = TRUE;
+        if (cfg->video_ctm.gamma_value > 0.0) {
+            ctm->gamma_value = cfg->video_ctm.gamma_value;
+        } else if (cfg->video_ctm.gamma_value != 0.0) {
+            LOGW("Video CTM: ignoring non-positive gamma %.3f", cfg->video_ctm.gamma_value);
+        }
+        ctm->gamma_lift = cfg->video_ctm.gamma_lift;
+        ctm->gamma_gain = cfg->video_ctm.gamma_gain;
+        ctm->gamma_r_mult = cfg->video_ctm.gamma_r_mult;
+        ctm->gamma_g_mult = cfg->video_ctm.gamma_g_mult;
+        ctm->gamma_b_mult = cfg->video_ctm.gamma_b_mult;
+        if (!isfinite(ctm->gamma_lift)) {
+            LOGW("Video CTM: ignoring non-finite gamma lift");
+            ctm->gamma_lift = 0.0;
+        }
+        if (!isfinite(ctm->gamma_gain)) {
+            LOGW("Video CTM: ignoring non-finite gamma gain");
+            ctm->gamma_gain = 1.0;
+        }
+        if (!isfinite(ctm->gamma_r_mult)) {
+            LOGW("Video CTM: ignoring non-finite gamma r-mult");
+            ctm->gamma_r_mult = 1.0;
+        }
+        if (!isfinite(ctm->gamma_g_mult)) {
+            LOGW("Video CTM: ignoring non-finite gamma g-mult");
+            ctm->gamma_g_mult = 1.0;
+        }
+        if (!isfinite(ctm->gamma_b_mult)) {
+            LOGW("Video CTM: ignoring non-finite gamma b-mult");
+            ctm->gamma_b_mult = 1.0;
         }
     }
+    ctm->enabled = config_enable;
     if (ctm->backend < VIDEO_CTM_BACKEND_AUTO || ctm->backend > VIDEO_CTM_BACKEND_GPU) {
         ctm->backend = VIDEO_CTM_BACKEND_AUTO;
     }
@@ -760,6 +1060,13 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
     if (ctm == NULL || !ctm->enabled) {
         video_ctm_disable_drm(ctm);
         return 0;
+    }
+    if (video_ctm_gamma_active(ctm) && video_ctm_hw_available(ctm)) {
+        if (ctm->hw_supported) {
+            LOGW("Video CTM: gamma adjustments require GPU processing; disabling DRM CTM");
+        }
+        video_ctm_disable_drm(ctm);
+        ctm->hw_supported = FALSE;
     }
     if (video_ctm_hw_available(ctm)) {
         if (video_ctm_apply_hw(ctm)) {
