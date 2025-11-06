@@ -200,6 +200,7 @@ void cfg_defaults(AppCfg *c) {
     for (int i = 0; i < 9; ++i) {
         c->video_ctm.matrix[i] = (i % 4 == 0) ? 1.0 : 0.0;
     }
+    c->video_ctm.sharpness = 0.35;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
