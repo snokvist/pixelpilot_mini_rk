@@ -55,6 +55,7 @@ typedef struct {
     VideoCtmBackend backend;
     double matrix[9];
     double sharpness;
+    int sharpness_debug;
 } VideoCtmCfg;
 
 typedef struct {

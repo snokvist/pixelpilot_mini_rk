@@ -994,6 +994,15 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_ctm.sharpness = v;
             return 0;
         }
+        if (strcasecmp(key, "sharpness-debug") == 0 || strcasecmp(key, "sharpen-debug") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                LOGE("config: video.ctm sharpness_debug expects a boolean");
+                return -1;
+            }
+            cfg->video_ctm.sharpness_debug = v;
+            return 0;
+        }
         if (strncasecmp(key, "matrix-row", 10) == 0 && strlen(key) == 11 && isdigit((unsigned char)key[10])) {
             int row = key[10] - '0';
             if (row < 0 || row > 2) {
