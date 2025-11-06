@@ -70,6 +70,9 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
 | `[video.ctm].enable` | Enable the 3×3 color transform matrix path before posting decoded frames. |
 | `[video.ctm].backend` | Choose the CTM backend: `auto` (default) or `gpu` (EGL + librga). |
+| `[video.ctm].matrix` | Nine comma-separated coefficients that form the 3×3 RGB color transform matrix (row-major). |
+| `[video.ctm].sharpness` | GPU luma sharpening strength. `0` disables the kernel; higher values increase high-frequency contrast. |
+| `[video.ctm].gamma` | Post-matrix gamma factor (>0). Values above `1.0` brighten the frame; below `1.0` darken it. |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |

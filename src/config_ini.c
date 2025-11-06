@@ -994,6 +994,15 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_ctm.sharpness = v;
             return 0;
         }
+        if (strcasecmp(key, "gamma") == 0 || strcasecmp(key, "gamma-value") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.ctm gamma expects a floating point value");
+                return -1;
+            }
+            cfg->video_ctm.gamma_value = v;
+            return 0;
+        }
         if (strncasecmp(key, "matrix-row", 10) == 0 && strlen(key) == 11 && isdigit((unsigned char)key[10])) {
             int row = key[10] - '0';
             if (row < 0 || row > 2) {

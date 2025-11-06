@@ -50,13 +50,17 @@ typedef struct VideoCtmGpuState {
     GLint loc_tex_uv;
     GLint loc_texel;
     GLint loc_sharp_strength;
+    GLint loc_gamma_inv;
     float applied_matrix[9];
     gboolean matrix_valid;
     float applied_sharp_strength;
     gboolean sharp_strength_valid;
+    float applied_gamma_inv;
+    gboolean gamma_valid;
 } VideoCtmGpuState;
 
 static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm);
+static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm);
 
 static const GLfloat kCtmQuadVertices[] = {
     -1.0f, -1.0f, 0.0f, 1.0f,
@@ -107,6 +111,7 @@ static GLuint video_ctm_gpu_create_program(void) {
         "uniform mat3 u_matrix;\n"
         "uniform vec2 u_texel;\n"
         "uniform float u_sharp_strength;\n"
+        "uniform float u_gamma_inv;\n"
         "varying vec2 v_texcoord;\n"
         "void main() {\n"
         "    float y_center = texture2D(u_tex_y, v_texcoord).r;\n"
@@ -127,7 +132,8 @@ static GLuint video_ctm_gpu_create_program(void) {
         "        y_adj - 0.39176229 * u - 0.81296765 * v,\n"
         "        y_adj + 2.01723214 * u);\n"
         "    vec3 transformed = clamp(u_matrix * rgb, 0.0, 1.0);\n"
-        "    gl_FragColor = vec4(transformed, 1.0);\n"
+        "    vec3 gamma_corrected = pow(transformed, vec3(u_gamma_inv));\n"
+        "    gl_FragColor = vec4(gamma_corrected, 1.0);\n"
         "}\n";
 
     GLuint vs = video_ctm_gpu_compile_shader(GL_VERTEX_SHADER, vs_source);
@@ -336,6 +342,7 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->loc_matrix = glGetUniformLocation(gpu->program, "u_matrix");
     gpu->loc_texel = glGetUniformLocation(gpu->program, "u_texel");
     gpu->loc_sharp_strength = glGetUniformLocation(gpu->program, "u_sharp_strength");
+    gpu->loc_gamma_inv = glGetUniformLocation(gpu->program, "u_gamma_inv");
     glUniform1i(gpu->loc_tex_y, 0);
     glUniform1i(gpu->loc_tex_uv, 1);
     glGenBuffers(1, &gpu->vbo);
@@ -370,7 +377,10 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->matrix_valid = FALSE;
     gpu->sharp_strength_valid = FALSE;
     gpu->applied_sharp_strength = 0.0f;
+    gpu->gamma_valid = FALSE;
+    gpu->applied_gamma_inv = 1.0f;
     (void)video_ctm_gpu_upload_sharpness(ctm);
+    (void)video_ctm_gpu_upload_gamma(ctm);
     return TRUE;
 }
 
@@ -461,6 +471,26 @@ static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm) {
     return TRUE;
 }
 
+static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm) {
+    VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
+    if (gpu == NULL || gpu->loc_gamma_inv < 0) {
+        return TRUE;
+    }
+    float gamma = (float)ctm->gamma_value;
+    if (!(gamma > 0.0f)) {
+        gamma = 1.0f;
+    }
+    float gamma_inv = 1.0f / gamma;
+    if (gpu->gamma_valid && gamma_inv == gpu->applied_gamma_inv) {
+        return TRUE;
+    }
+    glUseProgram(gpu->program);
+    glUniform1f(gpu->loc_gamma_inv, gamma_inv);
+    gpu->applied_gamma_inv = gamma_inv;
+    gpu->gamma_valid = TRUE;
+    return TRUE;
+}
+
 static gboolean video_ctm_gpu_upload_matrix(VideoCtm *ctm) {
     VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
     if (gpu == NULL) {
@@ -493,6 +523,9 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
         return FALSE;
     }
     if (!video_ctm_gpu_upload_sharpness(ctm)) {
+        return FALSE;
+    }
+    if (!video_ctm_gpu_upload_gamma(ctm)) {
         return FALSE;
     }
     uint32_t chroma_width = (width + 1u) / 2u;
@@ -666,6 +699,7 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     memset(ctm, 0, sizeof(*ctm));
     video_ctm_set_identity(ctm);
     ctm->sharpness = 0.0;
+    ctm->gamma_value = 1.0;
     ctm->backend = VIDEO_CTM_BACKEND_AUTO;
     ctm->hw_supported = FALSE;
     ctm->hw_applied = FALSE;
@@ -685,7 +719,15 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
             ctm->matrix[i] = cfg->video_ctm.matrix[i];
         }
         ctm->sharpness = cfg->video_ctm.sharpness;
+        if (cfg->video_ctm.gamma_value > 0.0) {
+            ctm->gamma_value = cfg->video_ctm.gamma_value;
+        } else if (cfg->video_ctm.gamma_value != 0.0) {
+            LOGW("Video CTM: ignoring non-positive gamma %.3f", cfg->video_ctm.gamma_value);
+        }
         if (ctm->sharpness != 0.0) {
+            ctm->enabled = TRUE;
+        }
+        if (fabs(ctm->gamma_value - 1.0) > 1e-6) {
             ctm->enabled = TRUE;
         }
     }
@@ -760,6 +802,13 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
     if (ctm == NULL || !ctm->enabled) {
         video_ctm_disable_drm(ctm);
         return 0;
+    }
+    if (fabs(ctm->gamma_value - 1.0) > 1e-6 && video_ctm_hw_available(ctm)) {
+        if (ctm->hw_supported) {
+            LOGW("Video CTM: gamma adjustment requires GPU processing; disabling DRM CTM");
+        }
+        video_ctm_disable_drm(ctm);
+        ctm->hw_supported = FALSE;
     }
     if (video_ctm_hw_available(ctm)) {
         if (video_ctm_apply_hw(ctm)) {
