@@ -4,6 +4,7 @@
 #include "idr_requester.h"
 #include "logging.h"
 #include "video_ctm.h"
+#include "video_gamma.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -108,6 +109,7 @@ struct VideoDecoder {
     IdrRequester *idr_requester;
 
     VideoCtm ctm;
+    VideoGamma gamma;
     uint32_t frame_fourcc;
     RK_U32 frame_hor_stride;
     RK_U32 frame_ver_stride;
@@ -1185,6 +1187,7 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->mode_w = ms->mode_w;
     vd->mode_h = ms->mode_h;
     video_ctm_init(&vd->ctm, cfg);
+    video_gamma_init(&vd->gamma, cfg);
     vd->frame_fourcc = 0;
     vd->frame_hor_stride = 0;
     vd->frame_ver_stride = 0;
@@ -1204,6 +1207,7 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     }
     vd->drm_fd = dup_fd;
     video_ctm_set_render_fd(&vd->ctm, vd->drm_fd);
+    video_gamma_configure_crtc(&vd->gamma, vd->drm_fd, vd->crtc_id);
 
     if (drm_get_prop_id(vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &vd->prop_fb_id) != 0 ||
         drm_get_prop_id(vd->drm_fd, vd->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &vd->prop_crtc_id) != 0 ||
@@ -1310,6 +1314,8 @@ void video_decoder_deinit(VideoDecoder *vd) {
 
     video_decoder_disable_plane(vd);
     release_frame_group(vd);
+
+    video_gamma_reset(&vd->gamma);
 
     if (vd->packet_buf) {
         g_free(vd->packet_buf);

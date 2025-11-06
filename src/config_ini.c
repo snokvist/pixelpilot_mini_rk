@@ -1011,6 +1011,75 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "video.gamma") == 0 || strcasecmp(section, "video_gamma") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->video_gamma.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "lift") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.gamma lift expects a floating point value");
+                return -1;
+            }
+            cfg->video_gamma.lift = v;
+            return 0;
+        }
+        if (strcasecmp(key, "gamma") == 0 || strcasecmp(key, "gamma-pow") == 0 ||
+            strcasecmp(key, "gamma_power") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0 || v <= 0.0) {
+                LOGE("config: video.gamma gamma must be positive");
+                return -1;
+            }
+            cfg->video_gamma.gamma_pow = v;
+            return 0;
+        }
+        if (strcasecmp(key, "gain") == 0 || strcasecmp(key, "highlight-gain") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0 || v < 0.0) {
+                LOGE("config: video.gamma gain must be non-negative");
+                return -1;
+            }
+            cfg->video_gamma.gain = v;
+            return 0;
+        }
+        if (strcasecmp(key, "r-mult") == 0 || strcasecmp(key, "red-mult") == 0 ||
+            strcasecmp(key, "r-multiplier") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.gamma r-mult expects a floating point value");
+                return -1;
+            }
+            cfg->video_gamma.channel_mul[0] = v;
+            return 0;
+        }
+        if (strcasecmp(key, "g-mult") == 0 || strcasecmp(key, "green-mult") == 0 ||
+            strcasecmp(key, "g-multiplier") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.gamma g-mult expects a floating point value");
+                return -1;
+            }
+            cfg->video_gamma.channel_mul[1] = v;
+            return 0;
+        }
+        if (strcasecmp(key, "b-mult") == 0 || strcasecmp(key, "blue-mult") == 0 ||
+            strcasecmp(key, "b-multiplier") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.gamma b-mult expects a floating point value");
+                return -1;
+            }
+            cfg->video_gamma.channel_mul[2] = v;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "restart") == 0 || strcasecmp(section, "restarts") == 0) {
         if (strcasecmp(key, "limit") == 0) {
             cfg->restart_limit = atoi(value);

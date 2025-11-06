@@ -201,6 +201,14 @@ void cfg_defaults(AppCfg *c) {
         c->video_ctm.matrix[i] = (i % 4 == 0) ? 1.0 : 0.0;
     }
     c->video_ctm.sharpness = 0.35;
+
+    c->video_gamma.enable = 0;
+    c->video_gamma.lift = 0.0;
+    c->video_gamma.gamma_pow = 1.0;
+    c->video_gamma.gain = 1.0;
+    c->video_gamma.channel_mul[0] = 1.0;
+    c->video_gamma.channel_mul[1] = 1.0;
+    c->video_gamma.channel_mul[2] = 1.0;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
