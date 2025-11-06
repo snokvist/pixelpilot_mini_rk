@@ -24,6 +24,7 @@
 
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
 #define VIDEO_CTM_GPU_IMAGE_CACHE_SIZE 8
+#define VIDEO_CTM_DEFAULT_TRANSFER_GAMMA 2.2f
 
 typedef struct {
     int fd;
@@ -66,6 +67,7 @@ typedef struct VideoCtmGpuState {
     GLint loc_tex_uv;
     GLint loc_texel;
     GLint loc_sharp_strength;
+    GLint loc_gamma;
     GLint loc_gamma_inv;
     GLint loc_gamma_gain;
     GLint loc_gamma_lift;
@@ -74,6 +76,7 @@ typedef struct VideoCtmGpuState {
     gboolean matrix_valid;
     float applied_sharp_strength;
     gboolean sharp_strength_valid;
+    float applied_gamma;
     float applied_gamma_inv;
     float applied_gamma_gain;
     float applied_gamma_lift;
@@ -244,6 +247,7 @@ static GLuint video_ctm_gpu_create_program(void) {
         "uniform mat3 u_matrix;\n"
         "uniform vec2 u_texel;\n"
         "uniform float u_sharp_strength;\n"
+        "uniform float u_gamma;\n"
         "uniform float u_gamma_inv;\n"
         "uniform float u_gamma_gain;\n"
         "uniform float u_gamma_lift;\n"
@@ -267,10 +271,13 @@ static GLuint video_ctm_gpu_create_program(void) {
         "        y_adj + 1.59602678 * v,\n"
         "        y_adj - 0.39176229 * u - 0.81296765 * v,\n"
         "        y_adj + 2.01723214 * u);\n"
-        "    vec3 transformed = clamp(u_matrix * rgb, 0.0, 1.0);\n"
+        "    float safe_gamma = max(u_gamma, 1e-4);\n"
+        "    vec3 linear = pow(clamp(rgb, 0.0, 1.0), vec3(safe_gamma));\n"
+        "    vec3 transformed = clamp(u_matrix * linear, 0.0, 1.0);\n"
         "    vec3 balanced = transformed * u_gamma_mult;\n"
         "    vec3 lifted = clamp(balanced * u_gamma_gain + vec3(u_gamma_lift), 0.0, 1.0);\n"
-        "    vec3 gamma_corrected = pow(lifted, vec3(u_gamma_inv));\n"
+        "    vec3 toned = clamp(pow(lifted, vec3(u_gamma_inv)), 0.0, 1.0);\n"
+        "    vec3 gamma_corrected = pow(toned, vec3(1.0 / safe_gamma));\n"
         "    gl_FragColor = vec4(gamma_corrected, 1.0);\n"
         "}\n";
 
@@ -485,12 +492,16 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->loc_matrix = glGetUniformLocation(gpu->program, "u_matrix");
     gpu->loc_texel = glGetUniformLocation(gpu->program, "u_texel");
     gpu->loc_sharp_strength = glGetUniformLocation(gpu->program, "u_sharp_strength");
+    gpu->loc_gamma = glGetUniformLocation(gpu->program, "u_gamma");
     gpu->loc_gamma_inv = glGetUniformLocation(gpu->program, "u_gamma_inv");
     gpu->loc_gamma_gain = glGetUniformLocation(gpu->program, "u_gamma_gain");
     gpu->loc_gamma_lift = glGetUniformLocation(gpu->program, "u_gamma_lift");
     gpu->loc_gamma_mult = glGetUniformLocation(gpu->program, "u_gamma_mult");
     glUniform1i(gpu->loc_tex_y, 0);
     glUniform1i(gpu->loc_tex_uv, 1);
+    if (gpu->loc_gamma >= 0) {
+        glUniform1f(gpu->loc_gamma, VIDEO_CTM_DEFAULT_TRANSFER_GAMMA);
+    }
     if (gpu->loc_gamma_gain >= 0) {
         glUniform1f(gpu->loc_gamma_gain, 1.0f);
     }
@@ -534,6 +545,7 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->sharp_strength_valid = FALSE;
     gpu->applied_sharp_strength = 0.0f;
     gpu->gamma_valid = FALSE;
+    gpu->applied_gamma = 1.0f;
     gpu->applied_gamma_inv = 1.0f;
     gpu->applied_gamma_gain = 1.0f;
     gpu->applied_gamma_lift = 0.0f;
@@ -637,11 +649,12 @@ static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm) {
     if (gpu == NULL) {
         return TRUE;
     }
-    float gamma = (float)ctm->gamma_value;
-    if (!(gamma > 0.0f)) {
-        gamma = 1.0f;
+    const float transfer_gamma = VIDEO_CTM_DEFAULT_TRANSFER_GAMMA;
+    float gamma_pow = (float)ctm->gamma_value;
+    if (!(gamma_pow > 0.0f)) {
+        gamma_pow = 1.0f;
     }
-    float gamma_inv = 1.0f / gamma;
+    float gamma_pow_inv = 1.0f / gamma_pow;
     float gain = (float)ctm->gamma_gain;
     if (!isfinite(gain)) {
         gain = 1.0f;
@@ -660,14 +673,18 @@ static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm) {
             mult[i] = 1.0f;
         }
     }
-    if (gpu->gamma_valid && gamma_inv == gpu->applied_gamma_inv && gain == gpu->applied_gamma_gain &&
+    if (gpu->gamma_valid && transfer_gamma == gpu->applied_gamma &&
+        gamma_pow_inv == gpu->applied_gamma_inv && gain == gpu->applied_gamma_gain &&
         lift == gpu->applied_gamma_lift && mult[0] == gpu->applied_gamma_mult[0] &&
         mult[1] == gpu->applied_gamma_mult[1] && mult[2] == gpu->applied_gamma_mult[2]) {
         return TRUE;
     }
     glUseProgram(gpu->program);
+    if (gpu->loc_gamma >= 0) {
+        glUniform1f(gpu->loc_gamma, transfer_gamma);
+    }
     if (gpu->loc_gamma_inv >= 0) {
-        glUniform1f(gpu->loc_gamma_inv, gamma_inv);
+        glUniform1f(gpu->loc_gamma_inv, gamma_pow_inv);
     }
     if (gpu->loc_gamma_gain >= 0) {
         glUniform1f(gpu->loc_gamma_gain, gain);
@@ -678,7 +695,8 @@ static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm) {
     if (gpu->loc_gamma_mult >= 0) {
         glUniform3fv(gpu->loc_gamma_mult, 1, mult);
     }
-    gpu->applied_gamma_inv = gamma_inv;
+    gpu->applied_gamma = transfer_gamma;
+    gpu->applied_gamma_inv = gamma_pow_inv;
     gpu->applied_gamma_gain = gain;
     gpu->applied_gamma_lift = lift;
     gpu->applied_gamma_mult[0] = mult[0];
