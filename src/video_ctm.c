@@ -48,9 +48,15 @@ typedef struct VideoCtmGpuState {
     GLint loc_matrix;
     GLint loc_tex_y;
     GLint loc_tex_uv;
+    GLint loc_texel;
+    GLint loc_sharp_strength;
     float applied_matrix[9];
     gboolean matrix_valid;
+    float applied_sharp_strength;
+    gboolean sharp_strength_valid;
 } VideoCtmGpuState;
+
+static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm);
 
 static const GLfloat kCtmQuadVertices[] = {
     -1.0f, -1.0f, 0.0f, 1.0f,
@@ -99,11 +105,21 @@ static GLuint video_ctm_gpu_create_program(void) {
         "uniform sampler2D u_tex_y;\n"
         "uniform sampler2D u_tex_uv;\n"
         "uniform mat3 u_matrix;\n"
+        "uniform vec2 u_texel;\n"
+        "uniform float u_sharp_strength;\n"
         "varying vec2 v_texcoord;\n"
         "void main() {\n"
-        "    float y = texture2D(u_tex_y, v_texcoord).r;\n"
+        "    float y_center = texture2D(u_tex_y, v_texcoord).r;\n"
         "    vec2 uv = texture2D(u_tex_uv, v_texcoord).rg - vec2(0.5, 0.5);\n"
-        "    float y_adj = y * 1.16438356;\n"
+        "    vec2 texel = u_texel;\n"
+        "    float y_up = texture2D(u_tex_y, v_texcoord + vec2(0.0, texel.y)).r;\n"
+        "    float y_down = texture2D(u_tex_y, v_texcoord - vec2(0.0, texel.y)).r;\n"
+        "    float y_left = texture2D(u_tex_y, v_texcoord - vec2(texel.x, 0.0)).r;\n"
+        "    float y_right = texture2D(u_tex_y, v_texcoord + vec2(texel.x, 0.0)).r;\n"
+        "    float y_blur = (y_center * 4.0 + y_up + y_down + y_left + y_right) * 0.125;\n"
+        "    float high_pass = y_center - y_blur;\n"
+        "    float y_sharp = clamp(y_center + u_sharp_strength * high_pass, 0.0, 1.0);\n"
+        "    float y_adj = y_sharp * 1.16438356;\n"
         "    float u = uv.x;\n"
         "    float v = uv.y;\n"
         "    vec3 rgb = vec3(\n"
@@ -318,6 +334,8 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->loc_tex_y = glGetUniformLocation(gpu->program, "u_tex_y");
     gpu->loc_tex_uv = glGetUniformLocation(gpu->program, "u_tex_uv");
     gpu->loc_matrix = glGetUniformLocation(gpu->program, "u_matrix");
+    gpu->loc_texel = glGetUniformLocation(gpu->program, "u_texel");
+    gpu->loc_sharp_strength = glGetUniformLocation(gpu->program, "u_sharp_strength");
     glUniform1i(gpu->loc_tex_y, 0);
     glUniform1i(gpu->loc_tex_uv, 1);
     glGenBuffers(1, &gpu->vbo);
@@ -325,14 +343,14 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     glBufferData(GL_ARRAY_BUFFER, sizeof(kCtmQuadVertices), kCtmQuadVertices, GL_STATIC_DRAW);
     glGenTextures(1, &gpu->tex_y);
     glBindTexture(GL_TEXTURE_2D, gpu->tex_y);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenTextures(1, &gpu->tex_uv);
     glBindTexture(GL_TEXTURE_2D, gpu->tex_uv);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenTextures(1, &gpu->tex_dst);
@@ -350,6 +368,9 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->dst_width = 0;
     gpu->dst_height = 0;
     gpu->matrix_valid = FALSE;
+    gpu->sharp_strength_valid = FALSE;
+    gpu->applied_sharp_strength = 0.0f;
+    (void)video_ctm_gpu_upload_sharpness(ctm);
     return TRUE;
 }
 
@@ -424,6 +445,22 @@ static gboolean video_ctm_gpu_ensure_target(VideoCtm *ctm, uint32_t width, uint3
     return TRUE;
 }
 
+static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm) {
+    VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
+    if (gpu == NULL || gpu->loc_sharp_strength < 0) {
+        return TRUE;
+    }
+    float sharp = (float)ctm->sharpness;
+    if (gpu->sharp_strength_valid && sharp == gpu->applied_sharp_strength) {
+        return TRUE;
+    }
+    glUseProgram(gpu->program);
+    glUniform1f(gpu->loc_sharp_strength, sharp);
+    gpu->applied_sharp_strength = sharp;
+    gpu->sharp_strength_valid = TRUE;
+    return TRUE;
+}
+
 static gboolean video_ctm_gpu_upload_matrix(VideoCtm *ctm) {
     VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
     if (gpu == NULL) {
@@ -453,6 +490,9 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
         return FALSE;
     }
     if (!video_ctm_gpu_upload_matrix(ctm)) {
+        return FALSE;
+    }
+    if (!video_ctm_gpu_upload_sharpness(ctm)) {
         return FALSE;
     }
     uint32_t chroma_width = (width + 1u) / 2u;
@@ -495,6 +535,11 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     glBindFramebuffer(GL_FRAMEBUFFER, gpu->fbo);
     glViewport(0, 0, (GLint)width, (GLint)height);
     glUseProgram(gpu->program);
+    if (gpu->loc_texel >= 0) {
+        GLfloat inv_w = (width != 0u) ? (1.0f / (GLfloat)width) : 0.0f;
+        GLfloat inv_h = (height != 0u) ? (1.0f / (GLfloat)height) : 0.0f;
+        glUniform2f(gpu->loc_texel, inv_w, inv_h);
+    }
     glBindBuffer(GL_ARRAY_BUFFER, gpu->vbo);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * (GLint)sizeof(GLfloat), (const GLvoid *)0);
@@ -620,6 +665,7 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     }
     memset(ctm, 0, sizeof(*ctm));
     video_ctm_set_identity(ctm);
+    ctm->sharpness = 0.0;
     ctm->backend = VIDEO_CTM_BACKEND_AUTO;
     ctm->hw_supported = FALSE;
     ctm->hw_applied = FALSE;
@@ -637,6 +683,10 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
         ctm->backend = cfg->video_ctm.backend;
         for (int i = 0; i < 9; ++i) {
             ctm->matrix[i] = cfg->video_ctm.matrix[i];
+        }
+        ctm->sharpness = cfg->video_ctm.sharpness;
+        if (ctm->sharpness != 0.0) {
+            ctm->enabled = TRUE;
         }
     }
     if (ctm->backend < VIDEO_CTM_BACKEND_AUTO || ctm->backend > VIDEO_CTM_BACKEND_GPU) {

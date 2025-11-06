@@ -14,6 +14,7 @@ struct VideoCtmGpuState;
 typedef struct VideoCtm {
     gboolean enabled;
     double matrix[9];
+    double sharpness;
     VideoCtmBackend backend;
     gboolean hw_supported;
     gboolean hw_applied;
