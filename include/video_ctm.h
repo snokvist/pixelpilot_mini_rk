@@ -16,6 +16,11 @@ typedef struct VideoCtm {
     double matrix[9];
     double sharpness;
     double gamma_value;
+    double gamma_lift;
+    double gamma_gain;
+    double gamma_r_mult;
+    double gamma_g_mult;
+    double gamma_b_mult;
     VideoCtmBackend backend;
     gboolean hw_supported;
     gboolean hw_applied;

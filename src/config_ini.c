@@ -1003,6 +1003,56 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_ctm.gamma_value = v;
             return 0;
         }
+        if (strcasecmp(key, "gamma-lift") == 0 || strcasecmp(key, "gamma_lift") == 0 ||
+            strcasecmp(key, "lift") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.ctm lift expects a floating point value");
+                return -1;
+            }
+            cfg->video_ctm.gamma_lift = v;
+            return 0;
+        }
+        if (strcasecmp(key, "gamma-gain") == 0 || strcasecmp(key, "gamma_gain") == 0 ||
+            strcasecmp(key, "gain") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.ctm gain expects a floating point value");
+                return -1;
+            }
+            cfg->video_ctm.gamma_gain = v;
+            return 0;
+        }
+        if (strcasecmp(key, "gamma-r-mult") == 0 || strcasecmp(key, "gamma_r_mult") == 0 ||
+            strcasecmp(key, "r-mult") == 0 || strcasecmp(key, "r_mult") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.ctm r-mult expects a floating point value");
+                return -1;
+            }
+            cfg->video_ctm.gamma_r_mult = v;
+            return 0;
+        }
+        if (strcasecmp(key, "gamma-g-mult") == 0 || strcasecmp(key, "gamma_g_mult") == 0 ||
+            strcasecmp(key, "g-mult") == 0 || strcasecmp(key, "g_mult") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.ctm g-mult expects a floating point value");
+                return -1;
+            }
+            cfg->video_ctm.gamma_g_mult = v;
+            return 0;
+        }
+        if (strcasecmp(key, "gamma-b-mult") == 0 || strcasecmp(key, "gamma_b_mult") == 0 ||
+            strcasecmp(key, "b-mult") == 0 || strcasecmp(key, "b_mult") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.ctm b-mult expects a floating point value");
+                return -1;
+            }
+            cfg->video_ctm.gamma_b_mult = v;
+            return 0;
+        }
         if (strncasecmp(key, "matrix-row", 10) == 0 && strlen(key) == 11 && isdigit((unsigned char)key[10])) {
             int row = key[10] - '0';
             if (row < 0 || row > 2) {

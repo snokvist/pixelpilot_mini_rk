@@ -51,11 +51,17 @@ typedef struct VideoCtmGpuState {
     GLint loc_texel;
     GLint loc_sharp_strength;
     GLint loc_gamma_inv;
+    GLint loc_gamma_gain;
+    GLint loc_gamma_lift;
+    GLint loc_gamma_mult;
     float applied_matrix[9];
     gboolean matrix_valid;
     float applied_sharp_strength;
     gboolean sharp_strength_valid;
     float applied_gamma_inv;
+    float applied_gamma_gain;
+    float applied_gamma_lift;
+    float applied_gamma_mult[3];
     gboolean gamma_valid;
 } VideoCtmGpuState;
 
@@ -112,6 +118,9 @@ static GLuint video_ctm_gpu_create_program(void) {
         "uniform vec2 u_texel;\n"
         "uniform float u_sharp_strength;\n"
         "uniform float u_gamma_inv;\n"
+        "uniform float u_gamma_gain;\n"
+        "uniform float u_gamma_lift;\n"
+        "uniform vec3 u_gamma_mult;\n"
         "varying vec2 v_texcoord;\n"
         "void main() {\n"
         "    float y_center = texture2D(u_tex_y, v_texcoord).r;\n"
@@ -132,7 +141,9 @@ static GLuint video_ctm_gpu_create_program(void) {
         "        y_adj - 0.39176229 * u - 0.81296765 * v,\n"
         "        y_adj + 2.01723214 * u);\n"
         "    vec3 transformed = clamp(u_matrix * rgb, 0.0, 1.0);\n"
-        "    vec3 gamma_corrected = pow(transformed, vec3(u_gamma_inv));\n"
+        "    vec3 balanced = transformed * u_gamma_mult;\n"
+        "    vec3 lifted = clamp(balanced * u_gamma_gain + vec3(u_gamma_lift), 0.0, 1.0);\n"
+        "    vec3 gamma_corrected = pow(lifted, vec3(u_gamma_inv));\n"
         "    gl_FragColor = vec4(gamma_corrected, 1.0);\n"
         "}\n";
 
@@ -343,8 +354,21 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->loc_texel = glGetUniformLocation(gpu->program, "u_texel");
     gpu->loc_sharp_strength = glGetUniformLocation(gpu->program, "u_sharp_strength");
     gpu->loc_gamma_inv = glGetUniformLocation(gpu->program, "u_gamma_inv");
+    gpu->loc_gamma_gain = glGetUniformLocation(gpu->program, "u_gamma_gain");
+    gpu->loc_gamma_lift = glGetUniformLocation(gpu->program, "u_gamma_lift");
+    gpu->loc_gamma_mult = glGetUniformLocation(gpu->program, "u_gamma_mult");
     glUniform1i(gpu->loc_tex_y, 0);
     glUniform1i(gpu->loc_tex_uv, 1);
+    if (gpu->loc_gamma_gain >= 0) {
+        glUniform1f(gpu->loc_gamma_gain, 1.0f);
+    }
+    if (gpu->loc_gamma_lift >= 0) {
+        glUniform1f(gpu->loc_gamma_lift, 0.0f);
+    }
+    if (gpu->loc_gamma_mult >= 0) {
+        const GLfloat mult[3] = {1.0f, 1.0f, 1.0f};
+        glUniform3fv(gpu->loc_gamma_mult, 1, mult);
+    }
     glGenBuffers(1, &gpu->vbo);
     glBindBuffer(GL_ARRAY_BUFFER, gpu->vbo);
     glBufferData(GL_ARRAY_BUFFER, sizeof(kCtmQuadVertices), kCtmQuadVertices, GL_STATIC_DRAW);
@@ -379,6 +403,11 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->applied_sharp_strength = 0.0f;
     gpu->gamma_valid = FALSE;
     gpu->applied_gamma_inv = 1.0f;
+    gpu->applied_gamma_gain = 1.0f;
+    gpu->applied_gamma_lift = 0.0f;
+    gpu->applied_gamma_mult[0] = 1.0f;
+    gpu->applied_gamma_mult[1] = 1.0f;
+    gpu->applied_gamma_mult[2] = 1.0f;
     (void)video_ctm_gpu_upload_sharpness(ctm);
     (void)video_ctm_gpu_upload_gamma(ctm);
     return TRUE;
@@ -473,7 +502,7 @@ static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm) {
 
 static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm) {
     VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
-    if (gpu == NULL || gpu->loc_gamma_inv < 0) {
+    if (gpu == NULL) {
         return TRUE;
     }
     float gamma = (float)ctm->gamma_value;
@@ -481,14 +510,75 @@ static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm) {
         gamma = 1.0f;
     }
     float gamma_inv = 1.0f / gamma;
-    if (gpu->gamma_valid && gamma_inv == gpu->applied_gamma_inv) {
+    float gain = (float)ctm->gamma_gain;
+    if (!isfinite(gain)) {
+        gain = 1.0f;
+    }
+    float lift = (float)ctm->gamma_lift;
+    if (!isfinite(lift)) {
+        lift = 0.0f;
+    }
+    float mult[3] = {
+        (float)ctm->gamma_r_mult,
+        (float)ctm->gamma_g_mult,
+        (float)ctm->gamma_b_mult,
+    };
+    for (size_t i = 0; i < 3; ++i) {
+        if (!isfinite(mult[i])) {
+            mult[i] = 1.0f;
+        }
+    }
+    if (gpu->gamma_valid && gamma_inv == gpu->applied_gamma_inv && gain == gpu->applied_gamma_gain &&
+        lift == gpu->applied_gamma_lift && mult[0] == gpu->applied_gamma_mult[0] &&
+        mult[1] == gpu->applied_gamma_mult[1] && mult[2] == gpu->applied_gamma_mult[2]) {
         return TRUE;
     }
     glUseProgram(gpu->program);
-    glUniform1f(gpu->loc_gamma_inv, gamma_inv);
+    if (gpu->loc_gamma_inv >= 0) {
+        glUniform1f(gpu->loc_gamma_inv, gamma_inv);
+    }
+    if (gpu->loc_gamma_gain >= 0) {
+        glUniform1f(gpu->loc_gamma_gain, gain);
+    }
+    if (gpu->loc_gamma_lift >= 0) {
+        glUniform1f(gpu->loc_gamma_lift, lift);
+    }
+    if (gpu->loc_gamma_mult >= 0) {
+        glUniform3fv(gpu->loc_gamma_mult, 1, mult);
+    }
     gpu->applied_gamma_inv = gamma_inv;
+    gpu->applied_gamma_gain = gain;
+    gpu->applied_gamma_lift = lift;
+    gpu->applied_gamma_mult[0] = mult[0];
+    gpu->applied_gamma_mult[1] = mult[1];
+    gpu->applied_gamma_mult[2] = mult[2];
     gpu->gamma_valid = TRUE;
     return TRUE;
+}
+
+static gboolean video_ctm_gamma_active(const VideoCtm *ctm) {
+    if (ctm == NULL) {
+        return FALSE;
+    }
+    if (fabs(ctm->gamma_value - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_lift) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_gain - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_r_mult - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_g_mult - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    if (fabs(ctm->gamma_b_mult - 1.0) > 1e-6) {
+        return TRUE;
+    }
+    return FALSE;
 }
 
 static gboolean video_ctm_gpu_upload_matrix(VideoCtm *ctm) {
@@ -700,6 +790,11 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     video_ctm_set_identity(ctm);
     ctm->sharpness = 0.0;
     ctm->gamma_value = 1.0;
+    ctm->gamma_lift = 0.0;
+    ctm->gamma_gain = 1.0;
+    ctm->gamma_r_mult = 1.0;
+    ctm->gamma_g_mult = 1.0;
+    ctm->gamma_b_mult = 1.0;
     ctm->backend = VIDEO_CTM_BACKEND_AUTO;
     ctm->hw_supported = FALSE;
     ctm->hw_applied = FALSE;
@@ -724,10 +819,35 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
         } else if (cfg->video_ctm.gamma_value != 0.0) {
             LOGW("Video CTM: ignoring non-positive gamma %.3f", cfg->video_ctm.gamma_value);
         }
+        ctm->gamma_lift = cfg->video_ctm.gamma_lift;
+        ctm->gamma_gain = cfg->video_ctm.gamma_gain;
+        ctm->gamma_r_mult = cfg->video_ctm.gamma_r_mult;
+        ctm->gamma_g_mult = cfg->video_ctm.gamma_g_mult;
+        ctm->gamma_b_mult = cfg->video_ctm.gamma_b_mult;
+        if (!isfinite(ctm->gamma_lift)) {
+            LOGW("Video CTM: ignoring non-finite gamma lift");
+            ctm->gamma_lift = 0.0;
+        }
+        if (!isfinite(ctm->gamma_gain)) {
+            LOGW("Video CTM: ignoring non-finite gamma gain");
+            ctm->gamma_gain = 1.0;
+        }
+        if (!isfinite(ctm->gamma_r_mult)) {
+            LOGW("Video CTM: ignoring non-finite gamma r-mult");
+            ctm->gamma_r_mult = 1.0;
+        }
+        if (!isfinite(ctm->gamma_g_mult)) {
+            LOGW("Video CTM: ignoring non-finite gamma g-mult");
+            ctm->gamma_g_mult = 1.0;
+        }
+        if (!isfinite(ctm->gamma_b_mult)) {
+            LOGW("Video CTM: ignoring non-finite gamma b-mult");
+            ctm->gamma_b_mult = 1.0;
+        }
         if (ctm->sharpness != 0.0) {
             ctm->enabled = TRUE;
         }
-        if (fabs(ctm->gamma_value - 1.0) > 1e-6) {
+        if (video_ctm_gamma_active(ctm)) {
             ctm->enabled = TRUE;
         }
     }
@@ -803,9 +923,9 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
         video_ctm_disable_drm(ctm);
         return 0;
     }
-    if (fabs(ctm->gamma_value - 1.0) > 1e-6 && video_ctm_hw_available(ctm)) {
+    if (video_ctm_gamma_active(ctm) && video_ctm_hw_available(ctm)) {
         if (ctm->hw_supported) {
-            LOGW("Video CTM: gamma adjustment requires GPU processing; disabling DRM CTM");
+            LOGW("Video CTM: gamma adjustments require GPU processing; disabling DRM CTM");
         }
         video_ctm_disable_drm(ctm);
         ctm->hw_supported = FALSE;
