@@ -931,10 +931,9 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     ctm->hw_blob_id = 0;
     ctm->render_fd = -1;
 
+    gboolean config_enable = FALSE;
     if (cfg != NULL) {
-        if (cfg->video_ctm.enable) {
-            ctm->enabled = TRUE;
-        }
+        config_enable = cfg->video_ctm.enable != 0;
         ctm->backend = cfg->video_ctm.backend;
         for (int i = 0; i < 9; ++i) {
             ctm->matrix[i] = cfg->video_ctm.matrix[i];
@@ -970,13 +969,8 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
             LOGW("Video CTM: ignoring non-finite gamma b-mult");
             ctm->gamma_b_mult = 1.0;
         }
-        if (ctm->sharpness != 0.0) {
-            ctm->enabled = TRUE;
-        }
-        if (video_ctm_gamma_active(ctm)) {
-            ctm->enabled = TRUE;
-        }
     }
+    ctm->enabled = config_enable;
     if (ctm->backend < VIDEO_CTM_BACKEND_AUTO || ctm->backend > VIDEO_CTM_BACKEND_GPU) {
         ctm->backend = VIDEO_CTM_BACKEND_AUTO;
     }
