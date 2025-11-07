@@ -974,6 +974,15 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_ctm.backend = backend;
             return 0;
         }
+        if (strcasecmp(key, "flip") == 0 || strcasecmp(key, "flip-image") == 0 ||
+            strcasecmp(key, "flip-image-180") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->video_ctm.flip = v;
+            return 0;
+        }
         if (strcasecmp(key, "ctm-matrix") == 0 || strcasecmp(key, "matrix") == 0) {
             double coeffs[9];
             if (parse_double_list(value, coeffs, 9) != 0) {

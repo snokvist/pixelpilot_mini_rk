@@ -76,6 +76,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[video.ctm].gamma-lift` | Black level offset added before gamma (positive raises shadows, negative deepens them). |
 | `[video.ctm].gamma-gain` | Scalar highlight gain applied before gamma, useful for overall exposure compensation. |
 | `[video.ctm].gamma-r-mult` / `.gamma-g-mult` / `.gamma-b-mult` | Per-channel multipliers for warm/cool balance before gamma (default `1.0`). |
+| `[video.ctm].flip` | `true` rotates the GPU path output by 180° (mirroring both axes); `false` keeps the natural orientation. |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |

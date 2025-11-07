@@ -61,6 +61,7 @@ typedef struct {
     double gamma_r_mult;
     double gamma_g_mult;
     double gamma_b_mult;
+    int flip;
 } VideoCtmCfg;
 
 typedef struct {

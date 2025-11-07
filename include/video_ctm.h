@@ -21,6 +21,7 @@ typedef struct VideoCtm {
     double gamma_r_mult;
     double gamma_g_mult;
     double gamma_b_mult;
+    gboolean flip;
     VideoCtmBackend backend;
     gboolean hw_supported;
     gboolean hw_applied;
