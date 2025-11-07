@@ -41,6 +41,8 @@ void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester);
 
 int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecoderZoomRequest *request);
 
+int video_decoder_apply_ctm(VideoDecoder *vd, const VideoCtmCfg *cfg);
+
 size_t video_decoder_max_packet_size(const VideoDecoder *vd);
 
 #endif // VIDEO_DECODER_H

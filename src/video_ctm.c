@@ -1053,6 +1053,103 @@ void video_ctm_disable_drm(VideoCtm *ctm) {
     video_ctm_destroy_blob(ctm);
 }
 
+void video_ctm_apply_config(VideoCtm *ctm, const VideoCtmCfg *cfg) {
+    if (ctm == NULL || cfg == NULL) {
+        return;
+    }
+
+    video_ctm_disable_drm(ctm);
+#if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
+    if (ctm->gpu_state != NULL) {
+        video_ctm_gpu_destroy(ctm);
+    }
+#endif
+
+    gboolean enable = cfg->enable ? TRUE : FALSE;
+    VideoCtmBackend backend = cfg->backend;
+    if (backend < VIDEO_CTM_BACKEND_AUTO || backend > VIDEO_CTM_BACKEND_GPU) {
+        backend = VIDEO_CTM_BACKEND_AUTO;
+    }
+
+    double matrix[9];
+    for (int i = 0; i < 9; ++i) {
+        double value = cfg->matrix[i];
+        if (!isfinite(value)) {
+            value = (i % 4 == 0) ? 1.0 : 0.0;
+        }
+        matrix[i] = value;
+    }
+
+    double sharpness = cfg->sharpness;
+    if (!isfinite(sharpness)) {
+        sharpness = 0.0;
+    }
+
+    double gamma_value = ctm->gamma_value;
+    if (cfg->gamma_value > 0.0) {
+        gamma_value = cfg->gamma_value;
+    } else if (cfg->gamma_value != 0.0) {
+        LOGW("Video CTM: ignoring non-positive gamma %.3f", cfg->gamma_value);
+    } else if (gamma_value <= 0.0 || !isfinite(gamma_value)) {
+        gamma_value = 1.0;
+    }
+
+    double gamma_lift = cfg->gamma_lift;
+    if (!isfinite(gamma_lift)) {
+        LOGW("Video CTM: ignoring non-finite gamma lift");
+        gamma_lift = 0.0;
+    }
+
+    double gamma_gain = cfg->gamma_gain;
+    if (!isfinite(gamma_gain)) {
+        LOGW("Video CTM: ignoring non-finite gamma gain");
+        gamma_gain = 1.0;
+    }
+
+    double gamma_r_mult = cfg->gamma_r_mult;
+    if (!isfinite(gamma_r_mult)) {
+        LOGW("Video CTM: ignoring non-finite gamma r-mult");
+        gamma_r_mult = 1.0;
+    }
+
+    double gamma_g_mult = cfg->gamma_g_mult;
+    if (!isfinite(gamma_g_mult)) {
+        LOGW("Video CTM: ignoring non-finite gamma g-mult");
+        gamma_g_mult = 1.0;
+    }
+
+    double gamma_b_mult = cfg->gamma_b_mult;
+    if (!isfinite(gamma_b_mult)) {
+        LOGW("Video CTM: ignoring non-finite gamma b-mult");
+        gamma_b_mult = 1.0;
+    }
+
+    ctm->enabled = enable;
+    ctm->backend = backend;
+    for (int i = 0; i < 9; ++i) {
+        ctm->matrix[i] = matrix[i];
+    }
+    ctm->sharpness = sharpness;
+    ctm->gamma_value = gamma_value;
+    ctm->gamma_lift = gamma_lift;
+    ctm->gamma_gain = gamma_gain;
+    ctm->gamma_r_mult = gamma_r_mult;
+    ctm->gamma_g_mult = gamma_g_mult;
+    ctm->gamma_b_mult = gamma_b_mult;
+    ctm->hw_applied = FALSE;
+
+    if (ctm->backend < VIDEO_CTM_BACKEND_AUTO || ctm->backend > VIDEO_CTM_BACKEND_GPU) {
+        ctm->backend = VIDEO_CTM_BACKEND_AUTO;
+    }
+
+#if !defined(HAVE_LIBRGA) || !defined(HAVE_GBM_GLES2)
+    if (ctm->enabled) {
+        LOGW("Video CTM requested but the GPU backend is unavailable at build time; disabling color transform");
+        ctm->enabled = FALSE;
+    }
+#endif
+}
+
  
 
 int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t hor_stride,

@@ -18,6 +18,7 @@
 #include <sched.h>
 #include <poll.h>
 #include <signal.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,27 @@ static volatile sig_atomic_t g_toggle_record_flag = 0;
 static volatile sig_atomic_t g_reinit_flag = 0;
 
 static const char *g_instance_pid_path = "/tmp/pixelpilot_mini_rk.pid";
+
+static int parse_external_ctm_backend(const char *value, VideoCtmBackend *backend_out) {
+    if (value == NULL || backend_out == NULL) {
+        return -1;
+    }
+    char lowered[16];
+    size_t i = 0;
+    for (; value[i] != '\0' && i + 1 < sizeof(lowered); ++i) {
+        lowered[i] = (char)tolower((unsigned char)value[i]);
+    }
+    lowered[i] = '\0';
+    if (strcmp(lowered, "auto") == 0) {
+        *backend_out = VIDEO_CTM_BACKEND_AUTO;
+        return 0;
+    }
+    if (strcmp(lowered, "gpu") == 0) {
+        *backend_out = VIDEO_CTM_BACKEND_GPU;
+        return 0;
+    }
+    return -1;
+}
 
 static void remove_instance_pid(void) {
     if (unlink(g_instance_pid_path) != 0 && errno != ENOENT) {
@@ -390,6 +412,7 @@ int main(int argc, char **argv) {
     struct timespec last_osd;
     clock_gettime(CLOCK_MONOTONIC, &last_osd);
     char last_zoom_command[OSD_EXTERNAL_TEXT_LEN] = "";
+    uint64_t last_ctm_serial = 0;
 
     while (!g_exit_flag) {
         pipeline_poll_child(&ps);
@@ -573,6 +596,62 @@ int main(int argc, char **argv) {
             if (ms_since(now, last_osd) >= cfg.osd_refresh_ms) {
                 OsdExternalFeedSnapshot ext_snapshot;
                 osd_external_get_snapshot(&ext_bridge, &ext_snapshot);
+                if (ext_snapshot.ctm.present && ext_snapshot.ctm.serial != 0 &&
+                    ext_snapshot.ctm.serial != last_ctm_serial) {
+                    VideoCtmCfg new_ctm_cfg = cfg.video_ctm;
+                    gboolean valid_ctm = TRUE;
+                    if (ext_snapshot.ctm.enable_present) {
+                        new_ctm_cfg.enable = ext_snapshot.ctm.enable ? 1 : 0;
+                    }
+                    if (ext_snapshot.ctm.backend_present) {
+                        VideoCtmBackend backend;
+                        if (parse_external_ctm_backend(ext_snapshot.ctm.backend, &backend) == 0) {
+                            new_ctm_cfg.backend = backend;
+                        } else {
+                            LOGW("External CTM command ignored: backend '%s' is invalid", ext_snapshot.ctm.backend);
+                            valid_ctm = FALSE;
+                        }
+                    }
+                    if (valid_ctm && ext_snapshot.ctm.matrix_present) {
+                        if (ext_snapshot.ctm.matrix_count == 9) {
+                            for (int i = 0; i < 9; ++i) {
+                                new_ctm_cfg.matrix[i] = ext_snapshot.ctm.matrix[i];
+                            }
+                        } else {
+                            LOGW("External CTM command ignored: matrix expects 9 coefficients (got %d)",
+                                 ext_snapshot.ctm.matrix_count);
+                            valid_ctm = FALSE;
+                        }
+                    }
+                    if (valid_ctm && ext_snapshot.ctm.sharpness_present) {
+                        new_ctm_cfg.sharpness = ext_snapshot.ctm.sharpness;
+                    }
+                    if (valid_ctm && ext_snapshot.ctm.gamma_value_present) {
+                        new_ctm_cfg.gamma_value = ext_snapshot.ctm.gamma_value;
+                    }
+                    if (valid_ctm && ext_snapshot.ctm.gamma_lift_present) {
+                        new_ctm_cfg.gamma_lift = ext_snapshot.ctm.gamma_lift;
+                    }
+                    if (valid_ctm && ext_snapshot.ctm.gamma_gain_present) {
+                        new_ctm_cfg.gamma_gain = ext_snapshot.ctm.gamma_gain;
+                    }
+                    if (valid_ctm && ext_snapshot.ctm.gamma_r_mult_present) {
+                        new_ctm_cfg.gamma_r_mult = ext_snapshot.ctm.gamma_r_mult;
+                    }
+                    if (valid_ctm && ext_snapshot.ctm.gamma_g_mult_present) {
+                        new_ctm_cfg.gamma_g_mult = ext_snapshot.ctm.gamma_g_mult;
+                    }
+                    if (valid_ctm && ext_snapshot.ctm.gamma_b_mult_present) {
+                        new_ctm_cfg.gamma_b_mult = ext_snapshot.ctm.gamma_b_mult;
+                    }
+                    if (valid_ctm) {
+                        if (pipeline_apply_video_ctm(&ps, &new_ctm_cfg) != 0) {
+                            LOGW("External CTM command failed to apply to the running pipeline");
+                        }
+                        cfg.video_ctm = new_ctm_cfg;
+                    }
+                    last_ctm_serial = ext_snapshot.ctm.serial;
+                }
                 const char *zoom_text = ext_snapshot.text[OSD_EXTERNAL_MAX_TEXT - 1];
                 if (g_strcmp0(zoom_text, last_zoom_command) != 0) {
                     gboolean zoom_enabled = FALSE;

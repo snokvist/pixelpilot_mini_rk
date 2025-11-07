@@ -73,6 +73,8 @@ static void osd_external_reset_locked(OsdExternalBridge *bridge) {
     }
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
+    memset(&bridge->snapshot.ctm, 0, sizeof(bridge->snapshot.ctm));
+    bridge->ctm_serial_counter = 0;
     bridge->expiry_ns = 0;
     memset(bridge->slots, 0, sizeof(bridge->slots));
 }
@@ -137,6 +139,30 @@ typedef struct {
     double value[OSD_EXTERNAL_MAX_VALUES];
     int has_ttl;
     uint64_t ttl_ms;
+    int has_ctm;
+    struct {
+        int enable_present;
+        int enable;
+        int backend_present;
+        char backend[16];
+        int matrix_present;
+        int matrix_count;
+        double matrix[9];
+        int sharpness_present;
+        double sharpness;
+        int gamma_value_present;
+        double gamma_value;
+        int gamma_lift_present;
+        double gamma_lift;
+        int gamma_gain_present;
+        double gamma_gain;
+        int gamma_r_mult_present;
+        double gamma_r_mult;
+        int gamma_g_mult_present;
+        double gamma_g_mult;
+        int gamma_b_mult_present;
+        double gamma_b_mult;
+    } ctm;
 } OsdExternalMessage;
 
 static const char *skip_ws(const char *p) {
@@ -249,6 +275,289 @@ static const char *parse_number_array(const char *p, OsdExternalMessage *msg) {
     return p + 1;
 }
 
+static const char *parse_bool_value(const char *p, int *out) {
+    if (!p || !out) {
+        return NULL;
+    }
+    if (strncmp(p, "true", 4) == 0) {
+        *out = 1;
+        return p + 4;
+    }
+    if (strncmp(p, "false", 5) == 0) {
+        *out = 0;
+        return p + 5;
+    }
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p) {
+        return NULL;
+    }
+    *out = (v != 0);
+    return end;
+}
+
+static const char *parse_double_value(const char *p, double *out) {
+    if (!p || !out) {
+        return NULL;
+    }
+    char *end = NULL;
+    double v = strtod(p, &end);
+    if (end == p) {
+        return NULL;
+    }
+    *out = v;
+    return end;
+}
+
+static const char *parse_double_array_into(const char *p, double *out, size_t max_count, int *count_out) {
+    if (!p || !out || max_count == 0) {
+        return NULL;
+    }
+    if (*p != '[') {
+        return NULL;
+    }
+    ++p;
+    p = skip_ws(p);
+    int idx = 0;
+    if (*p == ']') {
+        if (count_out) {
+            *count_out = 0;
+        }
+        return p + 1;
+    }
+    while (*p) {
+        double value = 0.0;
+        const char *next = parse_double_value(p, &value);
+        if (!next) {
+            return NULL;
+        }
+        if (idx < (int)max_count) {
+            out[idx] = value;
+        }
+        idx++;
+        p = skip_ws(next);
+        if (*p == ',') {
+            ++p;
+            p = skip_ws(p);
+            continue;
+        }
+        if (*p == ']') {
+            break;
+        }
+        return NULL;
+    }
+    if (*p != ']') {
+        return NULL;
+    }
+    if (count_out) {
+        *count_out = idx;
+    }
+    return p + 1;
+}
+
+static const char *parse_ctm_object(const char *p, OsdExternalMessage *msg) {
+    if (!p || !msg) {
+        return NULL;
+    }
+    if (*p != '{') {
+        return NULL;
+    }
+    ++p;
+    p = skip_ws(p);
+    while (*p) {
+        if (*p == '}') {
+            return p + 1;
+        }
+        if (*p != '"') {
+            return NULL;
+        }
+        char key[32];
+        const char *next = parse_string(p, key, sizeof(key));
+        if (!next) {
+            return NULL;
+        }
+        p = skip_ws(next);
+        if (*p != ':') {
+            return NULL;
+        }
+        ++p;
+        p = skip_ws(p);
+        if (strcmp(key, "enable") == 0) {
+            int flag = 0;
+            const char *after = parse_bool_value(p, &flag);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.enable_present = 1;
+            msg->ctm.enable = flag ? 1 : 0;
+            p = after;
+        } else if (strcmp(key, "backend") == 0) {
+            if (*p != '"') {
+                return NULL;
+            }
+            char backend[16];
+            const char *after = parse_string(p, backend, sizeof(backend));
+            if (!after) {
+                return NULL;
+            }
+            for (size_t i = 0; backend[i] != '\0'; ++i) {
+                backend[i] = (char)tolower((unsigned char)backend[i]);
+            }
+            msg->has_ctm = 1;
+            msg->ctm.backend_present = 1;
+            snprintf(msg->ctm.backend, sizeof(msg->ctm.backend), "%s", backend);
+            p = after;
+        } else if (strcmp(key, "matrix") == 0) {
+            int count = 0;
+            const char *after = parse_double_array_into(p, msg->ctm.matrix, sizeof(msg->ctm.matrix) / sizeof(msg->ctm.matrix[0]), &count);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.matrix_present = 1;
+            msg->ctm.matrix_count = count;
+            p = after;
+        } else if (strcmp(key, "sharpness") == 0) {
+            double value = 0.0;
+            const char *after = parse_double_value(p, &value);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.sharpness_present = 1;
+            msg->ctm.sharpness = value;
+            p = after;
+        } else if (strcmp(key, "gamma") == 0 || strcmp(key, "gamma_value") == 0) {
+            double value = 0.0;
+            const char *after = parse_double_value(p, &value);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.gamma_value_present = 1;
+            msg->ctm.gamma_value = value;
+            p = after;
+        } else if (strcmp(key, "gamma_lift") == 0 || strcmp(key, "gamma-lift") == 0) {
+            double value = 0.0;
+            const char *after = parse_double_value(p, &value);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.gamma_lift_present = 1;
+            msg->ctm.gamma_lift = value;
+            p = after;
+        } else if (strcmp(key, "gamma_gain") == 0 || strcmp(key, "gamma-gain") == 0) {
+            double value = 0.0;
+            const char *after = parse_double_value(p, &value);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.gamma_gain_present = 1;
+            msg->ctm.gamma_gain = value;
+            p = after;
+        } else if (strcmp(key, "gamma_r_mult") == 0 || strcmp(key, "gamma-r-mult") == 0) {
+            double value = 0.0;
+            const char *after = parse_double_value(p, &value);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.gamma_r_mult_present = 1;
+            msg->ctm.gamma_r_mult = value;
+            p = after;
+        } else if (strcmp(key, "gamma_g_mult") == 0 || strcmp(key, "gamma-g-mult") == 0) {
+            double value = 0.0;
+            const char *after = parse_double_value(p, &value);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.gamma_g_mult_present = 1;
+            msg->ctm.gamma_g_mult = value;
+            p = after;
+        } else if (strcmp(key, "gamma_b_mult") == 0 || strcmp(key, "gamma-b-mult") == 0) {
+            double value = 0.0;
+            const char *after = parse_double_value(p, &value);
+            if (!after) {
+                return NULL;
+            }
+            msg->has_ctm = 1;
+            msg->ctm.gamma_b_mult_present = 1;
+            msg->ctm.gamma_b_mult = value;
+            p = after;
+        } else {
+            // Unknown key: reuse skip logic from parse_message
+            int depth = 0;
+            if (*p == '{') {
+                depth = 1;
+                ++p;
+                while (*p && depth > 0) {
+                    if (*p == '{') {
+                        depth++;
+                    } else if (*p == '}') {
+                        depth--;
+                    } else if (*p == '"') {
+                        const char *tmp = parse_string(p, NULL, 0);
+                        if (!tmp) {
+                            return NULL;
+                        }
+                        p = tmp;
+                        continue;
+                    }
+                    ++p;
+                }
+                if (depth != 0) {
+                    return NULL;
+                }
+            } else if (*p == '[') {
+                depth = 1;
+                ++p;
+                while (*p && depth > 0) {
+                    if (*p == '[') {
+                        depth++;
+                    } else if (*p == ']') {
+                        depth--;
+                    } else if (*p == '"') {
+                        const char *tmp = parse_string(p, NULL, 0);
+                        if (!tmp) {
+                            return NULL;
+                        }
+                        p = tmp;
+                        continue;
+                    }
+                    ++p;
+                }
+                if (depth != 0) {
+                    return NULL;
+                }
+            } else if (*p == '"') {
+                p = parse_string(p, NULL, 0);
+                if (!p) {
+                    return NULL;
+                }
+            } else {
+                while (*p && *p != ',' && *p != '}') {
+                    ++p;
+                }
+            }
+        }
+        p = skip_ws(p);
+        if (*p == ',') {
+            ++p;
+            p = skip_ws(p);
+            continue;
+        }
+        if (*p == '}') {
+            return p + 1;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
 static int parse_message(const char *payload, OsdExternalMessage *msg) {
     if (!payload || !msg) {
         return -1;
@@ -287,6 +596,11 @@ static int parse_message(const char *payload, OsdExternalMessage *msg) {
         } else if (strcmp(key, "value") == 0) {
             msg->has_value = 1;
             p = parse_number_array(p, msg);
+            if (!p) {
+                return -1;
+            }
+        } else if (strcmp(key, "ctm") == 0) {
+            p = parse_ctm_object(p, msg);
             if (!p) {
                 return -1;
             }
@@ -504,6 +818,59 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
 
     osd_external_update_expiry_locked(bridge);
     if (changed) {
+        bridge->snapshot.last_update_ns = now_ns;
+    }
+    if (msg->has_ctm) {
+        memset(&bridge->snapshot.ctm, 0, sizeof(bridge->snapshot.ctm));
+        bridge->snapshot.ctm.present = 1;
+        bridge->snapshot.ctm.serial = ++bridge->ctm_serial_counter;
+        if (msg->ctm.enable_present) {
+            bridge->snapshot.ctm.enable_present = 1;
+            bridge->snapshot.ctm.enable = msg->ctm.enable ? 1 : 0;
+        }
+        if (msg->ctm.backend_present) {
+            bridge->snapshot.ctm.backend_present = 1;
+            snprintf(bridge->snapshot.ctm.backend, sizeof(bridge->snapshot.ctm.backend), "%s", msg->ctm.backend);
+        }
+        if (msg->ctm.matrix_present) {
+            bridge->snapshot.ctm.matrix_present = 1;
+            bridge->snapshot.ctm.matrix_count = msg->ctm.matrix_count;
+            int limit = msg->ctm.matrix_count;
+            if (limit > (int)(sizeof(bridge->snapshot.ctm.matrix) / sizeof(bridge->snapshot.ctm.matrix[0]))) {
+                limit = (int)(sizeof(bridge->snapshot.ctm.matrix) / sizeof(bridge->snapshot.ctm.matrix[0]));
+            }
+            for (int i = 0; i < limit; ++i) {
+                bridge->snapshot.ctm.matrix[i] = msg->ctm.matrix[i];
+            }
+        }
+        if (msg->ctm.sharpness_present) {
+            bridge->snapshot.ctm.sharpness_present = 1;
+            bridge->snapshot.ctm.sharpness = msg->ctm.sharpness;
+        }
+        if (msg->ctm.gamma_value_present) {
+            bridge->snapshot.ctm.gamma_value_present = 1;
+            bridge->snapshot.ctm.gamma_value = msg->ctm.gamma_value;
+        }
+        if (msg->ctm.gamma_lift_present) {
+            bridge->snapshot.ctm.gamma_lift_present = 1;
+            bridge->snapshot.ctm.gamma_lift = msg->ctm.gamma_lift;
+        }
+        if (msg->ctm.gamma_gain_present) {
+            bridge->snapshot.ctm.gamma_gain_present = 1;
+            bridge->snapshot.ctm.gamma_gain = msg->ctm.gamma_gain;
+        }
+        if (msg->ctm.gamma_r_mult_present) {
+            bridge->snapshot.ctm.gamma_r_mult_present = 1;
+            bridge->snapshot.ctm.gamma_r_mult = msg->ctm.gamma_r_mult;
+        }
+        if (msg->ctm.gamma_g_mult_present) {
+            bridge->snapshot.ctm.gamma_g_mult_present = 1;
+            bridge->snapshot.ctm.gamma_g_mult = msg->ctm.gamma_g_mult;
+        }
+        if (msg->ctm.gamma_b_mult_present) {
+            bridge->snapshot.ctm.gamma_b_mult_present = 1;
+            bridge->snapshot.ctm.gamma_b_mult = msg->ctm.gamma_b_mult;
+        }
         bridge->snapshot.last_update_ns = now_ns;
     }
     pthread_mutex_unlock(&bridge->lock);

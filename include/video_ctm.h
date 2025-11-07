@@ -41,6 +41,7 @@ void video_ctm_set_render_fd(VideoCtm *ctm, int drm_fd);
 void video_ctm_use_drm_property(VideoCtm *ctm, int drm_fd, uint32_t object_id,
                                 uint32_t object_type, uint32_t prop_id);
 void video_ctm_disable_drm(VideoCtm *ctm);
+void video_ctm_apply_config(VideoCtm *ctm, const VideoCtmCfg *cfg);
 int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t hor_stride,
                       uint32_t ver_stride, uint32_t fourcc);
 int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,

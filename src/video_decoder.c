@@ -616,6 +616,123 @@ static void reset_frame_map(VideoDecoder *vd) {
     }
 }
 
+static void video_decoder_release_ctm_slot(VideoDecoder *vd, struct FrameSlot *slot) {
+    if (vd == NULL || slot == NULL) {
+        return;
+    }
+    if (slot->ctm_fb_id) {
+        drmModeRmFB(vd->drm_fd, slot->ctm_fb_id);
+        slot->ctm_fb_id = 0;
+    }
+    if (slot->ctm_prime_fd >= 0) {
+        close(slot->ctm_prime_fd);
+        slot->ctm_prime_fd = -1;
+    }
+    if (slot->ctm_handle) {
+        struct drm_mode_destroy_dumb dmd = {.handle = slot->ctm_handle};
+        ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
+        slot->ctm_handle = 0;
+    }
+}
+
+static void video_decoder_release_ctm_buffers(VideoDecoder *vd) {
+    if (vd == NULL) {
+        return;
+    }
+    for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
+        video_decoder_release_ctm_slot(vd, &vd->frame_map[i]);
+    }
+}
+
+static int video_decoder_allocate_ctm_buffers(VideoDecoder *vd, uint32_t width, uint32_t height,
+                                             uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc) {
+    if (vd == NULL) {
+        return -1;
+    }
+    if (vd->drm_fd < 0) {
+        return -1;
+    }
+    if (fourcc != DRM_FORMAT_NV12) {
+        LOGW("Video decoder: CTM enable requested but current format 0x%x is unsupported", fourcc);
+        return -1;
+    }
+    if (hor_stride == 0 || ver_stride == 0 || width == 0 || height == 0) {
+        return -1;
+    }
+
+    int success = 0;
+    for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
+        struct FrameSlot *slot = &vd->frame_map[i];
+        if (slot->prime_fd < 0) {
+            continue;
+        }
+        if (slot->ctm_fb_id != 0 && slot->ctm_prime_fd >= 0) {
+            success = 1;
+            continue;
+        }
+
+        struct drm_mode_create_dumb dmcd;
+        memset(&dmcd, 0, sizeof(dmcd));
+        dmcd.bpp = 8;
+        dmcd.width = hor_stride;
+        dmcd.height = ver_stride * 2;
+
+        int ret;
+        do {
+            ret = ioctl(vd->drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &dmcd);
+        } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+        if (ret != 0) {
+            LOGW("Video decoder: failed to allocate CTM buffer: %s", g_strerror(errno));
+            continue;
+        }
+        slot->ctm_handle = dmcd.handle;
+
+        struct drm_prime_handle dph;
+        memset(&dph, 0, sizeof(dph));
+        dph.handle = dmcd.handle;
+        dph.fd = -1;
+        do {
+            ret = ioctl(vd->drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &dph);
+        } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
+        if (ret != 0) {
+            LOGW("Video decoder: PRIME_HANDLE_TO_FD for CTM buffer failed: %s", g_strerror(errno));
+            struct drm_mode_destroy_dumb dmd_fail = {.handle = dmcd.handle};
+            ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_fail);
+            slot->ctm_handle = 0;
+            continue;
+        }
+        slot->ctm_prime_fd = dph.fd;
+
+        uint32_t handles[4] = {0};
+        uint32_t pitches[4] = {0};
+        uint32_t offsets[4] = {0};
+        handles[0] = slot->ctm_handle;
+        handles[1] = slot->ctm_handle;
+        pitches[0] = dmcd.pitch;
+        pitches[1] = dmcd.pitch;
+        offsets[0] = 0;
+        offsets[1] = dmcd.pitch * ver_stride;
+
+        ret = drmModeAddFB2(vd->drm_fd, width, height, DRM_FORMAT_NV12, handles, pitches, offsets, &slot->ctm_fb_id, 0);
+        if (ret != 0) {
+            LOGW("Video decoder: drmModeAddFB2 for CTM buffer failed: %s", g_strerror(errno));
+            close(slot->ctm_prime_fd);
+            slot->ctm_prime_fd = -1;
+            struct drm_mode_destroy_dumb dmd_fail = {.handle = slot->ctm_handle};
+            ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_fail);
+            slot->ctm_handle = 0;
+            continue;
+        }
+        success = 1;
+    }
+
+    if (!success) {
+        video_decoder_release_ctm_buffers(vd);
+        return -1;
+    }
+    return 0;
+}
+
 static void release_frame_group(VideoDecoder *vd) {
     if (vd->frm_grp == NULL) {
         return;
@@ -1471,8 +1588,57 @@ int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecode
         if (was_enabled && fb != 0) {
             if (commit_plane(vd, fb, 0, 0) != 0) {
                 LOGW("Video decoder: failed to clear zoom on framebuffer %u", fb);
-            }
+    }
+}
+
+int video_decoder_apply_ctm(VideoDecoder *vd, const VideoCtmCfg *cfg) {
+    if (vd == NULL || cfg == NULL) {
+        return -1;
+    }
+
+    gboolean was_enabled = vd->ctm.enabled ? TRUE : FALSE;
+
+    video_ctm_apply_config(&vd->ctm, cfg);
+
+    gboolean now_enabled = vd->ctm.enabled ? TRUE : FALSE;
+    if (!now_enabled) {
+        if (was_enabled) {
+            video_decoder_release_ctm_buffers(vd);
         }
+        return 0;
+    }
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fourcc = 0;
+    uint32_t hor_stride = 0;
+    uint32_t ver_stride = 0;
+    g_mutex_lock(&vd->lock);
+    width = vd->src_w;
+    height = vd->src_h;
+    fourcc = vd->frame_fourcc;
+    hor_stride = vd->frame_hor_stride;
+    ver_stride = vd->frame_ver_stride;
+    g_mutex_unlock(&vd->lock);
+
+    if (fourcc == 0) {
+        fourcc = DRM_FORMAT_NV12;
+    }
+
+    if (width != 0 && height != 0 && hor_stride != 0 && ver_stride != 0) {
+        if (video_decoder_allocate_ctm_buffers(vd, width, height, hor_stride, ver_stride, fourcc) != 0) {
+            LOGW("Video decoder: failed to allocate CTM buffers; disabling transform");
+            video_decoder_release_ctm_buffers(vd);
+            vd->ctm.enabled = FALSE;
+            return -1;
+        }
+        video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc);
+    } else if (!was_enabled) {
+        LOGW("Video decoder: CTM enable request queued until stream dimensions are known");
+    }
+
+    return 0;
+}
         return 0;
     }
 

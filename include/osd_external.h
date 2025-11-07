@@ -28,6 +28,31 @@ typedef struct {
     uint64_t last_update_ns;
     uint64_t expiry_ns;
     OsdExternalStatus status;
+    struct {
+        int present;
+        uint64_t serial;
+        int enable_present;
+        int enable;
+        int backend_present;
+        char backend[16];
+        int matrix_present;
+        int matrix_count;
+        double matrix[9];
+        int sharpness_present;
+        double sharpness;
+        int gamma_value_present;
+        double gamma_value;
+        int gamma_lift_present;
+        double gamma_lift;
+        int gamma_gain_present;
+        double gamma_gain;
+        int gamma_r_mult_present;
+        double gamma_r_mult;
+        int gamma_g_mult_present;
+        double gamma_g_mult;
+        int gamma_b_mult_present;
+        double gamma_b_mult;
+    } ctm;
 } OsdExternalFeedSnapshot;
 
 typedef struct {
@@ -50,6 +75,7 @@ typedef struct {
     uint64_t expiry_ns;
     uint64_t last_error_log_ns;
     OsdExternalSlotState slots[OSD_EXTERNAL_MAX_TEXT];
+    uint64_t ctm_serial_counter;
 } OsdExternalBridge;
 
 void osd_external_init(OsdExternalBridge *bridge);

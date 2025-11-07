@@ -136,6 +136,82 @@ the custom receiver: it learns the sender's IP/port from incoming UDP packets an
 burst requests. The bare `udpsrc` pipeline never surfaces that metadata, so even if `[idr].enable = true` is set in a minimal
 configuration the recovery logic stays inactive.
 
+## External OSD UDP feed
+
+PixelPilot Mini RK can subscribe to an auxiliary UDP socket that accepts JSON
+payloads and republishes them as `{ext.textN}` / `{ext.valueN}` tokens inside the
+OSD. Enable the listener with `--osd-external --osd-external-udp-port PORT` or
+by adding an `[osd.external]` section with `enable = true` and a `port`. The
+helper thread keeps the most recent payload in memory, tracks optional
+`ttl_ms` expirations per slot, and exposes its current state via
+`osd_external_get_snapshot()` during each OSD refresh.【F:src/osd_external.c†L561-L608】【F:src/osd_external.c†L823-L872】
+
+External publishers can send only the fields they wish to update. Empty arrays
+clear previously posted data, while omitted fields keep their earlier values.
+Each message is newline-delimited JSON, so a minimal update from the shell
+looks like:
+
+```sh
+printf '%s\n' '{"text":["BATTERY 12.6V"],"ttl_ms":1500}' | \
+    socat - UDP-DATAGRAM:127.0.0.1:5005
+```
+
+The bridge also reserves `ext.text8` for zoom commands that affect the decoded
+video plane. Publishing `zoom=off` restores the default framing, while commands
+such as `zoom=50,50,50,50` crop to 50 % of the frame around the centre. Include
+`ttl_ms` with zoom requests so they expire automatically when the publisher
+stops transmitting.【F:src/main.c†L599-L646】
+
+### Live CTM overrides
+
+The same JSON payloads may include a `ctm` object that applies a live
+color-transform override to the running pipeline without touching the on-disk
+configuration. When a new payload arrives, the receiver validates the contents
+and forwards them to `pipeline_apply_video_ctm()`. The override is tagged with a
+serial number so only newer commands are applied, and any error in the payload
+is logged without affecting the previous state.【F:src/osd_external.c†L823-L872】【F:src/main.c†L599-L651】
+
+Supported keys inside `"ctm"` mirror the `[video.ctm]` INI options:
+
+* `enable` — toggle the CTM path.
+* `backend` — choose `auto` (default) or `gpu` to steer the EGL + RGA pipeline.
+* `matrix` — nine coefficients for the 3 × 3 RGB matrix (row-major order). The
+  helper rejects payloads that do not supply all nine values.【F:src/main.c†L615-L622】
+* `sharpness` — GPU unsharp mask strength.【F:src/main.c†L626-L628】
+* `gamma` / `gamma_value` — post-matrix gamma power.【F:src/main.c†L629-L631】
+* `gamma_lift`, `gamma_gain`, `gamma_r_mult`, `gamma_g_mult`, `gamma_b_mult` —
+  lift/gain and per-channel multipliers applied before gamma.【F:src/main.c†L632-L646】
+
+Because the snapshot only lives in RAM, restarts fall back to the persisted INI
+values. The overrides also do not modify the INI file or CLI defaults.【F:src/main.c†L599-L651】
+
+Sample payloads:
+
+```json
+{"ctm":{"enable":false}}
+```
+
+```json
+{
+  "ctm":{
+    "enable":true,
+    "backend":"gpu",
+    "matrix":[1.05,0.00,0.00,0.00,1.00,0.00,0.00,0.00,0.95],
+    "gamma":1.08,
+    "gamma_lift":0.02,
+    "gamma_gain":1.10,
+    "gamma_r_mult":1.02,
+    "gamma_g_mult":1.00,
+    "gamma_b_mult":0.98
+  },
+  "ttl_ms":0
+}
+```
+
+The second example enables the GPU backend, brightens reds, slightly lifts
+shadows, and requests that the override remain active until another payload is
+published.
+
 ## UDP receiver statistics
 
 The custom receiver keeps a rolling telemetry snapshot that is exposed through the OSD token table and the `udp.*` metric
