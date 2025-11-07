@@ -82,14 +82,24 @@ typedef struct VideoCtmGpuState {
     float applied_gamma_lift;
     float applied_gamma_mult[3];
     gboolean gamma_valid;
+    gboolean flip_valid;
+    gboolean applied_flip;
     VideoCtmGpuImageEntry image_cache[VIDEO_CTM_GPU_IMAGE_CACHE_SIZE];
     uint64_t frame_counter;
 } VideoCtmGpuState;
 
 static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm);
 static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm);
+static void video_ctm_gpu_update_vertices(VideoCtm *ctm);
 
-static const GLfloat kCtmQuadVertices[] = {
+static const GLfloat kCtmQuadVerticesDefault[] = {
+    -1.0f, -1.0f, 0.0f, 0.0f,
+     1.0f, -1.0f, 1.0f, 0.0f,
+    -1.0f,  1.0f, 0.0f, 1.0f,
+     1.0f,  1.0f, 1.0f, 1.0f,
+};
+
+static const GLfloat kCtmQuadVerticesFlipped[] = {
     -1.0f, -1.0f, 0.0f, 1.0f,
      1.0f, -1.0f, 1.0f, 1.0f,
     -1.0f,  1.0f, 0.0f, 0.0f,
@@ -123,6 +133,23 @@ static void video_ctm_gpu_image_cache_reset(VideoCtmGpuState *gpu) {
         entry->last_used = 0;
     }
     gpu->frame_counter = 0;
+}
+
+static void video_ctm_gpu_update_vertices(VideoCtm *ctm) {
+    VideoCtmGpuState *gpu = (ctm != NULL) ? ctm->gpu_state : NULL;
+    if (gpu == NULL || gpu->vbo == 0) {
+        return;
+    }
+    gboolean desired_flip = ctm->flip ? TRUE : FALSE;
+    if (gpu->flip_valid && gpu->applied_flip == desired_flip) {
+        return;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, gpu->vbo);
+    const GLfloat *vertices = desired_flip ? kCtmQuadVerticesFlipped : kCtmQuadVerticesDefault;
+    glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(kCtmQuadVerticesDefault), vertices);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    gpu->applied_flip = desired_flip;
+    gpu->flip_valid = TRUE;
 }
 
 static gboolean video_ctm_gpu_image_matches(const VideoCtmGpuImageEntry *entry,
@@ -514,7 +541,8 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     }
     glGenBuffers(1, &gpu->vbo);
     glBindBuffer(GL_ARRAY_BUFFER, gpu->vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(kCtmQuadVertices), kCtmQuadVertices, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(kCtmQuadVerticesDefault), NULL, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
     glGenTextures(1, &gpu->tex_y);
     glBindTexture(GL_TEXTURE_2D, gpu->tex_y);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -552,8 +580,11 @@ static gboolean video_ctm_gpu_init(VideoCtm *ctm) {
     gpu->applied_gamma_mult[0] = 1.0f;
     gpu->applied_gamma_mult[1] = 1.0f;
     gpu->applied_gamma_mult[2] = 1.0f;
+    gpu->flip_valid = FALSE;
+    gpu->applied_flip = FALSE;
     (void)video_ctm_gpu_upload_sharpness(ctm);
     (void)video_ctm_gpu_upload_gamma(ctm);
+    video_ctm_gpu_update_vertices(ctm);
     return TRUE;
 }
 
@@ -794,6 +825,7 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
         GLfloat inv_h = (height != 0u) ? (1.0f / (GLfloat)height) : 0.0f;
         glUniform2f(gpu->loc_texel, inv_w, inv_h);
     }
+    video_ctm_gpu_update_vertices(ctm);
     glBindBuffer(GL_ARRAY_BUFFER, gpu->vbo);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * (GLint)sizeof(GLfloat), (const GLvoid *)0);
@@ -939,6 +971,7 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     ctm->gamma_r_mult = 1.0;
     ctm->gamma_g_mult = 1.0;
     ctm->gamma_b_mult = 1.0;
+    ctm->flip = FALSE;
     ctm->backend = VIDEO_CTM_BACKEND_AUTO;
     ctm->hw_supported = FALSE;
     ctm->hw_applied = FALSE;
@@ -967,6 +1000,7 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
         ctm->gamma_r_mult = cfg->video_ctm.gamma_r_mult;
         ctm->gamma_g_mult = cfg->video_ctm.gamma_g_mult;
         ctm->gamma_b_mult = cfg->video_ctm.gamma_b_mult;
+        ctm->flip = cfg->video_ctm.flip != 0;
         if (!isfinite(ctm->gamma_lift)) {
             LOGW("Video CTM: ignoring non-finite gamma lift");
             ctm->gamma_lift = 0.0;
