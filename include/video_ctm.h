@@ -36,6 +36,29 @@ typedef struct VideoCtm {
 #endif
 } VideoCtm;
 
+#define VIDEO_CTM_UPDATE_MATRIX (1u << 0)
+#define VIDEO_CTM_UPDATE_SHARPNESS (1u << 1)
+#define VIDEO_CTM_UPDATE_GAMMA (1u << 2)
+#define VIDEO_CTM_UPDATE_GAMMA_LIFT (1u << 3)
+#define VIDEO_CTM_UPDATE_GAMMA_GAIN (1u << 4)
+#define VIDEO_CTM_UPDATE_GAMMA_R_MULT (1u << 5)
+#define VIDEO_CTM_UPDATE_GAMMA_G_MULT (1u << 6)
+#define VIDEO_CTM_UPDATE_GAMMA_B_MULT (1u << 7)
+#define VIDEO_CTM_UPDATE_FLIP (1u << 8)
+
+typedef struct VideoCtmUpdate {
+    uint32_t fields;
+    double matrix[9];
+    double sharpness;
+    double gamma_value;
+    double gamma_lift;
+    double gamma_gain;
+    double gamma_r_mult;
+    double gamma_g_mult;
+    double gamma_b_mult;
+    gboolean flip;
+} VideoCtmUpdate;
+
 void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg);
 void video_ctm_reset(VideoCtm *ctm);
 void video_ctm_set_render_fd(VideoCtm *ctm, int drm_fd);
@@ -46,5 +69,6 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
                       uint32_t ver_stride, uint32_t fourcc);
 int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
                       uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc);
+void video_ctm_apply_update(VideoCtm *ctm, const VideoCtmUpdate *update);
 
 #endif // VIDEO_CTM_H

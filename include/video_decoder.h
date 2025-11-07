@@ -8,6 +8,7 @@
 #include "config.h"
 #include "drm_modeset.h"
 #include "idr_requester.h"
+#include "video_ctm.h"
 
 typedef struct VideoDecoder VideoDecoder;
 
@@ -42,5 +43,6 @@ void video_decoder_set_idr_requester(VideoDecoder *vd, IdrRequester *requester);
 int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecoderZoomRequest *request);
 
 size_t video_decoder_max_packet_size(const VideoDecoder *vd);
+void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *update);
 
 #endif // VIDEO_DECODER_H

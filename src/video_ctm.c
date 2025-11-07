@@ -1202,3 +1202,107 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
     return 0;
 #endif
 }
+
+void video_ctm_apply_update(VideoCtm *ctm, const VideoCtmUpdate *update) {
+    if (ctm == NULL || update == NULL || update->fields == 0) {
+        return;
+    }
+
+    uint32_t fields = update->fields;
+#if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
+    VideoCtmGpuState *gpu = ctm->gpu_state;
+#else
+    VideoCtmGpuState *gpu = NULL;
+#endif
+
+    if ((fields & VIDEO_CTM_UPDATE_MATRIX) != 0u) {
+        for (int i = 0; i < 9; ++i) {
+            ctm->matrix[i] = update->matrix[i];
+        }
+#if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
+        if (gpu != NULL) {
+            gpu->matrix_valid = FALSE;
+        }
+#endif
+        if (ctm->hw_applied) {
+            video_ctm_destroy_blob(ctm);
+            ctm->hw_applied = FALSE;
+        }
+    }
+
+    if ((fields & VIDEO_CTM_UPDATE_SHARPNESS) != 0u) {
+        ctm->sharpness = update->sharpness;
+#if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
+        if (gpu != NULL) {
+            gpu->sharp_strength_valid = FALSE;
+        }
+#endif
+    }
+
+    gboolean gamma_dirty = FALSE;
+    if ((fields & VIDEO_CTM_UPDATE_GAMMA) != 0u) {
+        if (update->gamma_value > 0.0 && isfinite(update->gamma_value)) {
+            ctm->gamma_value = update->gamma_value;
+            gamma_dirty = TRUE;
+        } else {
+            LOGW("Video CTM: ignoring non-positive gamma %.3f", update->gamma_value);
+        }
+    }
+    if ((fields & VIDEO_CTM_UPDATE_GAMMA_LIFT) != 0u) {
+        if (isfinite(update->gamma_lift)) {
+            ctm->gamma_lift = update->gamma_lift;
+            gamma_dirty = TRUE;
+        } else {
+            LOGW("Video CTM: ignoring non-finite gamma lift");
+        }
+    }
+    if ((fields & VIDEO_CTM_UPDATE_GAMMA_GAIN) != 0u) {
+        if (isfinite(update->gamma_gain)) {
+            ctm->gamma_gain = update->gamma_gain;
+            gamma_dirty = TRUE;
+        } else {
+            LOGW("Video CTM: ignoring non-finite gamma gain");
+        }
+    }
+    if ((fields & VIDEO_CTM_UPDATE_GAMMA_R_MULT) != 0u) {
+        if (isfinite(update->gamma_r_mult)) {
+            ctm->gamma_r_mult = update->gamma_r_mult;
+            gamma_dirty = TRUE;
+        } else {
+            LOGW("Video CTM: ignoring non-finite gamma r-mult");
+        }
+    }
+    if ((fields & VIDEO_CTM_UPDATE_GAMMA_G_MULT) != 0u) {
+        if (isfinite(update->gamma_g_mult)) {
+            ctm->gamma_g_mult = update->gamma_g_mult;
+            gamma_dirty = TRUE;
+        } else {
+            LOGW("Video CTM: ignoring non-finite gamma g-mult");
+        }
+    }
+    if ((fields & VIDEO_CTM_UPDATE_GAMMA_B_MULT) != 0u) {
+        if (isfinite(update->gamma_b_mult)) {
+            ctm->gamma_b_mult = update->gamma_b_mult;
+            gamma_dirty = TRUE;
+        } else {
+            LOGW("Video CTM: ignoring non-finite gamma b-mult");
+        }
+    }
+
+#if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
+    if (gamma_dirty && gpu != NULL) {
+        gpu->gamma_valid = FALSE;
+    }
+#else
+    (void)gamma_dirty;
+#endif
+
+    if ((fields & VIDEO_CTM_UPDATE_FLIP) != 0u) {
+        ctm->flip = update->flip ? TRUE : FALSE;
+#if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
+        if (gpu != NULL) {
+            gpu->flip_valid = FALSE;
+        }
+#endif
+    }
+}
