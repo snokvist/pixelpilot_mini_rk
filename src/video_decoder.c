@@ -1588,57 +1588,8 @@ int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecode
         if (was_enabled && fb != 0) {
             if (commit_plane(vd, fb, 0, 0) != 0) {
                 LOGW("Video decoder: failed to clear zoom on framebuffer %u", fb);
-    }
-}
-
-int video_decoder_apply_ctm(VideoDecoder *vd, const VideoCtmCfg *cfg) {
-    if (vd == NULL || cfg == NULL) {
-        return -1;
-    }
-
-    gboolean was_enabled = vd->ctm.enabled ? TRUE : FALSE;
-
-    video_ctm_apply_config(&vd->ctm, cfg);
-
-    gboolean now_enabled = vd->ctm.enabled ? TRUE : FALSE;
-    if (!now_enabled) {
-        if (was_enabled) {
-            video_decoder_release_ctm_buffers(vd);
+            }
         }
-        return 0;
-    }
-
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t fourcc = 0;
-    uint32_t hor_stride = 0;
-    uint32_t ver_stride = 0;
-    g_mutex_lock(&vd->lock);
-    width = vd->src_w;
-    height = vd->src_h;
-    fourcc = vd->frame_fourcc;
-    hor_stride = vd->frame_hor_stride;
-    ver_stride = vd->frame_ver_stride;
-    g_mutex_unlock(&vd->lock);
-
-    if (fourcc == 0) {
-        fourcc = DRM_FORMAT_NV12;
-    }
-
-    if (width != 0 && height != 0 && hor_stride != 0 && ver_stride != 0) {
-        if (video_decoder_allocate_ctm_buffers(vd, width, height, hor_stride, ver_stride, fourcc) != 0) {
-            LOGW("Video decoder: failed to allocate CTM buffers; disabling transform");
-            video_decoder_release_ctm_buffers(vd);
-            vd->ctm.enabled = FALSE;
-            return -1;
-        }
-        video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc);
-    } else if (!was_enabled) {
-        LOGW("Video decoder: CTM enable request queued until stream dimensions are known");
-    }
-
-    return 0;
-}
         return 0;
     }
 
@@ -1741,6 +1692,55 @@ int video_decoder_apply_ctm(VideoDecoder *vd, const VideoCtmCfg *cfg) {
              sanitized_request.center_x_percent, sanitized_request.center_y_percent, applied_scale_x, applied_scale_y,
              applied_center_x, applied_center_y, VIDEO_DECODER_MAX_PLANE_UPSCALE);
     }
+    return 0;
+}
+
+int video_decoder_apply_ctm(VideoDecoder *vd, const VideoCtmCfg *cfg) {
+    if (vd == NULL || cfg == NULL) {
+        return -1;
+    }
+
+    gboolean was_enabled = vd->ctm.enabled ? TRUE : FALSE;
+
+    video_ctm_apply_config(&vd->ctm, cfg);
+
+    gboolean now_enabled = vd->ctm.enabled ? TRUE : FALSE;
+    if (!now_enabled) {
+        if (was_enabled) {
+            video_decoder_release_ctm_buffers(vd);
+        }
+        return 0;
+    }
+
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t fourcc = 0;
+    uint32_t hor_stride = 0;
+    uint32_t ver_stride = 0;
+    g_mutex_lock(&vd->lock);
+    width = vd->src_w;
+    height = vd->src_h;
+    fourcc = vd->frame_fourcc;
+    hor_stride = vd->frame_hor_stride;
+    ver_stride = vd->frame_ver_stride;
+    g_mutex_unlock(&vd->lock);
+
+    if (fourcc == 0) {
+        fourcc = DRM_FORMAT_NV12;
+    }
+
+    if (width != 0 && height != 0 && hor_stride != 0 && ver_stride != 0) {
+        if (video_decoder_allocate_ctm_buffers(vd, width, height, hor_stride, ver_stride, fourcc) != 0) {
+            LOGW("Video decoder: failed to allocate CTM buffers; disabling transform");
+            video_decoder_release_ctm_buffers(vd);
+            vd->ctm.enabled = FALSE;
+            return -1;
+        }
+        video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc);
+    } else if (!was_enabled) {
+        LOGW("Video decoder: CTM enable request queued until stream dimensions are known");
+    }
+
     return 0;
 }
 
