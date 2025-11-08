@@ -37,6 +37,44 @@
 #define DECODER_READ_BUF_SIZE (1024 * 1024)
 #define DECODER_MAX_FRAMES 24
 #define VIDEO_DECODER_MAX_PLANE_UPSCALE 4.0
+
+static gboolean video_decoder_fourcc_is_rgb(uint32_t fourcc) {
+    return (fourcc == DRM_FORMAT_XRGB8888 || fourcc == DRM_FORMAT_ARGB8888 ||
+            fourcc == DRM_FORMAT_ABGR8888 || fourcc == DRM_FORMAT_XBGR8888);
+}
+
+static void video_decoder_fourcc_to_string(uint32_t fourcc, char out[5]) {
+    if (out == NULL) {
+        return;
+    }
+    if (fourcc == 0) {
+        memcpy(out, "----", 5);
+        return;
+    }
+    for (int i = 0; i < 4; ++i) {
+        char c = (char)((fourcc >> (8 * i)) & 0xFF);
+        if ((unsigned char)c < 32 || (unsigned char)c > 126) {
+            c = '?';
+        }
+        out[i] = c;
+    }
+    out[4] = '\0';
+}
+
+static void video_decoder_log_ctm_target(const VideoDecoder *vd, const char *context) {
+    if (vd == NULL || !vd->ctm.enabled) {
+        return;
+    }
+    uint32_t dst_fourcc = vd->ctm_fourcc != 0 ? vd->ctm_fourcc : DRM_FORMAT_NV12;
+    gboolean dst_is_rgb = video_decoder_fourcc_is_rgb(dst_fourcc);
+    char dst_str[5];
+    video_decoder_fourcc_to_string(dst_fourcc, dst_str);
+    if (context == NULL) {
+        context = "configured";
+    }
+    LOGI("Video decoder: CTM %s to use %s target (fourcc=%s, pitch=%u)", context,
+         dst_is_rgb ? "RGB" : "NV12", dst_str, vd->ctm_pitch);
+}
 /*
  * RK356x VOP planes sampling NV12 surfaces expect crop widths/heights that
  * align to chroma blocks and even source offsets. Align crops to 4 pixels in
@@ -1038,8 +1076,10 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
     if (vd->ctm.enabled && fmt == MPP_FMT_YUV420SP) {
         vd->ctm_fourcc = transform_fourcc != 0 ? transform_fourcc : DRM_FORMAT_NV12;
         vd->ctm_pitch = transform_pitch;
-        video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, vd->frame_fourcc,
-                          vd->ctm_pitch, vd->ctm_fourcc);
+        if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, vd->frame_fourcc,
+                              vd->ctm_pitch, vd->ctm_fourcc) == 0) {
+            video_decoder_log_ctm_target(vd, "configured");
+        }
     } else {
         vd->ctm_fourcc = 0;
         vd->ctm_pitch = 0;
@@ -1224,6 +1264,8 @@ void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *upda
     if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc, vd->ctm_pitch,
                           vd->ctm_fourcc) != 0) {
         LOGW("Video decoder: failed to reapply CTM after live update");
+    } else {
+        video_decoder_log_ctm_target(vd, "updated");
     }
 }
 
