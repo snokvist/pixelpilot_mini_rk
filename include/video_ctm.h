@@ -94,7 +94,8 @@ void video_ctm_disable_drm(VideoCtm *ctm);
 int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t hor_stride,
                       uint32_t ver_stride, uint32_t fourcc);
 int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
-                      uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc);
+                      uint32_t src_hor_stride, uint32_t src_ver_stride, uint32_t dst_pitch,
+                      uint32_t fourcc);
 void video_ctm_apply_update(VideoCtm *ctm, const VideoCtmUpdate *update);
 void video_ctm_get_metrics(const VideoCtm *ctm, VideoCtmMetrics *out);
 gboolean video_ctm_metric_value(const VideoCtmMetrics *metrics, const char *key, double *out_value);

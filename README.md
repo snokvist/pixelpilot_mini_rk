@@ -118,6 +118,8 @@ to the defaults listed in `src/config.c` when omitted.
 | `[video.ctm].flip` | `true` rotates the GPU path output by 180° (mirroring both axes); `false` keeps the natural orientation. |
 | `[video.ctm].wait-timeout-ms` | Upper bound (in milliseconds) that the CPU waits on the GPU fence before forcing a blocking `glFinish`. `0` waits indefinitely; the default `2.0` keeps up with 90–120 FPS captures without starving the pipeline. Lower to `1.0–1.5` ms if you only target 60 FPS, or bump toward `3.0` ms when slower GPUs miss the deadline. |
 | `[video.ctm].wait-sleep-ms` | Optional delay inserted between fence polls while waiting for the timeout window, giving the CPU a chance to yield. Leave at `0` for the absolute lowest latency, or use the default `0.25` ms (up to `0.5` ms on big.LITTLE boards) to recover CPU time with a negligible latency hit. |
+
+When the GPU backend is enabled the CTM scratch buffers are now allocated as `ABGR8888` dumb surfaces and the fragment shader renders directly into that memory. Posting the ABGR surface back to the video plane removes the per-frame RGBA→NV12 RGA conversion, so `video.ctm.process_ms` and `video.ctm.rga_ms` typically drop from tens of milliseconds to fractions of a millisecond. Make sure the target DRM plane exposes `ABGR8888`/`XBGR8888` support; otherwise fall back to the NV12 path.
 | `[video.ctm].osd_valueN_metric` | Copy a CTM performance metric into `ext.valueN` (1-8) before drawing the OSD. Example: `osd_value1_metric = video.ctm.gpu_wait_ms`. |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
@@ -162,14 +164,14 @@ The GPU CTM backend reports a set of timing helpers that you can bind directly i
 | --- | --- |
 | `video.ctm.prepare_ms` | Time spent enabling the CTM path (DRM property or GPU surface allocation) for the current format. |
 | `video.ctm.process_ms` | Total wall-clock cost of the most recent `video_ctm_process` call. |
-| `video.ctm.gpu_draw_ms` | Duration of the fragment pass that renders the NV12 frame into the RGBA FBO. |
+| `video.ctm.gpu_draw_ms` | Duration of the fragment pass that renders the NV12 frame into the GPU target (ABGR when direct mode is active). |
 | `video.ctm.gpu_wait_ms` | How long the CPU waited for the GPU fence before the result was handed to RGA. |
 | `video.ctm.gpu_wait_timeout_ms` | Effective fence timeout applied to the last frame (mirrors the configured `wait-timeout-ms`). |
 | `video.ctm.gpu_wait_sleep_ms` | Sleep interval used between fence polls (mirrors the configured `wait-sleep-ms`). |
 | `video.ctm.gpu_wait_poll_count` | Number of `eglClientWaitSyncKHR` polls issued for the last frame. |
 | `video.ctm.gpu_wait_fallback` | `1` if the frame had to fall back to a blocking `glFinish`, otherwise `0`. |
 | `video.ctm.gpu_wait_fallback_total` | Running count of how many frames have triggered the fallback so far. |
-| `video.ctm.rga_ms` | Duration of the RGBA → NV12 conversion executed by librga. |
+| `video.ctm.rga_ms` | Duration of the RGBA → NV12 conversion executed by librga (0 when the direct ABGR posting path is active). |
 
 These metrics are updated continuously, so existing text widgets can display them by adding tokens such as `{video.ctm.gpu_wait_ms}`.
 Line and bar elements can target them through their `metric =` fields, and existing overlays that already consume `{ext.valueN}`
