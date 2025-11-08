@@ -12,6 +12,8 @@
 #include <float.h>
 #include <ctype.h>
 
+typedef struct OsdRenderContext OsdRenderContext;
+
 static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value);
 static const char *osd_metric_normalize(const char *metric_key, char *buf, size_t buf_sz);
 
@@ -372,7 +374,7 @@ static void osd_clear_rect_if_changed(OSD *o, const OSDRect *prev, const OSDRect
     }
 }
 
-typedef struct {
+typedef struct OsdRenderContext {
     const AppCfg *cfg;
     const ModesetResult *ms;
     const PipelineState *ps;
