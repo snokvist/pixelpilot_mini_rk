@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CTM / Gamma Controller → JSON UDP Relay</title>
+<style>
+  :root { --gap: 12px; --pad: 16px; --radius: 14px; }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:0; background:#0b0d12; color:#e7ebf3; }
+  .wrap { max-width: 980px; margin: 20px auto; padding: 0 var(--pad); }
+  .card { background:#121622; border:1px solid #1e2333; border-radius: var(--radius); padding: var(--pad); box-shadow: 0 8px 24px rgba(0,0,0,.35);}
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  h2 { font-size: 16px; margin: 16px 0 8px; opacity:.9; }
+  .grid { display:grid; gap: var(--gap); }
+  .grid.cols-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
+  .grid.cols-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+  .grid.cols-6 { grid-template-columns: repeat(6, minmax(0,1fr)); }
+  .field { background:#0f1320; border:1px solid #1b2132; border-radius: 12px; padding: 12px; }
+  .field label { display:block; font-size:12px; opacity:.85; margin-bottom:6px; }
+  .row { display:flex; align-items:center; gap:10px; }
+  input[type="range"] { width: 100%; }
+  input[type="number"], input[type="text"], input[type="url"] { width: 100%; background:#0b0f1a; color:#e7ebf3; border:1px solid #222a3d; border-radius:10px; padding:6px 8px; }
+  .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top: var(--gap); }
+  button { background:#2b5cff; color:white; border:0; border-radius:12px; padding:10px 14px; cursor:pointer; font-weight:600; }
+  button.secondary { background:#1d2333; color:#cbd5f1; border:1px solid #2a3247; }
+  .tiny { font-size: 12px; opacity:.8; }
+  pre { background:#0b0f1a; border:1px solid #1b2132; border-radius:12px; padding:12px; max-height:280px; overflow:auto; }
+  .matrix { display:grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .matrix .cell { display:flex; gap:6px; align-items:center; }
+  .ok { color:#71f6a8; }
+  .err { color:#ff8ea1; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>CTM / Gamma Controller → JSON UDP Relay</h1>
+    <div class="grid cols-2">
+      <div class="field">
+        <label>Relay POST URL (your HTTP→UDP service)</label>
+        <input id="relayUrl" type="url" value="http://192.168.2.20:55667/udp" />
+        <div class="tiny">Example: <code>http://&lt;relay-ip&gt;:55667/udp</code></div>
+      </div>
+      <div class="field">
+        <label>UDP destination host:port (inside payload)</label>
+        <div class="row">
+          <input id="dstHost" type="text" value="192.168.2.20" placeholder="host">
+          <input id="dstPort" type="number" value="5005" min="1" max="65535" step="1" placeholder="port">
+        </div>
+      </div>
+    </div>
+
+    <h2>3×3 Color Matrix (RGB → RGB)</h2>
+    <div class="grid cols-3">
+      <div class="field">
+        <div class="matrix" id="matrixGrid">
+          <!-- Rows R, G, B (m00 m01 m02 / m10 m11 m12 / m20 m21 m22) -->
+        </div>
+        <div class="actions" style="margin-top:10px;">
+          <button class="secondary" id="identityBtn">Identity</button>
+          <button class="secondary" id="boostContrastBtn">Boost diag +5%</button>
+          <button class="secondary" id="satHintBtn">Slight cross-mix</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Sharpness (0–100)</label>
+        <div class="row">
+          <input id="sharp" type="range" min="0" max="100" step="1" value="80">
+          <input id="sharpNum" type="number" min="0" max="100" step="1" value="80">
+        </div>
+        <label style="margin-top:10px;">Flip</label>
+        <div class="row">
+          <input id="flip" type="checkbox"> <span class="tiny">boolean</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Gamma pow (0.80–1.50)</label>
+        <div class="row">
+          <input id="gamma" type="range" min="0.80" max="1.50" step="0.01" value="1.00">
+          <input id="gammaNum" type="number" min="0.80" max="1.50" step="0.01" value="1.00">
+        </div>
+
+        <label style="margin-top:10px;">Gamma lift (−0.10…0.10)</label>
+        <div class="row">
+          <input id="glift" type="range" min="-0.10" max="0.10" step="0.001" value="0.000">
+          <input id="gliftNum" type="number" min="-0.10" max="0.10" step="0.001" value="0.000">
+        </div>
+
+        <label style="margin-top:10px;">Gamma gain (0.80–1.50)</label>
+        <div class="row">
+          <input id="ggain" type="range" min="0.80" max="1.50" step="0.01" value="1.00">
+          <input id="ggainNum" type="number" min="0.80" max="1.50" step="0.01" value="1.00">
+        </div>
+
+        <label style="margin-top:10px;">RGB multipliers (0.80–1.20)</label>
+        <div class="row">
+          <input id="rm" type="number" min="0.80" max="1.20" step="0.001" value="1.000" title="R mult">
+          <input id="gm" type="number" min="0.80" max="1.20" step="0.001" value="1.000" title="G mult">
+          <input id="bm" type="number" min="0.80" max="1.20" step="0.001" value="1.000" title="B mult">
+        </div>
+        <div class="actions" style="margin-top:10px;">
+          <button class="secondary" id="warmBtn">Warm mult</button>
+          <button class="secondary" id="coolBtn">Cool mult</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <label class="row tiny"><input id="autosend" type="checkbox" checked> Auto-send on change (debounced 120 ms)</label>
+      <button id="sendNow">Send now</button>
+      <button class="secondary" id="resetAll">Reset all</button>
+      <span id="status" class="tiny">idle</span>
+    </div>
+
+    <h2>Preview of **outer** POST body</h2>
+    <pre id="preview"></pre>
+    <div class="tiny">Note: <code>payload</code> is a JSON string (stringified inner object). This matches your <code>curl</code> example.</div>
+  </div>
+</div>
+
+<script>
+const q = s => document.querySelector(s);
+const relayUrl = q("#relayUrl");
+const dstHost  = q("#dstHost");
+const dstPort  = q("#dstPort");
+const sharp = q("#sharp"), sharpNum = q("#sharpNum");
+const flip = q("#flip");
+const gamma = q("#gamma"), gammaNum = q("#gammaNum");
+const glift = q("#glift"), gliftNum = q("#gliftNum");
+const ggain = q("#ggain"), ggainNum = q("#ggainNum");
+const rm = q("#rm"), gm = q("#gm"), bm = q("#bm");
+const autosend = q("#autosend");
+const sendNowBtn = q("#sendNow");
+const resetAllBtn = q("#resetAll");
+const identityBtn = q("#identityBtn");
+const boostContrastBtn = q("#boostContrastBtn");
+const satHintBtn = q("#satHintBtn");
+const warmBtn = q("#warmBtn");
+const coolBtn = q("#coolBtn");
+const statusEl = q("#status");
+const previewEl = q("#preview");
+
+// Build 3x3 matrix inputs
+const matrixGrid = q("#matrixGrid");
+const mIds = [];
+for (let r=0;r<3;r++){
+  for (let c=0;c<3;c++){
+    const id = `m${r}${c}`;
+    mIds.push(id);
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    const num = document.createElement("input");
+    num.type="number"; num.step="0.01"; num.value=(r===c)?1:0; num.min=-9; num.max=9; num.id=id;
+    const lab = document.createElement("span");
+    lab.className="tiny";
+    lab.textContent = `m${r}${c}`;
+    cell.appendChild(num); cell.appendChild(lab);
+    matrixGrid.appendChild(cell);
+  }
+}
+
+function getMatrix(){
+  return mIds.map(id => parseFloat(q("#"+id).value || "0"));
+}
+function setMatrix(vals){
+  mIds.forEach((id, i) => q("#"+id).value = (typeof vals[i] === "number" ? vals[i] : 0));
+}
+
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
+function getCTMObject(){
+  const matrix = getMatrix();
+  const payload = {
+    ctm:{
+      matrix: matrix.map(Number),
+      sharpness: clamp(parseInt(sharp.value||sharpNum.value||"0",10), 0, 100),
+      gamma: clamp(parseFloat(gamma.value||gammaNum.value||"1"), 0.5, 3.0),
+      gamma_lift: clamp(parseFloat(glift.value||gliftNum.value||"0"), -1, 1),
+      gamma_gain: clamp(parseFloat(ggain.value||ggainNum.value||"1"), 0.1, 5.0),
+      gamma_mult: [parseFloat(rm.value||"1"), parseFloat(gm.value||"1"), parseFloat(bm.value||"1")],
+      flip: !!flip.checked
+    }
+  };
+  return payload;
+}
+
+function outerPostBody(){
+  const inner = getCTMObject();
+  const body = {
+    host: dstHost.value.trim(),
+    port: parseInt(dstPort.value,10),
+    payload: JSON.stringify(inner) // <— stringify inner object exactly as your curl example
+  };
+  return body;
+}
+
+function refreshPreview(){
+  const body = outerPostBody();
+  previewEl.textContent = JSON.stringify(body, null, 2);
+}
+
+let debounceT = null;
+function scheduleSend(){
+  if (!autosend.checked) { refreshPreview(); return; }
+  if (debounceT) clearTimeout(debounceT);
+  debounceT = setTimeout(() => { sendNow(); }, 120);
+}
+
+async function sendNow(){
+  const url = relayUrl.value.trim();
+  const body = outerPostBody();
+  refreshPreview();
+  try{
+    statusEl.textContent = "sending…";
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    });
+    const ok = r.ok;
+    let msg = ok ? `OK ${r.status}` : `HTTP ${r.status}`;
+    statusEl.textContent = ok ? `✔ ${msg}` : `✖ ${msg}`;
+    statusEl.className = ok ? "tiny ok" : "tiny err";
+  }catch(e){
+    statusEl.textContent = "✖ " + e.toString();
+    statusEl.className = "tiny err";
+  }
+}
+
+// sync paired inputs
+function bindPair(rangeEl, numEl){
+  const f = () => { rangeEl.value = numEl.value; scheduleSend(); };
+  rangeEl.addEventListener("input", ()=>{ numEl.value = rangeEl.value; scheduleSend(); });
+  numEl.addEventListener("input", f);
+}
+
+bindPair(sharp, sharpNum);
+bindPair(gamma, gammaNum);
+bindPair(glift, gliftNum);
+bindPair(ggain, ggainNum);
+
+// change listeners
+[relayUrl, dstHost, dstPort, rm, gm, bm, flip].forEach(el => el.addEventListener("input", scheduleSend));
+mIds.forEach(id => q("#"+id).addEventListener("input", scheduleSend));
+
+// buttons
+sendNowBtn.addEventListener("click", sendNow);
+resetAllBtn.addEventListener("click", ()=>{
+  relayUrl.value = "http://192.168.2.20:55667/udp";
+  dstHost.value = "192.168.2.20";
+  dstPort.value = 5005;
+  setMatrix([1,0,0, 0,1,0, 0,0,1]);
+  sharp.value = sharpNum.value = 80;
+  gamma.value = gammaNum.value = 1.00;
+  glift.value = gliftNum.value = 0.000;
+  ggain.value = ggainNum.value = 1.00;
+  rm.value = gm.value = bm.value = 1.000;
+  flip.checked = false;
+  autosend.checked = true;
+  scheduleSend();
+});
+
+identityBtn.addEventListener("click", ()=>{
+  setMatrix([1,0,0, 0,1,0, 0,0,1]);
+  scheduleSend();
+});
+
+boostContrastBtn.addEventListener("click", ()=>{
+  // diag *1.05, others 0
+  setMatrix([1.05,0,0, 0,1.05,0, 0,0,1.05]);
+  scheduleSend();
+});
+
+satHintBtn.addEventListener("click", ()=>{
+  // tiny cross-mix towards “punch”
+  setMatrix([1.02,0.02,0.00, 0.02,1.02,0.00, 0.00,0.02,1.02]);
+  scheduleSend();
+});
+
+warmBtn.addEventListener("click", ()=>{
+  rm.value = 1.020; gm.value = 1.000; bm.value = 0.985; scheduleSend();
+});
+coolBtn.addEventListener("click", ()=>{
+  rm.value = 0.985; gm.value = 1.000; bm.value = 1.020; scheduleSend();
+});
+
+// initial paint
+refreshPreview();
+</script>
+</body>
+</html>
