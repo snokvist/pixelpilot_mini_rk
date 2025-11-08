@@ -295,6 +295,17 @@ static GLuint video_ctm_gpu_create_program(void) {
         "    gl_Position = vec4(a_position, 0.0, 1.0);\n"
         "    v_texcoord = a_texcoord;\n"
         "}\n";
+    /*
+     * Fragment processing overview (estimated relative GPU cost):
+     *   1. Sample Y/UV planes and compute optional 5-tap sharpen (high when
+     *      enabled due to extra texture fetches, otherwise low).
+     *   2. Convert YUV to RGB and clamp into the displayable range (low).
+     *   3. Conditionally decode transfer gamma only when matrix/gamma paths
+     *      require linear light (medium, skips entirely for the identity path).
+     *   4. Apply optional color matrix in linear space (medium when enabled).
+     *   5. Apply optional gamma gain/lift/mult adjustments and fold the final
+     *      re-encode into a single pow() (medium/high when enabled).
+     */
     static const char *fs_source =
         "precision mediump float;\n"
         "uniform sampler2D u_tex_y;\n"
@@ -331,19 +342,34 @@ static GLuint video_ctm_gpu_create_program(void) {
         "        y_adj + 1.59602678 * v,\n"
         "        y_adj - 0.39176229 * u - 0.81296765 * v,\n"
         "        y_adj + 2.01723214 * u);\n"
+        "    vec3 clamped_rgb = clamp(rgb, 0.0, 1.0);\n"
+        "    bool needs_matrix = u_apply_matrix;\n"
+        "    bool needs_gamma_adjust = u_apply_gamma_adjust;\n"
         "    float safe_gamma = max(u_gamma, 1e-4);\n"
-        "    vec3 linear = pow(clamp(rgb, 0.0, 1.0), vec3(safe_gamma));\n"
-        "    vec3 transformed = linear;\n"
-        "    if (u_apply_matrix) {\n"
-        "        transformed = clamp(u_matrix * linear, 0.0, 1.0);\n"
+        "    float safe_gamma_inv = 1.0 / safe_gamma;\n"
+        "    bool decode_gamma = needs_matrix || needs_gamma_adjust;\n"
+        "    vec3 working = clamped_rgb;\n"
+        "    if (decode_gamma) {\n"
+        "        working = pow(clamped_rgb, vec3(safe_gamma));\n"
+        "    }\n"
+        "    vec3 transformed = working;\n"
+        "    if (needs_matrix) {\n"
+        "        transformed = clamp(u_matrix * working, 0.0, 1.0);\n"
         "    }\n"
         "    vec3 adjusted = transformed;\n"
-        "    if (u_apply_gamma_adjust) {\n"
+        "    float output_gamma_exp = decode_gamma ? safe_gamma_inv : 1.0;\n"
+        "    if (needs_gamma_adjust) {\n"
         "        vec3 balanced = adjusted * u_gamma_mult;\n"
         "        vec3 lifted = clamp(balanced * u_gamma_gain + vec3(u_gamma_lift), 0.0, 1.0);\n"
-        "        adjusted = clamp(pow(lifted, vec3(u_gamma_inv)), 0.0, 1.0);\n"
+        "        adjusted = lifted;\n"
+        "        output_gamma_exp *= u_gamma_inv;\n"
+        "    } else {\n"
+        "        adjusted = clamp(adjusted, 0.0, 1.0);\n"
         "    }\n"
-        "    vec3 gamma_corrected = pow(adjusted, vec3(1.0 / safe_gamma));\n"
+        "    vec3 gamma_corrected = adjusted;\n"
+        "    if (abs(output_gamma_exp - 1.0) > 1e-5) {\n"
+        "        gamma_corrected = pow(adjusted, vec3(output_gamma_exp));\n"
+        "    }\n"
         "    gl_FragColor = vec4(gamma_corrected, 1.0);\n"
         "}\n";
 
