@@ -93,6 +93,8 @@ static gboolean plane_has_linear_nv12_from_blob(int fd, uint32_t plane_id, gbool
         return FALSE;
     }
 
+    *out_supported = FALSE;
+
     drmModeObjectProperties *props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
     if (props == NULL) {
         return FALSE;
@@ -131,8 +133,16 @@ static gboolean plane_has_linear_nv12_from_blob(int fd, uint32_t plane_id, gbool
                     if (format_index < 0) {
                         *out_supported = FALSE;
                         decided = TRUE;
-                    } else if (fmt_blob->count_modifiers == 0 || modifiers_offset > blob_len ||
-                               modifiers_size > blob_len - modifiers_offset) {
+                    } else if (fmt_blob->count_modifiers == 0) {
+                        /*
+                         * Drivers that expose IN_FORMATS without any modifier entries implicitly
+                         * advertise linear surfaces for the listed formats. Treat NV12 as
+                         * supported in this case so we avoid the atomic TEST_ONLY probe that can
+                         * trigger kernel warnings on incompatible planes.
+                         */
+                        *out_supported = TRUE;
+                        decided = TRUE;
+                    } else if (modifiers_offset > blob_len || modifiers_size > blob_len - modifiers_offset) {
                         decided = FALSE;
                     } else {
                         const struct drm_format_modifier *mods =
