@@ -1558,6 +1558,24 @@ int pipeline_get_recording_stats(const PipelineState *ps, PipelineRecordingStats
     return 0;
 }
 
+int pipeline_get_ctm_metrics(const PipelineState *ps, VideoCtmMetrics *metrics) {
+    if (metrics == NULL) {
+        return -1;
+    }
+    memset(metrics, 0, sizeof(*metrics));
+    if (ps == NULL) {
+        return -1;
+    }
+    g_mutex_lock((GMutex *)&ps->lock);
+    gboolean decoder_ready = ps->decoder_initialized && ps->decoder != NULL;
+    VideoDecoder *decoder = decoder_ready ? ps->decoder : NULL;
+    g_mutex_unlock((GMutex *)&ps->lock);
+    if (!decoder_ready || decoder == NULL) {
+        return -1;
+    }
+    return video_decoder_get_ctm_metrics(decoder, metrics);
+}
+
 gboolean pipeline_consume_reinit_request(PipelineState *ps) {
     if (ps == NULL || !ps->initialized) {
         return FALSE;

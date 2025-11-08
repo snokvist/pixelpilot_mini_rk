@@ -208,6 +208,11 @@ void cfg_defaults(AppCfg *c) {
     c->video_ctm.gamma_g_mult = 1.0;
     c->video_ctm.gamma_b_mult = 1.0;
     c->video_ctm.flip = 0;
+    c->video_ctm.wait_timeout_ms = 2.0;
+    c->video_ctm.wait_sleep_ms = 0.25;
+    for (int i = 0; i < VIDEO_CTM_MAX_OSD_VALUES; ++i) {
+        c->video_ctm.osd_value_metric[i][0] = '\0';
+    }
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {

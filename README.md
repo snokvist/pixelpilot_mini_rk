@@ -116,6 +116,9 @@ to the defaults listed in `src/config.c` when omitted.
 | `[video.ctm].gamma-gain` | Scalar highlight gain applied before gamma, useful for overall exposure compensation. |
 | `[video.ctm].gamma-r-mult` / `.gamma-g-mult` / `.gamma-b-mult` | Per-channel multipliers for warm/cool balance before gamma (default `1.0`). |
 | `[video.ctm].flip` | `true` rotates the GPU path output by 180° (mirroring both axes); `false` keeps the natural orientation. |
+| `[video.ctm].wait-timeout-ms` | Upper bound (in milliseconds) to wait for the GPU fence before forcing a synchronous `glFinish`. `0` disables the timeout and blocks until the fence signals. |
+| `[video.ctm].wait-sleep-ms` | Optional delay inserted between fence polls while waiting for the timeout window, giving the CPU a chance to yield (default `0.25`). |
+| `[video.ctm].osd_valueN_metric` | Copy a CTM performance metric into `ext.valueN` (1-8) before drawing the OSD. Example: `osd_value1_metric = video.ctm.gpu_wait_ms`. |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
@@ -149,6 +152,28 @@ to the defaults listed in `src/config.c` when omitted.
 | `[osd.element.NAME].anchor` / `offset` / `size` / color keys | Control placement and styling for OSD widgets. See inline comments in the sample file for full semantics. |
 | `[osd.element.NAME].line` | For text widgets, each `line =` entry appends a formatted row supporting `{token}` placeholders. |
 | `[osd.element.NAME].metric` | For line/bar widgets, selects the metric token (e.g. `udp.bitrate.latest_mbps`) sampled each refresh. |
+
+#### Video CTM performance metrics
+
+The GPU CTM backend reports a set of timing helpers that you can bind directly in OSD layouts (via `{video.ctm.*}` tokens or
+`metric = video.ctm.*`) or mirror into `ext.value1-8` using the `osd_valueN_metric` options. All timings are reported in milliseconds:
+
+| Metric | Description |
+| --- | --- |
+| `video.ctm.prepare_ms` | Time spent enabling the CTM path (DRM property or GPU surface allocation) for the current format. |
+| `video.ctm.process_ms` | Total wall-clock cost of the most recent `video_ctm_process` call. |
+| `video.ctm.gpu_draw_ms` | Duration of the fragment pass that renders the NV12 frame into the RGBA FBO. |
+| `video.ctm.gpu_wait_ms` | How long the CPU waited for the GPU fence before the result was handed to RGA. |
+| `video.ctm.gpu_wait_timeout_ms` | Effective fence timeout applied to the last frame (mirrors the configured `wait-timeout-ms`). |
+| `video.ctm.gpu_wait_sleep_ms` | Sleep interval used between fence polls (mirrors the configured `wait-sleep-ms`). |
+| `video.ctm.gpu_wait_poll_count` | Number of `eglClientWaitSyncKHR` polls issued for the last frame. |
+| `video.ctm.gpu_wait_fallback` | `1` if the frame had to fall back to a blocking `glFinish`, otherwise `0`. |
+| `video.ctm.gpu_wait_fallback_total` | Running count of how many frames have triggered the fallback so far. |
+| `video.ctm.rga_ms` | Duration of the RGBA → NV12 conversion executed by librga. |
+
+These metrics are updated continuously, so existing text widgets can display them by adding tokens such as `{video.ctm.gpu_wait_ms}`.
+Line and bar elements can target them through their `metric =` fields, and existing overlays that already consume `{ext.valueN}`
+can pick them up without layout changes by assigning `osd_valueN_metric = …` in the `[video.ctm]` section.
 
 ## CPU affinity control
 

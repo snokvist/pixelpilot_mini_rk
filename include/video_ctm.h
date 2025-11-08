@@ -34,7 +34,33 @@ typedef struct VideoCtm {
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
     struct VideoCtmGpuState *gpu_state;
 #endif
+    struct VideoCtmPerfState {
+        gint64 wait_timeout_ns;
+        gint64 wait_sleep_ns;
+        volatile gint64 last_prepare_ns;
+        volatile gint64 last_process_ns;
+        volatile gint64 last_gpu_draw_ns;
+        volatile gint64 last_gpu_wait_ns;
+        volatile gint64 last_gpu_wait_timeout_ns;
+        volatile gint64 last_rga_ns;
+        volatile gint64 last_wait_poll_count;
+        volatile gint64 last_wait_fallback;
+        volatile gint64 wait_fallback_total;
+    } perf;
 } VideoCtm;
+
+typedef struct {
+    double prepare_ms;
+    double process_ms;
+    double gpu_draw_ms;
+    double gpu_wait_ms;
+    double gpu_wait_timeout_ms;
+    double gpu_wait_sleep_ms;
+    double gpu_wait_poll_count;
+    double gpu_wait_fallback;
+    double rga_ms;
+    double wait_fallback_total;
+} VideoCtmMetrics;
 
 #define VIDEO_CTM_UPDATE_MATRIX (1u << 0)
 #define VIDEO_CTM_UPDATE_SHARPNESS (1u << 1)
@@ -70,5 +96,7 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
 int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
                       uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc);
 void video_ctm_apply_update(VideoCtm *ctm, const VideoCtmUpdate *update);
+void video_ctm_get_metrics(const VideoCtm *ctm, VideoCtmMetrics *out);
+gboolean video_ctm_metric_value(const VideoCtmMetrics *metrics, const char *key, double *out_value);
 
 #endif // VIDEO_CTM_H

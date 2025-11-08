@@ -579,6 +579,23 @@ int main(int argc, char **argv) {
                     pipeline_apply_ctm_update(&ps, &ext_snapshot.ctm.update);
                     last_ctm_serial = ext_snapshot.ctm.serial;
                 }
+                VideoCtmMetrics ctm_metrics = {0};
+                gboolean have_ctm_metrics = FALSE;
+                if (pipeline_get_ctm_metrics(&ps, &ctm_metrics) == 0) {
+                    have_ctm_metrics = TRUE;
+                }
+                if (have_ctm_metrics) {
+                    for (int i = 0; i < VIDEO_CTM_MAX_OSD_VALUES && i < OSD_EXTERNAL_MAX_VALUES; ++i) {
+                        const char *binding = cfg.video_ctm.osd_value_metric[i];
+                        if (binding == NULL || binding[0] == '\0') {
+                            continue;
+                        }
+                        double metric_value = 0.0;
+                        if (video_ctm_metric_value(&ctm_metrics, binding, &metric_value)) {
+                            ext_snapshot.value[i] = metric_value;
+                        }
+                    }
+                }
                 const char *zoom_text = ext_snapshot.text[OSD_EXTERNAL_MAX_TEXT - 1];
                 if (g_strcmp0(zoom_text, last_zoom_command) != 0) {
                     gboolean zoom_enabled = FALSE;

@@ -1199,6 +1199,14 @@ void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *upda
     }
 }
 
+int video_decoder_get_ctm_metrics(const VideoDecoder *vd, VideoCtmMetrics *metrics) {
+    if (vd == NULL || metrics == NULL) {
+        return -1;
+    }
+    video_ctm_get_metrics(&vd->ctm, metrics);
+    return 0;
+}
+
 int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult *ms, int drm_fd) {
     if (vd == NULL || cfg == NULL || ms == NULL) {
         return -1;

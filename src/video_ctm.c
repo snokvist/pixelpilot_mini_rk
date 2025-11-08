@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <xf86drm.h>
@@ -91,6 +92,63 @@ typedef struct VideoCtmGpuState {
 static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm);
 static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm);
 static void video_ctm_gpu_update_vertices(VideoCtm *ctm);
+
+static inline gint64 video_ctm_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (gint64)ts.tv_sec * G_GINT64_CONSTANT(1000000000) + ts.tv_nsec;
+}
+
+static inline void video_ctm_perf_store(volatile gint64 *slot, gint64 value) {
+    if (slot == NULL) {
+        return;
+    }
+    if (value < 0) {
+        value = 0;
+    }
+    g_atomic_int64_set(slot, value);
+}
+
+static inline void video_ctm_perf_increment(volatile gint64 *slot) {
+    if (slot == NULL) {
+        return;
+    }
+    g_atomic_int64_add(slot, 1);
+}
+
+static inline void video_ctm_sleep_ns(gint64 ns) {
+    if (ns <= 0) {
+        return;
+    }
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ns / G_GINT64_CONSTANT(1000000000));
+    ts.tv_nsec = (long)(ns % G_GINT64_CONSTANT(1000000000));
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+        continue;
+    }
+}
+
+static inline double video_ctm_ns_to_ms(gint64 ns) {
+    if (ns <= 0) {
+        return 0.0;
+    }
+    return (double)ns / 1000000.0;
+}
+
+static void video_ctm_perf_reset(VideoCtm *ctm) {
+    if (ctm == NULL) {
+        return;
+    }
+    video_ctm_perf_store(&ctm->perf.last_prepare_ns, 0);
+    video_ctm_perf_store(&ctm->perf.last_process_ns, 0);
+    video_ctm_perf_store(&ctm->perf.last_gpu_draw_ns, 0);
+    video_ctm_perf_store(&ctm->perf.last_gpu_wait_ns, 0);
+    video_ctm_perf_store(&ctm->perf.last_gpu_wait_timeout_ns, ctm->perf.wait_timeout_ns);
+    video_ctm_perf_store(&ctm->perf.last_rga_ns, 0);
+    video_ctm_perf_store(&ctm->perf.last_wait_poll_count, 0);
+    video_ctm_perf_store(&ctm->perf.last_wait_fallback, 0);
+    g_atomic_int64_set(&ctm->perf.wait_fallback_total, 0);
+}
 
 static const GLfloat kCtmQuadVerticesDefault[] = {
     -1.0f, -1.0f, 0.0f, 0.0f,
@@ -787,6 +845,7 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     if (gpu == NULL) {
         return FALSE;
     }
+    gint64 draw_start = video_ctm_now_ns();
     if (!eglMakeCurrent(gpu->display, gpu->surface, gpu->surface, gpu->context)) {
         return FALSE;
     }
@@ -838,27 +897,78 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
+    gint64 draw_end = video_ctm_now_ns();
+    video_ctm_perf_store(&ctm->perf.last_gpu_draw_ns, draw_end - draw_start);
+    video_ctm_perf_store(&ctm->perf.last_gpu_wait_timeout_ns, ctm->perf.wait_timeout_ns);
+    gint64 wait_start = video_ctm_now_ns();
+    gboolean fallback = FALSE;
+    guint64 poll_count = 0;
     if (gpu->egl_create_sync != NULL && gpu->egl_client_wait_sync != NULL && gpu->egl_destroy_sync != NULL) {
         EGLSyncKHR fence = gpu->egl_create_sync(gpu->display, EGL_SYNC_FENCE_KHR, NULL);
         if (fence != EGL_NO_SYNC_KHR) {
             glFlush();
-            EGLint wait = gpu->egl_client_wait_sync(gpu->display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
-            if (wait != EGL_CONDITION_SATISFIED_KHR) {
-                LOGW("Video CTM: eglClientWaitSyncKHR returned %d; forcing glFinish", wait);
-                glFinish();
+            gboolean has_timeout = (ctm->perf.wait_timeout_ns > 0);
+            gint64 deadline = has_timeout ? (wait_start + ctm->perf.wait_timeout_ns) : 0;
+            EGLint wait_status = EGL_CONDITION_SATISFIED_KHR;
+            if (has_timeout) {
+                while (TRUE) {
+                    poll_count++;
+                    gint64 now_ns = video_ctm_now_ns();
+                    gint64 remaining = deadline - now_ns;
+                    if (remaining <= 0) {
+                        fallback = TRUE;
+                        break;
+                    }
+                    EGLTimeKHR timeout_ns = (EGLTimeKHR)((remaining < 0) ? 0 : (guint64)remaining);
+                    wait_status = gpu->egl_client_wait_sync(gpu->display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, timeout_ns);
+                    if (wait_status == EGL_CONDITION_SATISFIED_KHR) {
+                        break;
+                    }
+                    if (wait_status != EGL_TIMEOUT_EXPIRED_KHR) {
+                        fallback = TRUE;
+                        break;
+                    }
+                    if (ctm->perf.wait_sleep_ns > 0) {
+                        video_ctm_sleep_ns(ctm->perf.wait_sleep_ns);
+                    }
+                }
+            } else {
+                poll_count++;
+                wait_status = gpu->egl_client_wait_sync(gpu->display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
+                if (wait_status != EGL_CONDITION_SATISFIED_KHR) {
+                    fallback = TRUE;
+                }
+            }
+            if (wait_status != EGL_CONDITION_SATISFIED_KHR && wait_status != EGL_TIMEOUT_EXPIRED_KHR) {
+                LOGW("Video CTM: eglClientWaitSyncKHR returned %d; forcing glFinish", wait_status);
             }
             gpu->egl_destroy_sync(gpu->display, fence);
+            if (fallback) {
+                glFinish();
+                video_ctm_perf_increment(&ctm->perf.wait_fallback_total);
+            }
         } else {
+            fallback = TRUE;
             glFinish();
+            video_ctm_perf_increment(&ctm->perf.wait_fallback_total);
         }
     } else {
+        fallback = TRUE;
         glFinish();
+        video_ctm_perf_increment(&ctm->perf.wait_fallback_total);
     }
+    gint64 wait_end = video_ctm_now_ns();
+    video_ctm_perf_store(&ctm->perf.last_gpu_wait_ns, wait_end - wait_start);
+    video_ctm_perf_store(&ctm->perf.last_wait_poll_count, (gint64)poll_count);
+    video_ctm_perf_store(&ctm->perf.last_wait_fallback, fallback ? 1 : 0);
     return TRUE;
 }
 
 static int video_ctm_gpu_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
                                  uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc) {
+    if (ctm != NULL) {
+        video_ctm_perf_store(&ctm->perf.last_rga_ns, 0);
+    }
     if (ctm == NULL || ctm->gpu_state == NULL) {
         return -1;
     }
@@ -880,11 +990,14 @@ static int video_ctm_gpu_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t
                                      rgba_stride_px, (int)height);
     rga_buffer_t dst = wrapbuffer_fd(dst_fd, (int)width, (int)height, RK_FORMAT_YCbCr_420_SP,
                                      (int)hor_stride, (int)ver_stride);
+    gint64 rga_start = video_ctm_now_ns();
     IM_STATUS ret = imcvtcolor(src, dst, src.format, dst.format, IM_COLOR_SPACE_DEFAULT);
     if (ret != IM_STATUS_SUCCESS) {
         LOGW("Video CTM: RGBA->NV12 conversion after GPU pass failed: %s", imStrError(ret));
+        video_ctm_perf_store(&ctm->perf.last_rga_ns, video_ctm_now_ns() - rga_start);
         return -1;
     }
+    video_ctm_perf_store(&ctm->perf.last_rga_ns, video_ctm_now_ns() - rga_start);
     return 0;
 }
 #endif
@@ -981,6 +1094,8 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
     ctm->hw_prop_id = 0;
     ctm->hw_blob_id = 0;
     ctm->render_fd = -1;
+    double wait_timeout_ms = 2.0;
+    double wait_sleep_ms = 0.25;
 
     gboolean config_enable = FALSE;
     if (cfg != NULL) {
@@ -1021,7 +1136,24 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
             LOGW("Video CTM: ignoring non-finite gamma b-mult");
             ctm->gamma_b_mult = 1.0;
         }
+        wait_timeout_ms = cfg->video_ctm.wait_timeout_ms;
+        wait_sleep_ms = cfg->video_ctm.wait_sleep_ms;
     }
+    if (wait_timeout_ms < 0.0) {
+        wait_timeout_ms = 0.0;
+    }
+    if (wait_sleep_ms < 0.0) {
+        wait_sleep_ms = 0.0;
+    }
+    ctm->perf.wait_timeout_ns = (gint64)llround(wait_timeout_ms * 1000000.0);
+    ctm->perf.wait_sleep_ns = (gint64)llround(wait_sleep_ms * 1000000.0);
+    if (ctm->perf.wait_timeout_ns < 0) {
+        ctm->perf.wait_timeout_ns = 0;
+    }
+    if (ctm->perf.wait_sleep_ns < 0) {
+        ctm->perf.wait_sleep_ns = 0;
+    }
+    video_ctm_perf_reset(ctm);
     ctm->enabled = config_enable;
     if (ctm->backend < VIDEO_CTM_BACKEND_AUTO || ctm->backend > VIDEO_CTM_BACKEND_GPU) {
         ctm->backend = VIDEO_CTM_BACKEND_AUTO;
@@ -1046,6 +1178,7 @@ void video_ctm_reset(VideoCtm *ctm) {
         video_ctm_gpu_destroy(ctm);
     }
 #endif
+    video_ctm_perf_reset(ctm);
 }
 
 void video_ctm_set_render_fd(VideoCtm *ctm, int drm_fd) {
@@ -1091,8 +1224,12 @@ void video_ctm_disable_drm(VideoCtm *ctm) {
 
 int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t hor_stride,
                       uint32_t ver_stride, uint32_t fourcc) {
+    gint64 start_ns = video_ctm_now_ns();
     if (ctm == NULL || !ctm->enabled) {
         video_ctm_disable_drm(ctm);
+        if (ctm != NULL) {
+            video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
+        }
         return 0;
     }
     if (video_ctm_gamma_active(ctm) && video_ctm_hw_available(ctm)) {
@@ -1104,6 +1241,7 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
     }
     if (video_ctm_hw_available(ctm)) {
         if (video_ctm_apply_hw(ctm)) {
+            video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
             return 0;
         }
         LOGW("Video CTM: failed to apply DRM CTM property; disabling hardware path");
@@ -1128,42 +1266,60 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
     if (fourcc != DRM_FORMAT_NV12) {
         LOGW("Video CTM: unsupported DRM format 0x%08x; disabling transform", fourcc);
         ctm->enabled = FALSE;
+        video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
         return -1;
     }
     if (width == 0 || height == 0) {
         LOGW("Video CTM: refusing to prepare zero-sized buffer (%ux%u)", width, height);
         ctm->enabled = FALSE;
+        video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
         return -1;
     }
     if (ctm->render_fd < 0) {
         LOGW("Video CTM: GPU backend requires a render node fd; disabling transform");
         ctm->enabled = FALSE;
+        video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
         return -1;
     }
     if (ctm->backend == VIDEO_CTM_BACKEND_GPU || ctm->backend == VIDEO_CTM_BACKEND_AUTO) {
         if (!video_ctm_gpu_init(ctm)) {
             LOGW("Video CTM: failed to initialise GPU backend; disabling transform");
             ctm->enabled = FALSE;
+            video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
             return -1;
         }
         if (!video_ctm_gpu_ensure_target(ctm, width, height)) {
             LOGW("Video CTM: failed to allocate GPU render target; disabling transform");
             video_ctm_gpu_destroy(ctm);
             ctm->enabled = FALSE;
+            video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
             return -1;
         }
+        video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
         return 0;
     }
+    video_ctm_perf_store(&ctm->perf.last_prepare_ns, video_ctm_now_ns() - start_ns);
     return -1;
 #endif
 }
 
 int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
                       uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc) {
+    gint64 start_ns = video_ctm_now_ns();
     if (ctm == NULL || !ctm->enabled) {
+        if (ctm != NULL) {
+            video_ctm_perf_store(&ctm->perf.last_process_ns, video_ctm_now_ns() - start_ns);
+        }
         return -1;
     }
     if (video_ctm_hw_available(ctm)) {
+        video_ctm_perf_store(&ctm->perf.last_gpu_draw_ns, 0);
+        video_ctm_perf_store(&ctm->perf.last_gpu_wait_ns, 0);
+        video_ctm_perf_store(&ctm->perf.last_rga_ns, 0);
+        video_ctm_perf_store(&ctm->perf.last_wait_poll_count, 0);
+        video_ctm_perf_store(&ctm->perf.last_wait_fallback, 0);
+        video_ctm_perf_store(&ctm->perf.last_gpu_wait_timeout_ns, ctm->perf.wait_timeout_ns);
+        video_ctm_perf_store(&ctm->perf.last_process_ns, video_ctm_now_ns() - start_ns);
         return ctm->hw_applied ? 0 : -1;
     }
 
@@ -1175,6 +1331,7 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
     (void)hor_stride;
     (void)ver_stride;
     (void)fourcc;
+    video_ctm_perf_store(&ctm->perf.last_process_ns, video_ctm_now_ns() - start_ns);
     return -1;
 #else
     uint32_t eff_hor_stride = hor_stride != 0 ? hor_stride : width;
@@ -1182,14 +1339,17 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
     if (fourcc != DRM_FORMAT_NV12) {
         LOGW("Video CTM: unsupported DRM format 0x%08x during processing", fourcc);
         ctm->enabled = FALSE;
+        video_ctm_perf_store(&ctm->perf.last_process_ns, video_ctm_now_ns() - start_ns);
         return -1;
     }
     if (ctm->gpu_state == NULL || !video_ctm_gpu_ensure_target(ctm, width, height)) {
         if (video_ctm_prepare(ctm, width, height, eff_hor_stride, eff_ver_stride, fourcc) != 0) {
+            video_ctm_perf_store(&ctm->perf.last_process_ns, video_ctm_now_ns() - start_ns);
             return -1;
         }
     }
     if (ctm->gpu_state == NULL) {
+        video_ctm_perf_store(&ctm->perf.last_process_ns, video_ctm_now_ns() - start_ns);
         return -1;
     }
     int ret = video_ctm_gpu_process(ctm, src_fd, dst_fd, width, height, eff_hor_stride, eff_ver_stride, fourcc);
@@ -1197,8 +1357,10 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
         LOGW("Video CTM: GPU processing failed; disabling transform");
         video_ctm_gpu_destroy(ctm);
         ctm->enabled = FALSE;
+        video_ctm_perf_store(&ctm->perf.last_process_ns, video_ctm_now_ns() - start_ns);
         return -1;
     }
+    video_ctm_perf_store(&ctm->perf.last_process_ns, video_ctm_now_ns() - start_ns);
     return 0;
 #endif
 }
@@ -1305,4 +1467,114 @@ void video_ctm_apply_update(VideoCtm *ctm, const VideoCtmUpdate *update) {
         }
 #endif
     }
+}
+
+void video_ctm_get_metrics(const VideoCtm *ctm, VideoCtmMetrics *out) {
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (ctm == NULL) {
+        return;
+    }
+    out->prepare_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_prepare_ns));
+    out->process_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_process_ns));
+    out->gpu_draw_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_gpu_draw_ns));
+    out->gpu_wait_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_gpu_wait_ns));
+    out->gpu_wait_timeout_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_gpu_wait_timeout_ns));
+    out->gpu_wait_sleep_ms = video_ctm_ns_to_ms(ctm->perf.wait_sleep_ns);
+    out->gpu_wait_poll_count = (double)g_atomic_int64_get(&ctm->perf.last_wait_poll_count);
+    out->gpu_wait_fallback = (double)g_atomic_int64_get(&ctm->perf.last_wait_fallback);
+    out->wait_fallback_total = (double)g_atomic_int64_get(&ctm->perf.wait_fallback_total);
+    out->rga_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_rga_ns));
+}
+
+static void video_ctm_metric_normalize(const char *key, char *buf, size_t buf_sz) {
+    if (buf == NULL || buf_sz == 0) {
+        return;
+    }
+    if (key == NULL) {
+        buf[0] = '\0';
+        return;
+    }
+    size_t len = g_strlcpy(buf, key, buf_sz);
+    size_t start = 0;
+    while (start < len && g_ascii_isspace((unsigned char)buf[start])) {
+        start++;
+    }
+    size_t end = len;
+    while (end > start && g_ascii_isspace((unsigned char)buf[end - 1])) {
+        end--;
+    }
+    if (start > 0 || end < len) {
+        memmove(buf, buf + start, end - start);
+        buf[end - start] = '\0';
+        len = end - start;
+    }
+    for (size_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c == '-') {
+            buf[i] = '.';
+        } else {
+            buf[i] = (char)g_ascii_tolower(c);
+        }
+    }
+}
+
+gboolean video_ctm_metric_value(const VideoCtmMetrics *metrics, const char *key, double *out_value) {
+    if (metrics == NULL || key == NULL || out_value == NULL) {
+        return FALSE;
+    }
+    char normalized[128];
+    video_ctm_metric_normalize(key, normalized, sizeof(normalized));
+    if (normalized[0] == '\0') {
+        return FALSE;
+    }
+    char prefixed[160];
+    const char *candidate = normalized;
+    if (!g_str_has_prefix(candidate, "video.ctm.")) {
+        g_snprintf(prefixed, sizeof(prefixed), "video.ctm.%s", normalized);
+        candidate = prefixed;
+    }
+    if (strcmp(candidate, "video.ctm.prepare_ms") == 0) {
+        *out_value = metrics->prepare_ms;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.process_ms") == 0) {
+        *out_value = metrics->process_ms;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.gpu_draw_ms") == 0) {
+        *out_value = metrics->gpu_draw_ms;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.gpu_wait_ms") == 0) {
+        *out_value = metrics->gpu_wait_ms;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.gpu_wait_timeout_ms") == 0) {
+        *out_value = metrics->gpu_wait_timeout_ms;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.gpu_wait_sleep_ms") == 0) {
+        *out_value = metrics->gpu_wait_sleep_ms;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.gpu_wait_poll_count") == 0) {
+        *out_value = metrics->gpu_wait_poll_count;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.gpu_wait_fallback") == 0) {
+        *out_value = metrics->gpu_wait_fallback;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.gpu_wait_fallback_total") == 0) {
+        *out_value = metrics->wait_fallback_total;
+        return TRUE;
+    }
+    if (strcmp(candidate, "video.ctm.rga_ms") == 0) {
+        *out_value = metrics->rga_ms;
+        return TRUE;
+    }
+    return FALSE;
 }

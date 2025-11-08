@@ -381,6 +381,8 @@ typedef struct {
     int have_record_stats;
     PipelineRecordingStats rec_stats;
     const OsdExternalFeedSnapshot *external;
+    int have_ctm_metrics;
+    VideoCtmMetrics ctm_metrics;
 } OsdRenderContext;
 
 static const char *osd_key_copy_lower(const char *src, char *dst, size_t dst_sz) {
@@ -762,6 +764,12 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         return 0;
     }
 
+    double metric_value = 0.0;
+    if (osd_metric_sample(ctx, key, &metric_value)) {
+        osd_format_metric_value(key, metric_value, buf, buf_sz);
+        return 0;
+    }
+
     snprintf(buf, buf_sz, "{%s}", token);
     return -1;
 }
@@ -784,6 +792,16 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
     if (ext_slot >= 0) {
         if (ctx->external) {
             *out_value = ctx->external->value[ext_slot];
+            return 1;
+        }
+        return 0;
+    }
+
+    if (metric && strncmp(metric, "video.ctm", 9) == 0) {
+        if (!ctx->have_ctm_metrics) {
+            return 0;
+        }
+        if (video_ctm_metric_value(&ctx->ctm_metrics, metric, out_value)) {
             return 1;
         }
         return 0;
@@ -3055,6 +3073,7 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         .record_enabled = cfg ? cfg->record.enable : 0,
         .have_record_stats = 0,
         .external = ext,
+        .have_ctm_metrics = 0,
     };
     if (ps && pipeline_get_receiver_stats(ps, &ctx.stats) == 0) {
         ctx.have_stats = 1;
@@ -3063,6 +3082,11 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         ctx.have_record_stats = 1;
     } else {
         memset(&ctx.rec_stats, 0, sizeof(ctx.rec_stats));
+    }
+    if (ps && pipeline_get_ctm_metrics(ps, &ctx.ctm_metrics) == 0) {
+        ctx.have_ctm_metrics = 1;
+    } else {
+        memset(&ctx.ctm_metrics, 0, sizeof(ctx.ctm_metrics));
     }
 
     for (int i = 0; i < o->element_count; ++i) {

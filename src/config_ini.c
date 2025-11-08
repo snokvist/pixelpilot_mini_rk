@@ -1062,6 +1062,58 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_ctm.gamma_b_mult = v;
             return 0;
         }
+        if (strcasecmp(key, "wait-timeout-ms") == 0 || strcasecmp(key, "wait_timeout_ms") == 0 ||
+            strcasecmp(key, "gpu-wait-timeout-ms") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.ctm wait-timeout-ms expects a floating point value");
+                return -1;
+            }
+            if (v < 0.0) {
+                v = 0.0;
+            }
+            cfg->video_ctm.wait_timeout_ms = v;
+            return 0;
+        }
+        if (strcasecmp(key, "wait-sleep-ms") == 0 || strcasecmp(key, "wait_sleep_ms") == 0 ||
+            strcasecmp(key, "gpu-wait-sleep-ms") == 0) {
+            double v = 0.0;
+            if (parse_double(value, &v) != 0) {
+                LOGE("config: video.ctm wait-sleep-ms expects a floating point value");
+                return -1;
+            }
+            if (v < 0.0) {
+                v = 0.0;
+            }
+            cfg->video_ctm.wait_sleep_ms = v;
+            return 0;
+        }
+        if (strncasecmp(key, "ext", 3) == 0 || strncasecmp(key, "osd", 3) == 0) {
+            const char *p = key;
+            if (strncasecmp(p, "ext", 3) == 0) {
+                p += 3;
+            } else {
+                p += 3;
+            }
+            if (*p == '.' || *p == '_' || *p == '-') {
+                p++;
+            }
+            if (strncasecmp(p, "value", 5) == 0) {
+                p += 5;
+                if (*p >= '1' && *p <= '8') {
+                    int slot = *p - '1';
+                    p++;
+                    if (*p == '.' || *p == '_' || *p == '-') {
+                        p++;
+                    }
+                    if (strcasecmp(p, "metric") == 0 || strcasecmp(p, "source") == 0) {
+                        ini_copy_string(cfg->video_ctm.osd_value_metric[slot],
+                                        sizeof(cfg->video_ctm.osd_value_metric[slot]), value);
+                        return 0;
+                    }
+                }
+            }
+        }
         if (strncasecmp(key, "matrix-row", 10) == 0 && strlen(key) == 11 && isdigit((unsigned char)key[10])) {
             int row = key[10] - '0';
             if (row < 0 || row > 2) {

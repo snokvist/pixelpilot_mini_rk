@@ -50,6 +50,8 @@ typedef enum {
     VIDEO_CTM_BACKEND_GPU,
 } VideoCtmBackend;
 
+#define VIDEO_CTM_MAX_OSD_VALUES 8
+
 typedef struct {
     int enable;
     VideoCtmBackend backend;
@@ -62,6 +64,9 @@ typedef struct {
     double gamma_g_mult;
     double gamma_b_mult;
     int flip;
+    double wait_timeout_ms;
+    double wait_sleep_ms;
+    char osd_value_metric[VIDEO_CTM_MAX_OSD_VALUES][64];
 } VideoCtmCfg;
 
 typedef struct {
