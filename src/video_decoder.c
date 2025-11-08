@@ -610,9 +610,6 @@ static void log_decoder_neon_status_once(void) {
 }
 
 static void reset_frame_map(VideoDecoder *vd) {
-    uint32_t transform_fourcc = 0;
-    uint32_t transform_pitch = 0;
-
     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
         vd->frame_map[i].prime_fd = -1;
         vd->frame_map[i].fb_id = 0;
@@ -910,6 +907,9 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
     }
 
     reset_frame_map(vd);
+
+    uint32_t transform_fourcc = 0;
+    uint32_t transform_pitch = 0;
 
     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
         struct drm_mode_create_dumb dmcd;
