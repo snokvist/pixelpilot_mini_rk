@@ -12,6 +12,9 @@
 #include <float.h>
 #include <ctype.h>
 
+static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value);
+static const char *osd_metric_normalize(const char *metric_key, char *buf, size_t buf_sz);
+
 #if defined(__has_include)
 #if __has_include(<libdrm/drm_fourcc.h>)
 #include <libdrm/drm_fourcc.h>
@@ -773,9 +776,6 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
     snprintf(buf, buf_sz, "{%s}", token);
     return -1;
 }
-
-static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value);
-static const char *osd_metric_normalize(const char *metric_key, char *buf, size_t buf_sz);
 
 static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value) {
     if (!key || !out_value) {
