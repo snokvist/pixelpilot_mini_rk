@@ -39,6 +39,45 @@ sudo make uninstall
 
 The uninstall target disables the services, removes the installed files (including the default INI and spinner asset), and reloads the systemd daemon to pick up the changes.
 
+### Live CTM overrides over the external OSD feed
+
+When `[osd.external].enable = true` the helper listens for JSON payloads on the configured UDP port and mirrors the most recent
+message into the on-screen display pipeline. The same channel can now steer the GPU color transform in real time without touching
+the persistent INI file. Send a datagram that includes a top-level `ctm` object with any combination of the supported keys:
+
+* `matrix` – nine coefficients that form the 3×3 RGB matrix (row-major order).
+* `sharpness` – GPU luma sharpening strength.
+* `gamma` – gamma power (>0) applied after the matrix.
+* `gamma_lift` / `gamma_gain` – pre-gamma lift and gain controls.
+* `gamma_r_mult` / `gamma_g_mult` / `gamma_b_mult` or `gamma_mult` – per-channel multipliers before gamma.
+* `flip` – `true` rotates the GPU output by 180°, `false` keeps the default orientation.
+
+Updates apply immediately to the running decoder but are not written back to disk; restarting the process restores the INI values.
+The payload may contain a subset of the keys to update only the fields you care about. Example messages:
+
+```json
+{
+  "ctm": {
+    "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    "sharpness": 20,
+    "gamma": 1.0,
+    "gamma_lift": 0.0,
+    "gamma_gain": 1.0,
+    "gamma_mult": [1.0, 1.0, 1.0],
+    "flip": false
+  }
+}
+```
+
+```json
+{
+  "ctm": {
+    "gamma_gain": 1.15,
+    "gamma_lift": -0.02
+  }
+}
+```
+
 ## Configuration via INI
 
 All command-line options can be provided in an INI file and loaded with `--config /path/to/file.ini`. The parser merges the INI

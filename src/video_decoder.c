@@ -1171,6 +1171,34 @@ size_t video_decoder_max_packet_size(const VideoDecoder *vd) {
     return vd->packet_buf_size;
 }
 
+void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *update) {
+    if (vd == NULL || update == NULL || update->fields == 0) {
+        return;
+    }
+
+    video_ctm_apply_update(&vd->ctm, update);
+
+    if (!vd->ctm.enabled) {
+        return;
+    }
+
+    g_mutex_lock(&vd->lock);
+    uint32_t width = vd->src_w;
+    uint32_t height = vd->src_h;
+    RK_U32 hor_stride = vd->frame_hor_stride;
+    RK_U32 ver_stride = vd->frame_ver_stride;
+    uint32_t fourcc = vd->frame_fourcc;
+    g_mutex_unlock(&vd->lock);
+
+    if (width == 0 || height == 0 || fourcc == 0) {
+        return;
+    }
+
+    if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc) != 0) {
+        LOGW("Video decoder: failed to reapply CTM after live update");
+    }
+}
+
 int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult *ms, int drm_fd) {
     if (vd == NULL || cfg == NULL || ms == NULL) {
         return -1;
