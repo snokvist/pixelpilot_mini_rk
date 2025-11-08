@@ -64,7 +64,17 @@ static int vrefresh(const drmModeModeInfo *m) {
     return 0;
 }
 
+static inline int mode_is_preferred(const drmModeModeInfo *m) {
+    return (m->type & DRM_MODE_TYPE_PREFERRED) ? 1 : 0;
+}
+
 static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
+    int ap = mode_is_preferred(a);
+    int bp = mode_is_preferred(b);
+    if (ap != bp) {
+        return ap > bp;
+    }
+
     int ahz = vrefresh(a), bhz = vrefresh(b);
     if (ahz != bhz) {
         return ahz > bhz;
@@ -73,11 +83,6 @@ static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
     long long bb = (long long)b->hdisplay * b->vdisplay;
     if (aa != bb) {
         return aa > bb;
-    }
-    int ap = (a->type & DRM_MODE_TYPE_PREFERRED) ? 1 : 0;
-    int bp = (b->type & DRM_MODE_TYPE_PREFERRED) ? 1 : 0;
-    if (ap != bp) {
-        return ap > bp;
     }
     return a->clock > b->clock;
 }
