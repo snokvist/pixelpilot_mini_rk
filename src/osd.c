@@ -469,6 +469,7 @@ static void format_duration_hms(guint64 ns, char *buf, size_t buf_sz) {
 }
 
 static void osd_format_metric_value(const char *metric_key, double value, char *buf, size_t buf_sz);
+static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value);
 
 static const char *osd_pipeline_state_name(const PipelineState *ps) {
     if (!ps) {
