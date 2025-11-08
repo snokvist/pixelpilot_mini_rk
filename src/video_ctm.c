@@ -99,6 +99,81 @@ static inline gint64 video_ctm_now_ns(void) {
     return (gint64)ts.tv_sec * G_GINT64_CONSTANT(1000000000) + ts.tv_nsec;
 }
 
+#if defined(__GNUC__) && (__GNUC__ * 100 + __GNUC_MINOR__) >= 407
+static inline void video_ctm_atomic_store(volatile gint64 *slot, gint64 value) {
+    if (slot == NULL) {
+        return;
+    }
+    __atomic_store_n((gint64 *)slot, value, __ATOMIC_RELAXED);
+}
+
+static inline void video_ctm_atomic_add(volatile gint64 *slot, gint64 value) {
+    if (slot == NULL) {
+        return;
+    }
+    __atomic_fetch_add((gint64 *)slot, value, __ATOMIC_RELAXED);
+}
+
+static inline gint64 video_ctm_atomic_load(const volatile gint64 *slot) {
+    if (slot == NULL) {
+        return 0;
+    }
+    return __atomic_load_n((const gint64 *)slot, __ATOMIC_RELAXED);
+}
+#elif GLIB_CHECK_VERSION(2, 30, 0) && defined(G_ATOMIC_LOCK_FREE)
+static inline void video_ctm_atomic_store(volatile gint64 *slot, gint64 value) {
+    if (slot == NULL) {
+        return;
+    }
+    g_atomic_int64_set(slot, value);
+}
+
+static inline void video_ctm_atomic_add(volatile gint64 *slot, gint64 value) {
+    if (slot == NULL) {
+        return;
+    }
+    g_atomic_int64_add(slot, value);
+}
+
+static inline gint64 video_ctm_atomic_load(const volatile gint64 *slot) {
+    if (slot == NULL) {
+        return 0;
+    }
+    return g_atomic_int64_get(slot);
+}
+#else
+G_LOCK_DEFINE_STATIC(video_ctm_perf_lock);
+
+static inline void video_ctm_atomic_store(volatile gint64 *slot, gint64 value) {
+    if (slot == NULL) {
+        return;
+    }
+    G_LOCK(video_ctm_perf_lock);
+    *(gint64 *)slot = value;
+    G_UNLOCK(video_ctm_perf_lock);
+}
+
+static inline void video_ctm_atomic_add(volatile gint64 *slot, gint64 value) {
+    if (slot == NULL) {
+        return;
+    }
+    G_LOCK(video_ctm_perf_lock);
+    *(gint64 *)slot += value;
+    G_UNLOCK(video_ctm_perf_lock);
+}
+
+static inline gint64 video_ctm_atomic_load(const volatile gint64 *slot) {
+    if (slot == NULL) {
+        return 0;
+    }
+    gint64 value;
+    G_LOCK(video_ctm_perf_lock);
+    value = *(const gint64 *)slot;
+    G_UNLOCK(video_ctm_perf_lock);
+    return value;
+}
+#endif
+
 static inline void video_ctm_perf_store(volatile gint64 *slot, gint64 value) {
     if (slot == NULL) {
         return;
@@ -106,14 +181,14 @@ static inline void video_ctm_perf_store(volatile gint64 *slot, gint64 value) {
     if (value < 0) {
         value = 0;
     }
-    g_atomic_int64_set(slot, value);
+    video_ctm_atomic_store(slot, value);
 }
 
 static inline void video_ctm_perf_increment(volatile gint64 *slot) {
     if (slot == NULL) {
         return;
     }
-    g_atomic_int64_add(slot, 1);
+    video_ctm_atomic_add(slot, 1);
 }
 
 static inline void video_ctm_sleep_ns(gint64 ns) {
@@ -147,7 +222,7 @@ static void video_ctm_perf_reset(VideoCtm *ctm) {
     video_ctm_perf_store(&ctm->perf.last_rga_ns, 0);
     video_ctm_perf_store(&ctm->perf.last_wait_poll_count, 0);
     video_ctm_perf_store(&ctm->perf.last_wait_fallback, 0);
-    g_atomic_int64_set(&ctm->perf.wait_fallback_total, 0);
+    video_ctm_atomic_store(&ctm->perf.wait_fallback_total, 0);
 }
 
 static const GLfloat kCtmQuadVerticesDefault[] = {
@@ -1477,16 +1552,16 @@ void video_ctm_get_metrics(const VideoCtm *ctm, VideoCtmMetrics *out) {
     if (ctm == NULL) {
         return;
     }
-    out->prepare_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_prepare_ns));
-    out->process_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_process_ns));
-    out->gpu_draw_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_gpu_draw_ns));
-    out->gpu_wait_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_gpu_wait_ns));
-    out->gpu_wait_timeout_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_gpu_wait_timeout_ns));
+    out->prepare_ms = video_ctm_ns_to_ms(video_ctm_atomic_load(&ctm->perf.last_prepare_ns));
+    out->process_ms = video_ctm_ns_to_ms(video_ctm_atomic_load(&ctm->perf.last_process_ns));
+    out->gpu_draw_ms = video_ctm_ns_to_ms(video_ctm_atomic_load(&ctm->perf.last_gpu_draw_ns));
+    out->gpu_wait_ms = video_ctm_ns_to_ms(video_ctm_atomic_load(&ctm->perf.last_gpu_wait_ns));
+    out->gpu_wait_timeout_ms = video_ctm_ns_to_ms(video_ctm_atomic_load(&ctm->perf.last_gpu_wait_timeout_ns));
     out->gpu_wait_sleep_ms = video_ctm_ns_to_ms(ctm->perf.wait_sleep_ns);
-    out->gpu_wait_poll_count = (double)g_atomic_int64_get(&ctm->perf.last_wait_poll_count);
-    out->gpu_wait_fallback = (double)g_atomic_int64_get(&ctm->perf.last_wait_fallback);
-    out->wait_fallback_total = (double)g_atomic_int64_get(&ctm->perf.wait_fallback_total);
-    out->rga_ms = video_ctm_ns_to_ms(g_atomic_int64_get(&ctm->perf.last_rga_ns));
+    out->gpu_wait_poll_count = (double)video_ctm_atomic_load(&ctm->perf.last_wait_poll_count);
+    out->gpu_wait_fallback = (double)video_ctm_atomic_load(&ctm->perf.last_wait_fallback);
+    out->wait_fallback_total = (double)video_ctm_atomic_load(&ctm->perf.wait_fallback_total);
+    out->rga_ms = video_ctm_ns_to_ms(video_ctm_atomic_load(&ctm->perf.last_rga_ns));
 }
 
 static void video_ctm_metric_normalize(const char *key, char *buf, size_t buf_sz) {
