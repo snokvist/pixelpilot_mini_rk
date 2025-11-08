@@ -1,96 +1,43 @@
 #!/bin/sh
-# rk3566-mali-perf.sh — performance toggle for Mali (kbase) on RK3566
+# rk3566-gpu-dmc-max.sh
 
 set -e
 
 GPU=/sys/class/misc/mali0/device
-DFNODE="$(ls -d "$GPU"/devfreq/* 2>/dev/null | head -n1)" || {
-  echo "No devfreq node under $GPU"; exit 1; }
+DFGPU="$(ls -d "$GPU"/devfreq/* 2>/dev/null | head -n1)" || {
+  echo "No Mali devfreq node"; exit 1; }
 
-GOV="$DFNODE/governor"
-AVF="$DFNODE/available_frequencies"
-AVG="$DFNODE/available_governors"
-CUR="$DFNODE/cur_freq"
-MIN="$DFNODE/min_freq"
-MAX="$DFNODE/max_freq"
-POL="$GPU/power_policy"
+# --- Pin DMC (memory controller) ---
+DMC=$(ls -d /sys/class/devfreq/*dmc* 2>/dev/null | head -n1 || true)
+if [ -n "$DMC" ]; then
+  echo performance > "$DMC/governor" 2>/dev/null || true
+  TOP_DMC=$(tr ' ' '\n' < "$DMC/available_frequencies" | sort -n | tail -1)
+  [ -n "$TOP_DMC" ] && {
+    echo "$TOP_DMC" > "$DMC/min_freq"
+    echo "$TOP_DMC" > "$DMC/max_freq" 2>/dev/null || true
+  }
+fi
 
-STATEDIR=/tmp/mali-perf-state
-mkdir -p "$STATEDIR"
+# --- Pin GPU ---
+# Keep GPU awake if supported
+[ -w "$GPU/power_policy" ] && echo always_on > "$GPU/power_policy" 2>/dev/null || true
 
-# Return the numeric highest OPP; fallback to current max_freq if needed
-highest_freq() {
-  if [ -r "$AVF" ]; then
-    tr ' ' '\n' < "$AVF" | grep -E '^[0-9]+$' | sort -n | tail -1
+# Prefer performance/userspace; otherwise we’ll still clamp min=max
+if [ -r "$DFGPU/available_governors" ]; then
+  if grep -qw performance "$DFGPU/available_governors"; then
+    echo performance > "$DFGPU/governor" 2>/dev/null || true
+  elif grep -qw userspace "$DFGPU/available_governors"; then
+    echo userspace > "$DFGPU/governor" 2>/dev/null || true
   fi
-}
+fi
 
-have_gov() { [ -r "$AVG" ] && grep -qw "$1" "$AVG"; }
+TOP_GPU=$(tr ' ' '\n' < "$DFGPU/available_frequencies" | grep -E '^[0-9]+$' | sort -n | tail -1)
+[ -z "$TOP_GPU" ] && TOP_GPU=$(cat "$DFGPU/max_freq")
 
-status() {
-  echo "GPU devfreq node: $DFNODE"
-  [ -r "$POL" ] && echo "power_policy: $(cat "$POL")"
-  echo "governor    : $(cat "$GOV")"
-  echo "cur/min/max : $(cat "$CUR") / $(cat "$MIN") / $(cat "$MAX")"
-  [ -r "$GPU/utilisation" ] && echo "utilisation : $(cat "$GPU/utilisation")%"
-}
+echo "$TOP_GPU" > "$DFGPU/max_freq"
+echo "$TOP_GPU" > "$DFGPU/min_freq"
 
-perf_on() {
-  # save current state
-  cat "$GOV" > "$STATEDIR/governor" 2>/dev/null || true
-  cat "$MIN" > "$STATEDIR/min" 2>/dev/null || true
-  cat "$MAX" > "$STATEDIR/max" 2>/dev/null || true
-  [ -r "$POL" ] && cat "$POL" > "$STATEDIR/power_policy" 2>/dev/null || true
-
-  HIGHEST="$(highest_freq)"
-  [ -n "$HIGHEST" ] || HIGHEST="$(cat "$MAX")"  # fallback to current max clamp
-
-  # keep GPU from power-gating if supported
-  [ -w "$POL" ] && echo always_on > "$POL" 2>/dev/null || true
-
-  # Prefer a governor that won’t fight us
-  if have_gov performance; then
-    echo performance > "$GOV" 2>/dev/null || true
-  elif have_gov userspace; then
-    echo userspace > "$GOV" 2>/dev/null || true
-  fi
-
-  # Pin frequency at the top OPP (order matters on some builds)
-  echo "$HIGHEST" > "$MAX"
-  echo "$HIGHEST" > "$MIN"
-
-  # If simple_ondemand is still active, make it eager (best-effort)
-  if [ "$(cat "$GOV")" = simple_ondemand ] && [ -d "$DFNODE/simple_ondemand" ]; then
-    echo 1  > "$DFNODE/simple_ondemand/upthreshold"       2>/dev/null || true
-    echo 0  > "$DFNODE/simple_ondemand/downdifferential"   2>/dev/null || true
-    echo 0  > "$DFNODE/simple_ondemand/ignore_idle_time"   2>/dev/null || true
-  fi
-
-  echo "Performance mode: ON (target=${HIGHEST} Hz)"
-  status
-}
-
-perf_off() {
-  [ -r "$STATEDIR/min" ] && cat "$STATEDIR/min" > "$MIN" 2>/dev/null || true
-  [ -r "$STATEDIR/max" ] && cat "$STATEDIR/max" > "$MAX" 2>/dev/null || true
-
-  if [ -r "$STATEDIR/governor" ]; then
-    cat "$STATEDIR/governor" > "$GOV" 2>/dev/null || true
-  else
-    if have_gov simple_ondemand; then echo simple_ondemand > "$GOV" 2>/dev/null || true
-    elif have_gov ondemand; then echo ondemand > "$GOV" 2>/dev/null || true
-    elif have_gov powersave; then echo powersave > "$GOV" 2>/dev/null || true
-    fi
-  fi
-
-  [ -r "$STATEDIR/power_policy" ] && cat "$STATEDIR/power_policy" > "$POL" 2>/dev/null || true
-  echo "Performance mode: OFF"
-  status
-}
-
-case "$1" in
-  on)     perf_on ;;
-  off)    perf_off ;;
-  status|'') status ;;
-  *) echo "Usage: $0 {on|off|status}"; exit 2 ;;
-esac
+# --- Status ---
+echo "DMC: $( [ -n "$DMC" ] && cat "$DMC/cur_freq" || echo N/A )"
+echo "GPU cur/min/max: $(cat "$DFGPU/cur_freq") / $(cat "$DFGPU/min_freq") / $(cat "$DFGPU/max_freq")"
+[ -r "$GPU/utilisation" ] && echo "GPU util: $(cat "$GPU/utilisation")%"
