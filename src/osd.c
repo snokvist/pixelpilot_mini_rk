@@ -381,6 +381,8 @@ typedef struct {
     int have_record_stats;
     PipelineRecordingStats rec_stats;
     const OsdExternalFeedSnapshot *external;
+    int have_ctm_metrics;
+    VideoCtmMetrics ctm_metrics;
 } OsdRenderContext;
 
 static const char *osd_key_copy_lower(const char *src, char *dst, size_t dst_sz) {
@@ -467,6 +469,7 @@ static void format_duration_hms(guint64 ns, char *buf, size_t buf_sz) {
 }
 
 static void osd_format_metric_value(const char *metric_key, double value, char *buf, size_t buf_sz);
+static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value);
 
 static const char *osd_pipeline_state_name(const PipelineState *ps) {
     if (!ps) {
@@ -668,6 +671,18 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         return 0;
     }
 
+    if (strncmp(key, "video.ctm.", 10) == 0) {
+        double sample = 0.0;
+        if (osd_metric_sample(ctx, key, &sample)) {
+            osd_format_metric_value(key, sample, buf, buf_sz);
+        } else if (ctx->have_ctm_metrics) {
+            osd_format_metric_value(key, 0.0, buf, buf_sz);
+        } else {
+            snprintf(buf, buf_sz, "n/a");
+        }
+        return 0;
+    }
+
     if (!ctx->have_stats) {
         if (strncmp(key, "udp.", 4) == 0) {
             snprintf(buf, buf_sz, "n/a");
@@ -775,6 +790,78 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
 
     char normalized[128];
     const char *metric = osd_metric_normalize(key, normalized, sizeof(normalized));
+
+    if (metric && strncmp(metric, "video.ctm.", 10) == 0) {
+        if (!ctx->have_ctm_metrics) {
+            return 0;
+        }
+        const VideoCtmMetrics *m = &ctx->ctm_metrics;
+        if (strcmp(metric, "video.ctm.gpu.issue_ms") == 0) {
+            *out_value = m->last_gpu_issue_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.gpu.wait_ms") == 0) {
+            *out_value = m->last_gpu_wait_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.gpu.total_ms") == 0) {
+            *out_value = m->last_gpu_total_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.gpu.issue.avg_ms") == 0) {
+            *out_value = m->avg_gpu_issue_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.gpu.wait.avg_ms") == 0) {
+            *out_value = m->avg_gpu_wait_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.gpu.total.avg_ms") == 0) {
+            *out_value = m->avg_gpu_total_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.gpu.issue.max_ms") == 0) {
+            *out_value = m->max_gpu_issue_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.gpu.wait.max_ms") == 0) {
+            *out_value = m->max_gpu_wait_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.gpu.total.max_ms") == 0) {
+            *out_value = m->max_gpu_total_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.convert.last_ms") == 0) {
+            *out_value = m->last_convert_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.convert.avg_ms") == 0) {
+            *out_value = m->avg_convert_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.convert.max_ms") == 0) {
+            *out_value = m->max_convert_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.frame.last_ms") == 0) {
+            *out_value = m->last_frame_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.frame.avg_ms") == 0) {
+            *out_value = m->avg_frame_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.frame.max_ms") == 0) {
+            *out_value = m->max_frame_ms;
+            return 1;
+        }
+        if (strcmp(metric, "video.ctm.frame.count") == 0) {
+            *out_value = (double)m->frame_count;
+            return 1;
+        }
+        return 0;
+    }
 
     if (!ctx->have_stats && metric && strncmp(metric, "udp.", 4) == 0) {
         return 0;
@@ -940,6 +1027,15 @@ static void osd_format_metric_value(const char *metric_key, double value, char *
 
     char normalized[128];
     const char *key = osd_metric_normalize(metric_key, normalized, sizeof(normalized));
+
+    if (key && strncmp(key, "video.ctm.", 10) == 0) {
+        if (strstr(key, ".count") != NULL) {
+            snprintf(buf, buf_sz, "%.0f", value);
+        } else {
+            snprintf(buf, buf_sz, "%.3f", value);
+        }
+        return;
+    }
 
     if (key && strncmp(key, "ext.value", 9) == 0) {
         snprintf(buf, buf_sz, "%.3f", value);
@@ -3055,6 +3151,8 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         .record_enabled = cfg ? cfg->record.enable : 0,
         .have_record_stats = 0,
         .external = ext,
+        .have_ctm_metrics = 0,
+        .ctm_metrics = {0},
     };
     if (ps && pipeline_get_receiver_stats(ps, &ctx.stats) == 0) {
         ctx.have_stats = 1;
@@ -3063,6 +3161,13 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         ctx.have_record_stats = 1;
     } else {
         memset(&ctx.rec_stats, 0, sizeof(ctx.rec_stats));
+    }
+
+    if (ps && pipeline_get_ctm_metrics(ps, &ctx.ctm_metrics) == 0) {
+        ctx.have_ctm_metrics = 1;
+    } else {
+        memset(&ctx.ctm_metrics, 0, sizeof(ctx.ctm_metrics));
+        ctx.have_ctm_metrics = 0;
     }
 
     for (int i = 0; i < o->element_count; ++i) {

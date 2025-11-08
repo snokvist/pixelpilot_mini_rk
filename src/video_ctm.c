@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <math.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <xf86drm.h>
@@ -91,6 +92,26 @@ typedef struct VideoCtmGpuState {
 static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm);
 static gboolean video_ctm_gpu_upload_gamma(VideoCtm *ctm);
 static void video_ctm_gpu_update_vertices(VideoCtm *ctm);
+
+static uint64_t video_ctm_monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void video_ctm_metrics_clear(VideoCtm *ctm) {
+    if (ctm == NULL) {
+        return;
+    }
+    memset(&ctm->metrics, 0, sizeof(ctm->metrics));
+}
+
+static guint64 video_ctm_metrics_add_sat(guint64 base, guint64 value) {
+    if (G_MAXUINT64 - base < value) {
+        return G_MAXUINT64;
+    }
+    return base + value;
+}
 
 static const GLfloat kCtmQuadVerticesDefault[] = {
     -1.0f, -1.0f, 0.0f, 0.0f,
@@ -787,6 +808,8 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     if (gpu == NULL) {
         return FALSE;
     }
+    uint64_t draw_start_ns = video_ctm_monotonic_ns();
+    ctm->metrics.pending_gpu_valid = FALSE;
     if (!eglMakeCurrent(gpu->display, gpu->surface, gpu->surface, gpu->context)) {
         return FALSE;
     }
@@ -838,6 +861,7 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_2D, 0);
     glActiveTexture(GL_TEXTURE0);
+    uint64_t wait_start_ns = video_ctm_monotonic_ns();
     if (gpu->egl_create_sync != NULL && gpu->egl_client_wait_sync != NULL && gpu->egl_destroy_sync != NULL) {
         EGLSyncKHR fence = gpu->egl_create_sync(gpu->display, EGL_SYNC_FENCE_KHR, NULL);
         if (fence != EGL_NO_SYNC_KHR) {
@@ -854,6 +878,17 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
     } else {
         glFinish();
     }
+    uint64_t wait_end_ns = video_ctm_monotonic_ns();
+    if (wait_end_ns < wait_start_ns) {
+        wait_end_ns = wait_start_ns;
+    }
+    if (wait_start_ns < draw_start_ns) {
+        wait_start_ns = draw_start_ns;
+    }
+    ctm->metrics.pending_gpu_issue_ns = wait_start_ns - draw_start_ns;
+    ctm->metrics.pending_gpu_wait_ns = wait_end_ns - wait_start_ns;
+    ctm->metrics.pending_gpu_total_ns = wait_end_ns - draw_start_ns;
+    ctm->metrics.pending_gpu_valid = TRUE;
     return TRUE;
 }
 
@@ -865,10 +900,12 @@ static int video_ctm_gpu_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t
     if (fourcc != DRM_FORMAT_NV12) {
         return -1;
     }
+    uint64_t frame_start_ns = video_ctm_monotonic_ns();
     if (!video_ctm_gpu_ensure_target(ctm, width, height)) {
         return -1;
     }
     if (!video_ctm_gpu_draw(ctm, src_fd, width, height, hor_stride, ver_stride)) {
+        ctm->metrics.pending_gpu_valid = FALSE;
         return -1;
     }
     VideoCtmGpuState *gpu = ctm->gpu_state;
@@ -880,10 +917,58 @@ static int video_ctm_gpu_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t
                                      rgba_stride_px, (int)height);
     rga_buffer_t dst = wrapbuffer_fd(dst_fd, (int)width, (int)height, RK_FORMAT_YCbCr_420_SP,
                                      (int)hor_stride, (int)ver_stride);
+    uint64_t convert_start_ns = video_ctm_monotonic_ns();
     IM_STATUS ret = imcvtcolor(src, dst, src.format, dst.format, IM_COLOR_SPACE_DEFAULT);
+    uint64_t convert_end_ns = video_ctm_monotonic_ns();
     if (ret != IM_STATUS_SUCCESS) {
         LOGW("Video CTM: RGBA->NV12 conversion after GPU pass failed: %s", imStrError(ret));
+        ctm->metrics.pending_gpu_valid = FALSE;
         return -1;
+    }
+    uint64_t convert_ns = convert_end_ns - convert_start_ns;
+    uint64_t frame_ns = convert_end_ns - frame_start_ns;
+    if (convert_end_ns < convert_start_ns) {
+        convert_ns = 0;
+    }
+    if (convert_end_ns < frame_start_ns) {
+        frame_ns = 0;
+    }
+    guint64 issue_ns = 0;
+    guint64 wait_ns = 0;
+    guint64 total_ns = 0;
+    if (ctm->metrics.pending_gpu_valid) {
+        issue_ns = ctm->metrics.pending_gpu_issue_ns;
+        wait_ns = ctm->metrics.pending_gpu_wait_ns;
+        total_ns = ctm->metrics.pending_gpu_total_ns;
+    }
+    ctm->metrics.pending_gpu_valid = FALSE;
+    ctm->metrics.last_gpu_issue_ns = issue_ns;
+    ctm->metrics.last_gpu_wait_ns = wait_ns;
+    ctm->metrics.last_gpu_total_ns = total_ns;
+    ctm->metrics.last_convert_ns = convert_ns;
+    ctm->metrics.last_frame_ns = frame_ns;
+    if (ctm->metrics.frame_count < G_MAXUINT64) {
+        ctm->metrics.frame_count++;
+    }
+    ctm->metrics.sum_gpu_issue_ns = video_ctm_metrics_add_sat(ctm->metrics.sum_gpu_issue_ns, issue_ns);
+    ctm->metrics.sum_gpu_wait_ns = video_ctm_metrics_add_sat(ctm->metrics.sum_gpu_wait_ns, wait_ns);
+    ctm->metrics.sum_gpu_total_ns = video_ctm_metrics_add_sat(ctm->metrics.sum_gpu_total_ns, total_ns);
+    ctm->metrics.sum_convert_ns = video_ctm_metrics_add_sat(ctm->metrics.sum_convert_ns, convert_ns);
+    ctm->metrics.sum_frame_ns = video_ctm_metrics_add_sat(ctm->metrics.sum_frame_ns, frame_ns);
+    if (issue_ns > ctm->metrics.max_gpu_issue_ns) {
+        ctm->metrics.max_gpu_issue_ns = issue_ns;
+    }
+    if (wait_ns > ctm->metrics.max_gpu_wait_ns) {
+        ctm->metrics.max_gpu_wait_ns = wait_ns;
+    }
+    if (total_ns > ctm->metrics.max_gpu_total_ns) {
+        ctm->metrics.max_gpu_total_ns = total_ns;
+    }
+    if (convert_ns > ctm->metrics.max_convert_ns) {
+        ctm->metrics.max_convert_ns = convert_ns;
+    }
+    if (frame_ns > ctm->metrics.max_frame_ns) {
+        ctm->metrics.max_frame_ns = frame_ns;
     }
     return 0;
 }
@@ -963,6 +1048,7 @@ void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg) {
         return;
     }
     memset(ctm, 0, sizeof(*ctm));
+    video_ctm_metrics_clear(ctm);
     video_ctm_set_identity(ctm);
     ctm->sharpness = 0.0;
     ctm->gamma_value = 1.0;
@@ -1041,6 +1127,7 @@ void video_ctm_reset(VideoCtm *ctm) {
         return;
     }
     video_ctm_disable_drm(ctm);
+    video_ctm_metrics_clear(ctm);
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
     if (ctm->gpu_state != NULL) {
         video_ctm_gpu_destroy(ctm);
@@ -1304,5 +1391,36 @@ void video_ctm_apply_update(VideoCtm *ctm, const VideoCtmUpdate *update) {
             gpu->flip_valid = FALSE;
         }
 #endif
+    }
+}
+
+void video_ctm_get_metrics(const VideoCtm *ctm, VideoCtmMetrics *out_metrics) {
+    if (out_metrics == NULL) {
+        return;
+    }
+    memset(out_metrics, 0, sizeof(*out_metrics));
+    if (ctm == NULL) {
+        return;
+    }
+    const guint64 frame_count = ctm->metrics.frame_count;
+    out_metrics->frame_count = frame_count;
+    const double ns_to_ms = 1.0 / 1000000.0;
+    out_metrics->last_gpu_issue_ms = (double)ctm->metrics.last_gpu_issue_ns * ns_to_ms;
+    out_metrics->last_gpu_wait_ms = (double)ctm->metrics.last_gpu_wait_ns * ns_to_ms;
+    out_metrics->last_gpu_total_ms = (double)ctm->metrics.last_gpu_total_ns * ns_to_ms;
+    out_metrics->last_convert_ms = (double)ctm->metrics.last_convert_ns * ns_to_ms;
+    out_metrics->last_frame_ms = (double)ctm->metrics.last_frame_ns * ns_to_ms;
+    out_metrics->max_gpu_issue_ms = (double)ctm->metrics.max_gpu_issue_ns * ns_to_ms;
+    out_metrics->max_gpu_wait_ms = (double)ctm->metrics.max_gpu_wait_ns * ns_to_ms;
+    out_metrics->max_gpu_total_ms = (double)ctm->metrics.max_gpu_total_ns * ns_to_ms;
+    out_metrics->max_convert_ms = (double)ctm->metrics.max_convert_ns * ns_to_ms;
+    out_metrics->max_frame_ms = (double)ctm->metrics.max_frame_ns * ns_to_ms;
+    if (frame_count > 0) {
+        double denom = (double)frame_count;
+        out_metrics->avg_gpu_issue_ms = (double)ctm->metrics.sum_gpu_issue_ns * ns_to_ms / denom;
+        out_metrics->avg_gpu_wait_ms = (double)ctm->metrics.sum_gpu_wait_ns * ns_to_ms / denom;
+        out_metrics->avg_gpu_total_ms = (double)ctm->metrics.sum_gpu_total_ns * ns_to_ms / denom;
+        out_metrics->avg_convert_ms = (double)ctm->metrics.sum_convert_ns * ns_to_ms / denom;
+        out_metrics->avg_frame_ms = (double)ctm->metrics.sum_frame_ns * ns_to_ms / denom;
     }
 }
