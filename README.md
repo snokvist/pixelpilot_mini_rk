@@ -116,8 +116,8 @@ to the defaults listed in `src/config.c` when omitted.
 | `[video.ctm].gamma-gain` | Scalar highlight gain applied before gamma, useful for overall exposure compensation. |
 | `[video.ctm].gamma-r-mult` / `.gamma-g-mult` / `.gamma-b-mult` | Per-channel multipliers for warm/cool balance before gamma (default `1.0`). |
 | `[video.ctm].flip` | `true` rotates the GPU path output by 180° (mirroring both axes); `false` keeps the natural orientation. |
-| `[video.ctm].wait-timeout-ms` | Upper bound (in milliseconds) to wait for the GPU fence before forcing a synchronous `glFinish`. `0` disables the timeout and blocks until the fence signals. |
-| `[video.ctm].wait-sleep-ms` | Optional delay inserted between fence polls while waiting for the timeout window, giving the CPU a chance to yield (default `0.25`). |
+| `[video.ctm].wait-timeout-ms` | Upper bound (in milliseconds) that the CPU waits on the GPU fence before forcing a blocking `glFinish`. `0` waits indefinitely; the default `2.0` keeps up with 90–120 FPS captures without starving the pipeline. Lower to `1.0–1.5` ms if you only target 60 FPS, or bump toward `3.0` ms when slower GPUs miss the deadline. |
+| `[video.ctm].wait-sleep-ms` | Optional delay inserted between fence polls while waiting for the timeout window, giving the CPU a chance to yield. Leave at `0` for the absolute lowest latency, or use the default `0.25` ms (up to `0.5` ms on big.LITTLE boards) to recover CPU time with a negligible latency hit. |
 | `[video.ctm].osd_valueN_metric` | Copy a CTM performance metric into `ext.valueN` (1-8) before drawing the OSD. Example: `osd_value1_metric = video.ctm.gpu_wait_ms`. |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
