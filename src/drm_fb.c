@@ -29,7 +29,14 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+static void init_dumbfb(struct DumbFB *out) {
+    if (out) {
+        memset(out, 0, sizeof(*out));
+    }
+}
+
 int create_argb_fb(int fd, int w, int h, uint32_t argb_fill, struct DumbFB *out) {
+    init_dumbfb(out);
     struct drm_mode_create_dumb creq = {0};
     creq.width = w;
     creq.height = h;
@@ -76,6 +83,44 @@ int create_argb_fb(int fd, int w, int h, uint32_t argb_fill, struct DumbFB *out)
     out->pitch = creq.pitch;
     out->size = creq.size;
     out->map = map;
+    out->w = w;
+    out->h = h;
+    return 0;
+}
+
+int create_nv12_linear_fb(int fd, int w, int h, struct DumbFB *out) {
+    init_dumbfb(out);
+    if (w <= 0 || h <= 0 || out == NULL) {
+        return -1;
+    }
+
+    uint32_t y_height = (uint32_t)h;
+    uint32_t uv_height = (uint32_t)((h + 1) / 2);
+
+    struct drm_mode_create_dumb creq = {0};
+    creq.width = (uint32_t)w;
+    creq.height = y_height + uv_height;
+    creq.bpp = 8;
+    if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq) < 0) {
+        return -1;
+    }
+
+    uint32_t handles[4] = {creq.handle, creq.handle, 0, 0};
+    uint32_t pitches[4] = {creq.pitch, creq.pitch, 0, 0};
+    uint32_t offsets[4] = {0, creq.pitch * y_height, 0, 0};
+    uint32_t fb_id = 0;
+
+    if (drmModeAddFB2(fd, (uint32_t)w, (uint32_t)h, DRM_FORMAT_NV12, handles, pitches, offsets, &fb_id, 0) != 0) {
+        struct drm_mode_destroy_dumb dreq = {.handle = creq.handle};
+        ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+        return -1;
+    }
+
+    out->fb_id = fb_id;
+    out->handle = creq.handle;
+    out->pitch = creq.pitch;
+    out->size = creq.size;
+    out->map = NULL;
     out->w = w;
     out->h = h;
     return 0;

@@ -359,8 +359,9 @@ int main(int argc, char **argv) {
     int connected = is_any_connected(fd, &cfg);
     if (connected) {
         if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
+            uint32_t active_video_plane = ms.video_plane_id ? ms.video_plane_id : (uint32_t)cfg.plane_id;
             if (cfg.osd_enable) {
-                if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
+                if (osd_setup(fd, &cfg, &ms, active_video_plane, &osd) == 0 && osd_is_active(&osd)) {
                     pipeline_maybe_set_stats(&ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
                 } else {
                     pipeline_maybe_set_stats(&ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
@@ -461,10 +462,11 @@ int main(int argc, char **argv) {
                     } else {
                         if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
                             connected = 1;
+                            uint32_t active_video_plane = ms.video_plane_id ? ms.video_plane_id : (uint32_t)cfg.plane_id;
                             if (cfg.osd_enable) {
                                 pipeline_maybe_set_stats(&ps, &stats_enabled_cached, FALSE);
                                 osd_teardown(fd, &osd);
-                                if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
+                                if (osd_setup(fd, &cfg, &ms, active_video_plane, &osd) == 0 && osd_is_active(&osd)) {
                                     pipeline_maybe_set_stats(&ps, &stats_enabled_cached, TRUE);
                                 } else {
                                     pipeline_maybe_set_stats(&ps, &stats_enabled_cached, FALSE);
@@ -517,7 +519,8 @@ int main(int argc, char **argv) {
                     }
                     if (!osd_is_enabled(&osd)) {
                         osd_teardown(fd, &osd);
-                        if (osd_setup(fd, &cfg, &ms, cfg.plane_id, &osd) == 0 && osd_is_active(&osd)) {
+                        uint32_t active_video_plane = ms.video_plane_id ? ms.video_plane_id : (uint32_t)cfg.plane_id;
+                        if (osd_setup(fd, &cfg, &ms, active_video_plane, &osd) == 0 && osd_is_active(&osd)) {
                             pipeline_maybe_set_stats(&ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
                             clock_gettime(CLOCK_MONOTONIC, &last_osd);
                         } else {

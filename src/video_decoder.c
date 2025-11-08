@@ -1219,7 +1219,8 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
 
     memset(vd, 0, sizeof(*vd));
     vd->drm_fd = -1;
-    vd->plane_id = (uint32_t)cfg->plane_id;
+    uint32_t video_plane = (ms->video_plane_id != 0) ? ms->video_plane_id : (uint32_t)cfg->plane_id;
+    vd->plane_id = video_plane;
     vd->crtc_id = ms->crtc_id;
     vd->mode_w = ms->mode_w;
     vd->mode_h = ms->mode_h;

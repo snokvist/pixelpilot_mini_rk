@@ -527,7 +527,13 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         return 0;
     }
     if (strcmp(key, "drm.video_plane_id") == 0) {
-        snprintf(buf, buf_sz, "%d", cfg ? cfg->plane_id : 0);
+        uint32_t plane = 0;
+        if (ctx->ms && ctx->ms->video_plane_id != 0) {
+            plane = ctx->ms->video_plane_id;
+        } else if (cfg) {
+            plane = (uint32_t)cfg->plane_id;
+        }
+        snprintf(buf, buf_sz, "%u", plane);
         return 0;
     }
     if (strcmp(key, "drm.osd_plane_id") == 0) {
