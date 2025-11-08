@@ -31,6 +31,9 @@ typedef struct VideoCtm {
     uint32_t hw_prop_id;
     uint32_t hw_blob_id;
     int render_fd;
+    uint32_t src_fourcc;
+    uint32_t dst_fourcc;
+    uint32_t dst_pitch;
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
     struct VideoCtmGpuState *gpu_state;
 #endif
@@ -87,10 +90,12 @@ void video_ctm_set_render_fd(VideoCtm *ctm, int drm_fd);
 void video_ctm_use_drm_property(VideoCtm *ctm, int drm_fd, uint32_t object_id,
                                 uint32_t object_type, uint32_t prop_id);
 void video_ctm_disable_drm(VideoCtm *ctm);
-int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t hor_stride,
-                      uint32_t ver_stride, uint32_t fourcc);
+int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t src_hor_stride,
+                      uint32_t src_ver_stride, uint32_t src_fourcc, uint32_t dst_pitch,
+                      uint32_t dst_fourcc);
 int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
-                      uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc);
+                      uint32_t src_hor_stride, uint32_t src_ver_stride, uint32_t src_fourcc,
+                      uint32_t dst_pitch, uint32_t dst_fourcc);
 void video_ctm_apply_update(VideoCtm *ctm, const VideoCtmUpdate *update);
 
 typedef struct VideoCtmMetrics {

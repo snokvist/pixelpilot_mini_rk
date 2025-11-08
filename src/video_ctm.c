@@ -13,9 +13,9 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm/drm_mode.h>
+#include <drm_fourcc.h>
 
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
-#include <drm_fourcc.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
@@ -680,6 +680,44 @@ static gboolean video_ctm_gpu_ensure_target(VideoCtm *ctm, uint32_t width, uint3
     return TRUE;
 }
 
+static EGLImageKHR video_ctm_gpu_bind_external_target(VideoCtm *ctm, int dst_fd, uint32_t width,
+                                                      uint32_t height, uint32_t pitch, uint32_t fourcc) {
+    VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
+    if (gpu == NULL || gpu->egl_create_image == NULL || gpu->gl_image_target_texture == NULL) {
+        return EGL_NO_IMAGE_KHR;
+    }
+    if (pitch == 0) {
+        pitch = width * 4u;
+    }
+    EGLint attrs[] = {
+        EGL_WIDTH, (EGLint)width,
+        EGL_HEIGHT, (EGLint)height,
+        EGL_LINUX_DRM_FOURCC_EXT, (EGLint)(fourcc != 0 ? fourcc : DRM_FORMAT_XRGB8888),
+        EGL_DMA_BUF_PLANE0_FD_EXT, dst_fd,
+        EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+        EGL_DMA_BUF_PLANE0_PITCH_EXT, (EGLint)pitch,
+        EGL_NONE
+    };
+    EGLImageKHR image = gpu->egl_create_image(gpu->display, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, attrs);
+    if (image == EGL_NO_IMAGE_KHR) {
+        return EGL_NO_IMAGE_KHR;
+    }
+    glBindTexture(GL_TEXTURE_2D, gpu->tex_dst);
+    gpu->gl_image_target_texture(GL_TEXTURE_2D, image);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, gpu->fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gpu->tex_dst, 0);
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        if (gpu->egl_destroy_image != NULL) {
+            gpu->egl_destroy_image(gpu->display, image);
+        }
+        return EGL_NO_IMAGE_KHR;
+    }
+    return image;
+}
+
 static gboolean video_ctm_gpu_upload_sharpness(VideoCtm *ctm) {
     VideoCtmGpuState *gpu = ctm != NULL ? ctm->gpu_state : NULL;
     if (gpu == NULL || gpu->loc_sharp_strength < 0) {
@@ -893,7 +931,8 @@ static gboolean video_ctm_gpu_draw(VideoCtm *ctm, int src_fd, uint32_t width, ui
 }
 
 static int video_ctm_gpu_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
-                                 uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc) {
+                                 uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc,
+                                 uint32_t dst_pitch, uint32_t dst_fourcc) {
     if (ctm == NULL || ctm->gpu_state == NULL) {
         return -1;
     }
@@ -901,37 +940,74 @@ static int video_ctm_gpu_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t
         return -1;
     }
     uint64_t frame_start_ns = video_ctm_monotonic_ns();
-    if (!video_ctm_gpu_ensure_target(ctm, width, height)) {
-        return -1;
-    }
-    if (!video_ctm_gpu_draw(ctm, src_fd, width, height, hor_stride, ver_stride)) {
-        ctm->metrics.pending_gpu_valid = FALSE;
-        return -1;
-    }
-    VideoCtmGpuState *gpu = ctm->gpu_state;
-    int rgba_stride_px = (int)(gpu->dst_stride / 4u);
-    if (rgba_stride_px <= 0) {
-        rgba_stride_px = (int)width;
-    }
-    rga_buffer_t src = wrapbuffer_fd(gpu->dst_fd, (int)width, (int)height, RK_FORMAT_RGBA_8888,
-                                     rgba_stride_px, (int)height);
-    rga_buffer_t dst = wrapbuffer_fd(dst_fd, (int)width, (int)height, RK_FORMAT_YCbCr_420_SP,
-                                     (int)hor_stride, (int)ver_stride);
-    uint64_t convert_start_ns = video_ctm_monotonic_ns();
-    IM_STATUS ret = imcvtcolor(src, dst, src.format, dst.format, IM_COLOR_SPACE_DEFAULT);
-    uint64_t convert_end_ns = video_ctm_monotonic_ns();
-    if (ret != IM_STATUS_SUCCESS) {
-        LOGW("Video CTM: RGBA->NV12 conversion after GPU pass failed: %s", imStrError(ret));
-        ctm->metrics.pending_gpu_valid = FALSE;
-        return -1;
-    }
-    uint64_t convert_ns = convert_end_ns - convert_start_ns;
-    uint64_t frame_ns = convert_end_ns - frame_start_ns;
-    if (convert_end_ns < convert_start_ns) {
-        convert_ns = 0;
-    }
-    if (convert_end_ns < frame_start_ns) {
-        frame_ns = 0;
+    gboolean dst_is_rgb = (dst_fourcc == DRM_FORMAT_XRGB8888 || dst_fourcc == DRM_FORMAT_ARGB8888 ||
+                           dst_fourcc == DRM_FORMAT_ABGR8888 || dst_fourcc == DRM_FORMAT_XBGR8888);
+    uint64_t convert_ns = 0;
+    uint64_t frame_ns = 0;
+    if (dst_is_rgb) {
+        EGLImageKHR target_image = video_ctm_gpu_bind_external_target(ctm, dst_fd, width, height, dst_pitch,
+                                                                      dst_fourcc != 0 ? dst_fourcc : DRM_FORMAT_XRGB8888);
+        if (target_image == EGL_NO_IMAGE_KHR) {
+            return -1;
+        }
+        if (!video_ctm_gpu_draw(ctm, src_fd, width, height, hor_stride, ver_stride)) {
+            VideoCtmGpuState *gpu = ctm->gpu_state;
+            if (gpu != NULL && gpu->egl_destroy_image != NULL) {
+                gpu->egl_destroy_image(gpu->display, target_image);
+            }
+            ctm->metrics.pending_gpu_valid = FALSE;
+            glBindFramebuffer(GL_FRAMEBUFFER, gpu != NULL ? gpu->fbo : 0);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return -1;
+        }
+        VideoCtmGpuState *gpu = ctm->gpu_state;
+        uint64_t frame_end_ns = video_ctm_monotonic_ns();
+        if (gpu != NULL) {
+            glBindFramebuffer(GL_FRAMEBUFFER, gpu->fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            if (gpu->egl_destroy_image != NULL) {
+                gpu->egl_destroy_image(gpu->display, target_image);
+            }
+        }
+        frame_ns = frame_end_ns - frame_start_ns;
+        if (frame_end_ns < frame_start_ns) {
+            frame_ns = 0;
+        }
+    } else {
+        if (!video_ctm_gpu_ensure_target(ctm, width, height)) {
+            return -1;
+        }
+        if (!video_ctm_gpu_draw(ctm, src_fd, width, height, hor_stride, ver_stride)) {
+            ctm->metrics.pending_gpu_valid = FALSE;
+            return -1;
+        }
+        VideoCtmGpuState *gpu = ctm->gpu_state;
+        int rgba_stride_px = (int)(gpu->dst_stride / 4u);
+        if (rgba_stride_px <= 0) {
+            rgba_stride_px = (int)width;
+        }
+        rga_buffer_t src = wrapbuffer_fd(gpu->dst_fd, (int)width, (int)height, RK_FORMAT_RGBA_8888,
+                                         rgba_stride_px, (int)height);
+        rga_buffer_t dst = wrapbuffer_fd(dst_fd, (int)width, (int)height, RK_FORMAT_YCbCr_420_SP,
+                                         (int)hor_stride, (int)ver_stride);
+        uint64_t convert_start_ns = video_ctm_monotonic_ns();
+        IM_STATUS ret = imcvtcolor(src, dst, src.format, dst.format, IM_COLOR_SPACE_DEFAULT);
+        uint64_t convert_end_ns = video_ctm_monotonic_ns();
+        if (ret != IM_STATUS_SUCCESS) {
+            LOGW("Video CTM: RGBA->NV12 conversion after GPU pass failed: %s", imStrError(ret));
+            ctm->metrics.pending_gpu_valid = FALSE;
+            return -1;
+        }
+        convert_ns = convert_end_ns - convert_start_ns;
+        frame_ns = convert_end_ns - frame_start_ns;
+        if (convert_end_ns < convert_start_ns) {
+            convert_ns = 0;
+        }
+        if (convert_end_ns < frame_start_ns) {
+            frame_ns = 0;
+        }
     }
     guint64 issue_ns = 0;
     guint64 wait_ns = 0;
@@ -1128,6 +1204,9 @@ void video_ctm_reset(VideoCtm *ctm) {
     }
     video_ctm_disable_drm(ctm);
     video_ctm_metrics_clear(ctm);
+    ctm->src_fourcc = 0;
+    ctm->dst_fourcc = 0;
+    ctm->dst_pitch = 0;
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
     if (ctm->gpu_state != NULL) {
         video_ctm_gpu_destroy(ctm);
@@ -1177,11 +1256,28 @@ void video_ctm_disable_drm(VideoCtm *ctm) {
  
 
 int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t hor_stride,
-                      uint32_t ver_stride, uint32_t fourcc) {
+                      uint32_t ver_stride, uint32_t fourcc, uint32_t dst_pitch,
+                      uint32_t dst_fourcc) {
     if (ctm == NULL || !ctm->enabled) {
         video_ctm_disable_drm(ctm);
         return 0;
     }
+    if (dst_fourcc == 0) {
+        dst_fourcc = DRM_FORMAT_NV12;
+    }
+    ctm->src_fourcc = fourcc;
+    ctm->dst_fourcc = dst_fourcc;
+    ctm->dst_pitch = dst_pitch;
+
+    gboolean dst_supported = (dst_fourcc == DRM_FORMAT_NV12 || dst_fourcc == DRM_FORMAT_XRGB8888 ||
+                              dst_fourcc == DRM_FORMAT_ARGB8888 || dst_fourcc == DRM_FORMAT_ABGR8888 ||
+                              dst_fourcc == DRM_FORMAT_XBGR8888);
+    if (!dst_supported) {
+        LOGW("Video CTM: unsupported destination DRM format 0x%08x", dst_fourcc);
+        ctm->enabled = FALSE;
+        return -1;
+    }
+
     if (video_ctm_gamma_active(ctm) && video_ctm_hw_available(ctm)) {
         if (ctm->hw_supported) {
             LOGW("Video CTM: gamma adjustments require GPU processing; disabling DRM CTM");
@@ -1233,12 +1329,6 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
             ctm->enabled = FALSE;
             return -1;
         }
-        if (!video_ctm_gpu_ensure_target(ctm, width, height)) {
-            LOGW("Video CTM: failed to allocate GPU render target; disabling transform");
-            video_ctm_gpu_destroy(ctm);
-            ctm->enabled = FALSE;
-            return -1;
-        }
         return 0;
     }
     return -1;
@@ -1246,7 +1336,8 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
 }
 
 int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
-                      uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc) {
+                      uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc,
+                      uint32_t dst_pitch, uint32_t dst_fourcc) {
     if (ctm == NULL || !ctm->enabled) {
         return -1;
     }
@@ -1271,15 +1362,20 @@ int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uin
         ctm->enabled = FALSE;
         return -1;
     }
-    if (ctm->gpu_state == NULL || !video_ctm_gpu_ensure_target(ctm, width, height)) {
-        if (video_ctm_prepare(ctm, width, height, eff_hor_stride, eff_ver_stride, fourcc) != 0) {
+    uint32_t effective_dst_fourcc = dst_fourcc != 0 ? dst_fourcc : DRM_FORMAT_NV12;
+    uint32_t effective_dst_pitch = dst_pitch;
+    if (ctm->gpu_state == NULL || ctm->dst_fourcc != effective_dst_fourcc ||
+        ctm->dst_pitch != effective_dst_pitch) {
+        if (video_ctm_prepare(ctm, width, height, eff_hor_stride, eff_ver_stride, fourcc, effective_dst_pitch,
+                              effective_dst_fourcc) != 0) {
             return -1;
         }
     }
     if (ctm->gpu_state == NULL) {
         return -1;
     }
-    int ret = video_ctm_gpu_process(ctm, src_fd, dst_fd, width, height, eff_hor_stride, eff_ver_stride, fourcc);
+    int ret = video_ctm_gpu_process(ctm, src_fd, dst_fd, width, height, eff_hor_stride, eff_ver_stride,
+                                    fourcc, ctm->dst_pitch, ctm->dst_fourcc);
     if (ret != 0) {
         LOGW("Video CTM: GPU processing failed; disabling transform");
         video_ctm_gpu_destroy(ctm);
