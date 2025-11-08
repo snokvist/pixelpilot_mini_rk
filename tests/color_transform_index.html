@@ -14,7 +14,6 @@
   .grid { display:grid; gap: var(--gap); }
   .grid.cols-2 { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .grid.cols-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
-  .grid.cols-6 { grid-template-columns: repeat(6, minmax(0,1fr)); }
   .field { background:#0f1320; border:1px solid #1b2132; border-radius: 12px; padding: 12px; }
   .field label { display:block; font-size:12px; opacity:.85; margin-bottom:6px; }
   .row { display:flex; align-items:center; gap:10px; }
@@ -50,12 +49,20 @@
       </div>
     </div>
 
+    <h2>Presets</h2>
+    <div class="actions">
+      <button class="secondary" id="presetVivid">Outdoor Vivid (aggressive)</button>
+      <button class="secondary" id="presetSafe">Outdoor Safe (no negatives)</button>
+      <button class="secondary" id="presetC1">C-1 (Neutral)</button>
+      <button class="secondary" id="presetC2">C-2 (Vivid)</button>
+      <button class="secondary" id="presetC3">C-3 (Warm Cinematic)</button>
+      <button class="secondary" id="presetC1toC3">C-1 → C-3 Match</button>
+    </div>
+
     <h2>3×3 Color Matrix (RGB → RGB)</h2>
     <div class="grid cols-3">
       <div class="field">
-        <div class="matrix" id="matrixGrid">
-          <!-- Rows R, G, B (m00 m01 m02 / m10 m11 m12 / m20 m21 m22) -->
-        </div>
+        <div class="matrix" id="matrixGrid"></div>
         <div class="actions" style="margin-top:10px;">
           <button class="secondary" id="identityBtn">Identity</button>
           <button class="secondary" id="boostContrastBtn">Boost diag +5%</button>
@@ -66,8 +73,8 @@
       <div class="field">
         <label>Sharpness (0–100)</label>
         <div class="row">
-          <input id="sharp" type="range" min="0" max="100" step="1" value="80">
-          <input id="sharpNum" type="number" min="0" max="100" step="1" value="80">
+          <input id="sharp" type="range" min="0" max="100" step="1" value="10">
+          <input id="sharpNum" type="number" min="0" max="100" step="1" value="10">
         </div>
         <label style="margin-top:10px;">Flip</label>
         <div class="row">
@@ -114,13 +121,14 @@
       <span id="status" class="tiny">idle</span>
     </div>
 
-    <h2>Preview of **outer** POST body</h2>
+    <h2>Preview of outer POST body</h2>
     <pre id="preview"></pre>
-    <div class="tiny">Note: <code>payload</code> is a JSON string (stringified inner object). This matches your <code>curl</code> example.</div>
+    <div class="tiny">Note: <code>payload</code> is a JSON string (stringified inner object) to match your <code>curl</code>.</div>
   </div>
 </div>
 
 <script>
+// ==== wiring ====
 const q = s => document.querySelector(s);
 const relayUrl = q("#relayUrl");
 const dstHost  = q("#dstHost");
@@ -142,6 +150,14 @@ const coolBtn = q("#coolBtn");
 const statusEl = q("#status");
 const previewEl = q("#preview");
 
+// Preset buttons
+const presetVividBtn = q("#presetVivid");
+const presetSafeBtn  = q("#presetSafe");
+const presetC1Btn    = q("#presetC1");
+const presetC2Btn    = q("#presetC2");
+const presetC3Btn    = q("#presetC3");
+const presetC1toC3Btn= q("#presetC1toC3");
+
 // Build 3x3 matrix inputs
 const matrixGrid = q("#matrixGrid");
 const mIds = [];
@@ -154,25 +170,19 @@ for (let r=0;r<3;r++){
     const num = document.createElement("input");
     num.type="number"; num.step="0.01"; num.value=(r===c)?1:0; num.min=-9; num.max=9; num.id=id;
     const lab = document.createElement("span");
-    lab.className="tiny";
-    lab.textContent = `m${r}${c}`;
+    lab.className="tiny"; lab.textContent = `m${r}${c}`;
     cell.appendChild(num); cell.appendChild(lab);
     matrixGrid.appendChild(cell);
   }
 }
 
-function getMatrix(){
-  return mIds.map(id => parseFloat(q("#"+id).value || "0"));
-}
-function setMatrix(vals){
-  mIds.forEach((id, i) => q("#"+id).value = (typeof vals[i] === "number" ? vals[i] : 0));
-}
-
+function getMatrix(){ return mIds.map(id => parseFloat(q("#"+id).value || "0")); }
+function setMatrix(vals){ mIds.forEach((id, i) => q("#"+id).value = (typeof vals[i] === "number" ? vals[i] : 0)); }
 function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 
 function getCTMObject(){
   const matrix = getMatrix();
-  const payload = {
+  return {
     ctm:{
       matrix: matrix.map(Number),
       sharpness: clamp(parseInt(sharp.value||sharpNum.value||"0",10), 0, 100),
@@ -183,23 +193,18 @@ function getCTMObject(){
       flip: !!flip.checked
     }
   };
-  return payload;
 }
 
 function outerPostBody(){
   const inner = getCTMObject();
-  const body = {
+  return {
     host: dstHost.value.trim(),
     port: parseInt(dstPort.value,10),
-    payload: JSON.stringify(inner) // <— stringify inner object exactly as your curl example
+    payload: JSON.stringify(inner) // stringify inner to match curl
   };
-  return body;
 }
 
-function refreshPreview(){
-  const body = outerPostBody();
-  previewEl.textContent = JSON.stringify(body, null, 2);
-}
+function refreshPreview(){ previewEl.textContent = JSON.stringify(outerPostBody(), null, 2); }
 
 let debounceT = null;
 function scheduleSend(){
@@ -235,7 +240,6 @@ function bindPair(rangeEl, numEl){
   rangeEl.addEventListener("input", ()=>{ numEl.value = rangeEl.value; scheduleSend(); });
   numEl.addEventListener("input", f);
 }
-
 bindPair(sharp, sharpNum);
 bindPair(gamma, gammaNum);
 bindPair(glift, gliftNum);
@@ -245,14 +249,108 @@ bindPair(ggain, ggainNum);
 [relayUrl, dstHost, dstPort, rm, gm, bm, flip].forEach(el => el.addEventListener("input", scheduleSend));
 mIds.forEach(id => q("#"+id).addEventListener("input", scheduleSend));
 
-// buttons
+// Quick helpers
+identityBtn.addEventListener("click", ()=>{ setMatrix([1,0,0, 0,1,0, 0,0,1]); scheduleSend(); });
+boostContrastBtn.addEventListener("click", ()=>{ setMatrix([1.05,0,0, 0,1.05,0, 0,0,1.05]); scheduleSend(); });
+satHintBtn.addEventListener("click", ()=>{ setMatrix([1.02,0.02,0.00, 0.02,1.02,0.00, 0.00,0.02,1.02]); scheduleSend(); });
+warmBtn.addEventListener("click", ()=>{ rm.value=1.020; gm.value=1.000; bm.value=0.985; scheduleSend(); });
+coolBtn.addEventListener("click", ()=>{ rm.value=0.985; gm.value=1.000; bm.value=1.020; scheduleSend(); });
+
+// ==== Your presets ====
+// Outdoor Vivid (aggressive) – deeper blacks & brighter whites, sharpness=10
+function applyPreset_Vivid(){
+  setMatrix([0.76,-0.21,-0.33,  0.27,1.18,0.25,  0.20,0.26,1.31]);
+  sharp.value = sharpNum.value = 10;
+  gamma.value = gammaNum.value = 1.30;
+  glift.value = gliftNum.value = -0.015;
+  ggain.value = ggainNum.value = 1.12;
+  rm.value = 1.02; gm.value = 1.02; bm.value = 1.05;
+  flip.checked = false;
+  scheduleSend();
+}
+// Outdoor Safe (no negatives) – deeper blacks & brighter whites, sharpness=10
+function applyPreset_Safe(){
+  setMatrix([1.08,0.03,0.00,  0.03,1.08,0.00,  0.00,0.05,1.14]);
+  sharp.value = sharpNum.value = 10;
+  gamma.value = gammaNum.value = 1.20;
+  glift.value = gliftNum.value = -0.015;
+  ggain.value = ggainNum.value = 1.07;
+  rm.value = 1.01; gm.value = 1.01; bm.value = 1.06;
+  flip.checked = false;
+  scheduleSend();
+}
+
+// C-1 (Neutral) — balanced, mild contrast; safe cross-mix; sharpness=10
+function applyPreset_C1(){
+  setMatrix([1.03,0.01,0.00,  0.01,1.03,0.00,  0.00,0.02,1.04]);
+  sharp.value = sharpNum.value = 10;
+  gamma.value = gammaNum.value = 1.05;
+  glift.value = gliftNum.value = -0.005;
+  ggain.value = ggainNum.value = 1.02;
+  rm.value = 1.000; gm.value = 1.000; bm.value = 1.000;
+  flip.checked = false;
+  scheduleSend();
+}
+
+// C-2 (Vivid) — more punch & color pop; positive cross-mix only; sharpness=10
+function applyPreset_C2(){
+  setMatrix([1.10,0.05,0.00,  0.05,1.10,0.00,  0.00,0.06,1.16]);
+  sharp.value = sharpNum.value = 10;
+  gamma.value = gammaNum.value = 1.18;
+  glift.value = gliftNum.value = -0.012;
+  ggain.value = ggainNum.value = 1.07;
+  rm.value = 1.02; gm.value = 1.01; bm.value = 1.03;
+  flip.checked = false;
+  scheduleSend();
+}
+
+// C-3 (Warm Cinematic) — gentle warm tilt, soft contrast; sharpness=10
+function applyPreset_C3(){
+  setMatrix([1.06,0.02,0.00,  0.02,1.02,0.00,  0.00,0.03,0.98]);
+  sharp.value = sharpNum.value = 10;
+  gamma.value = gammaNum.value = 1.12;
+  glift.value = gliftNum.value = -0.012;
+  ggain.value = ggainNum.value = 1.06;
+  rm.value = 1.03; gm.value = 1.00; bm.value = 0.97;
+  flip.checked = false;
+  scheduleSend();
+}
+
+// ★ C-1 → C-3 Match — fitted CTM + tone curve to transform C-1 into C-3; sharpness=10
+function applyPreset_C1toC3(){
+  // 3×3 (row-major: R',G',B')
+  setMatrix([
+    1.543, -0.147, -0.144,
+   -0.152,  1.610, -0.146,
+   -0.195, -0.146,  1.585
+  ]);
+  sharp.value = sharpNum.value = 10;
+  // tone curve tuned to C-3 target
+  gamma.value = gammaNum.value = 1.20;
+  glift.value = gliftNum.value = 0.005;   // tiny shadow lift (avoid crush in foliage)
+  ggain.value = ggainNum.value = 1.09;    // brighter whites
+  // subtle channel tilt to keep whites neutral
+  rm.value = 1.04; gm.value = 1.02; bm.value = 1.04;
+  flip.checked = false;
+  scheduleSend();
+}
+
+// Bind preset buttons
+presetVividBtn.addEventListener("click", applyPreset_Vivid);
+presetSafeBtn .addEventListener("click", applyPreset_Safe);
+presetC1Btn  .addEventListener("click", applyPreset_C1);
+presetC2Btn  .addEventListener("click", applyPreset_C2);
+presetC3Btn  .addEventListener("click", applyPreset_C3);
+presetC1toC3Btn.addEventListener("click", applyPreset_C1toC3);
+
+// Manual send & reset
 sendNowBtn.addEventListener("click", sendNow);
 resetAllBtn.addEventListener("click", ()=>{
   relayUrl.value = "http://192.168.2.20:55667/udp";
   dstHost.value = "192.168.2.20";
   dstPort.value = 5005;
   setMatrix([1,0,0, 0,1,0, 0,0,1]);
-  sharp.value = sharpNum.value = 80;
+  sharp.value = sharpNum.value = 10;
   gamma.value = gammaNum.value = 1.00;
   glift.value = gliftNum.value = 0.000;
   ggain.value = ggainNum.value = 1.00;
@@ -260,30 +358,6 @@ resetAllBtn.addEventListener("click", ()=>{
   flip.checked = false;
   autosend.checked = true;
   scheduleSend();
-});
-
-identityBtn.addEventListener("click", ()=>{
-  setMatrix([1,0,0, 0,1,0, 0,0,1]);
-  scheduleSend();
-});
-
-boostContrastBtn.addEventListener("click", ()=>{
-  // diag *1.05, others 0
-  setMatrix([1.05,0,0, 0,1.05,0, 0,0,1.05]);
-  scheduleSend();
-});
-
-satHintBtn.addEventListener("click", ()=>{
-  // tiny cross-mix towards “punch”
-  setMatrix([1.02,0.02,0.00, 0.02,1.02,0.00, 0.00,0.02,1.02]);
-  scheduleSend();
-});
-
-warmBtn.addEventListener("click", ()=>{
-  rm.value = 1.020; gm.value = 1.000; bm.value = 0.985; scheduleSend();
-});
-coolBtn.addEventListener("click", ()=>{
-  rm.value = 0.985; gm.value = 1.000; bm.value = 1.020; scheduleSend();
 });
 
 // initial paint
