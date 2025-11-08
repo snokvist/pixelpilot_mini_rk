@@ -31,12 +31,325 @@
 #endif
 
 #include <drm_fourcc.h>
+#include <drm/drm_mode.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #define DECODER_READ_BUF_SIZE (1024 * 1024)
 #define DECODER_MAX_FRAMES 24
 #define VIDEO_DECODER_MAX_PLANE_UPSCALE 4.0
+
+static gboolean create_test_nv12_fb(int fd, uint32_t width, uint32_t height, uint32_t *out_fb_id,
+                                    uint32_t *out_handle) {
+    if (out_fb_id == NULL || out_handle == NULL) {
+        return FALSE;
+    }
+
+    struct drm_mode_create_dumb dmcd;
+    memset(&dmcd, 0, sizeof(dmcd));
+    dmcd.width = width;
+    dmcd.height = height * 2;
+    dmcd.bpp = 8;
+
+    if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dmcd) != 0) {
+        return FALSE;
+    }
+
+    uint32_t handles[4] = {0};
+    uint32_t pitches[4] = {0};
+    uint32_t offsets[4] = {0};
+
+    handles[0] = dmcd.handle;
+    handles[1] = dmcd.handle;
+    pitches[0] = dmcd.pitch;
+    pitches[1] = dmcd.pitch;
+    offsets[0] = 0;
+    offsets[1] = dmcd.pitch * height;
+
+    uint32_t fb_id = 0;
+    if (drmModeAddFB2(fd, width, height, DRM_FORMAT_NV12, handles, pitches, offsets, &fb_id, 0) != 0) {
+        struct drm_mode_destroy_dumb destroy_req = {.handle = dmcd.handle};
+        ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_req);
+        return FALSE;
+    }
+
+    *out_fb_id = fb_id;
+    *out_handle = dmcd.handle;
+    return TRUE;
+}
+
+static void destroy_test_fb(int fd, uint32_t fb_id, uint32_t handle) {
+    if (fb_id != 0) {
+        drmModeRmFB(fd, fb_id);
+    }
+    if (handle != 0) {
+        struct drm_mode_destroy_dumb destroy_req = {.handle = handle};
+        ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_req);
+    }
+}
+
+static gboolean plane_has_linear_nv12_from_blob(int fd, uint32_t plane_id, gboolean *out_supported) {
+    if (out_supported == NULL) {
+        return FALSE;
+    }
+
+    *out_supported = FALSE;
+
+    drmModeObjectProperties *props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (props == NULL) {
+        return FALSE;
+    }
+
+    gboolean decided = FALSE;
+    for (uint32_t i = 0; i < props->count_props && !decided; ++i) {
+        drmModePropertyRes *prop = drmModeGetProperty(fd, props->props[i]);
+        if (prop == NULL) {
+            continue;
+        }
+
+        if ((prop->flags & DRM_MODE_PROP_BLOB) && g_strcmp0(prop->name, "IN_FORMATS") == 0) {
+            uint64_t blob_id = props->prop_values[i];
+            drmModePropertyBlobRes *blob = drmModeGetPropertyBlob(fd, blob_id);
+            if (blob != NULL && blob->data != NULL && blob->length >= sizeof(struct drm_format_modifier_blob)) {
+                const uint8_t *blob_bytes = (const uint8_t *)blob->data;
+                size_t blob_len = blob->length;
+                const struct drm_format_modifier_blob *fmt_blob = (const struct drm_format_modifier_blob *)blob_bytes;
+
+                size_t formats_offset = fmt_blob->formats_offset;
+                size_t modifiers_offset = fmt_blob->modifiers_offset;
+                size_t formats_size = (size_t)fmt_blob->count_formats * sizeof(uint32_t);
+                size_t modifiers_size = (size_t)fmt_blob->count_modifiers * sizeof(struct drm_format_modifier);
+
+                if (formats_offset <= blob_len && formats_size <= blob_len - formats_offset) {
+                    const uint32_t *formats = (const uint32_t *)(blob_bytes + formats_offset);
+                    int format_index = -1;
+                    for (uint32_t f = 0; f < fmt_blob->count_formats; ++f) {
+                        if (formats[f] == DRM_FORMAT_NV12) {
+                            format_index = (int)f;
+                            break;
+                        }
+                    }
+
+                    if (format_index < 0) {
+                        *out_supported = FALSE;
+                        decided = TRUE;
+                    } else if (fmt_blob->count_modifiers == 0) {
+                        /*
+                         * Drivers that expose IN_FORMATS without any modifier entries implicitly
+                         * advertise linear surfaces for the listed formats. Treat NV12 as
+                         * supported in this case so we avoid the atomic TEST_ONLY probe that can
+                         * trigger kernel warnings on incompatible planes.
+                         */
+                        *out_supported = TRUE;
+                        decided = TRUE;
+                    } else if (modifiers_offset > blob_len || modifiers_size > blob_len - modifiers_offset) {
+                        decided = FALSE;
+                    } else {
+                        const struct drm_format_modifier *mods =
+                            (const struct drm_format_modifier *)(blob_bytes + modifiers_offset);
+                        gboolean found_linear = FALSE;
+                        for (uint32_t m = 0; m < fmt_blob->count_modifiers; ++m) {
+                            const struct drm_format_modifier *mod = &mods[m];
+                            if (mod->modifier != DRM_FORMAT_MOD_LINEAR && mod->modifier != DRM_FORMAT_MOD_NONE) {
+                                continue;
+                            }
+                            if (format_index < (int)mod->offset || format_index >= (int)(mod->offset + 64)) {
+                                continue;
+                            }
+                            uint32_t bit = (uint32_t)(format_index - mod->offset);
+                            if (mod->formats & (1ull << bit)) {
+                                found_linear = TRUE;
+                                break;
+                            }
+                        }
+                        *out_supported = found_linear;
+                        decided = TRUE;
+                    }
+                }
+            }
+            if (blob != NULL) {
+                drmModeFreePropertyBlob(blob);
+            }
+        }
+
+        drmModeFreeProperty(prop);
+    }
+
+    drmModeFreeObjectProperties(props);
+    return decided;
+}
+
+static gboolean plane_accepts_linear_nv12_atomic(int fd, uint32_t plane_id, uint32_t crtc_id) {
+    uint32_t prop_fb_id = 0;
+    uint32_t prop_crtc_id = 0;
+    uint32_t prop_crtc_x = 0;
+    uint32_t prop_crtc_y = 0;
+    uint32_t prop_crtc_w = 0;
+    uint32_t prop_crtc_h = 0;
+    uint32_t prop_src_x = 0;
+    uint32_t prop_src_y = 0;
+    uint32_t prop_src_w = 0;
+    uint32_t prop_src_h = 0;
+
+    if (drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &prop_fb_id) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &prop_crtc_id) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_X", &prop_crtc_x) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y", &prop_crtc_y) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_W", &prop_crtc_w) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_H", &prop_crtc_h) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_X", &prop_src_x) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_Y", &prop_src_y) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_W", &prop_src_w) != 0 ||
+        drm_get_prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "SRC_H", &prop_src_h) != 0) {
+        return FALSE;
+    }
+
+    uint32_t fb_id = 0;
+    uint32_t handle = 0;
+    const uint32_t test_w = 64;
+    const uint32_t test_h = 64;
+
+    if (!create_test_nv12_fb(fd, test_w, test_h, &fb_id, &handle)) {
+        return FALSE;
+    }
+
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    if (req == NULL) {
+        destroy_test_fb(fd, fb_id, handle);
+        return FALSE;
+    }
+
+    const uint64_t src_w_q16 = (uint64_t)test_w << 16;
+    const uint64_t src_h_q16 = (uint64_t)test_h << 16;
+
+    drmModeAtomicAddProperty(req, plane_id, prop_fb_id, fb_id);
+    drmModeAtomicAddProperty(req, plane_id, prop_crtc_id, crtc_id);
+    drmModeAtomicAddProperty(req, plane_id, prop_crtc_x, 0);
+    drmModeAtomicAddProperty(req, plane_id, prop_crtc_y, 0);
+    drmModeAtomicAddProperty(req, plane_id, prop_crtc_w, test_w);
+    drmModeAtomicAddProperty(req, plane_id, prop_crtc_h, test_h);
+    drmModeAtomicAddProperty(req, plane_id, prop_src_x, 0);
+    drmModeAtomicAddProperty(req, plane_id, prop_src_y, 0);
+    drmModeAtomicAddProperty(req, plane_id, prop_src_w, src_w_q16);
+    drmModeAtomicAddProperty(req, plane_id, prop_src_h, src_h_q16);
+
+    gboolean ok = (drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) == 0);
+
+    drmModeAtomicFree(req);
+    destroy_test_fb(fd, fb_id, handle);
+    return ok;
+}
+
+static gboolean plane_accepts_linear_nv12(int fd, uint32_t plane_id, uint32_t crtc_id, int crtc_index) {
+    if (plane_id == 0 || crtc_id == 0) {
+        return FALSE;
+    }
+
+    drmModePlane *plane = drmModeGetPlane(fd, plane_id);
+    if (plane == NULL) {
+        return FALSE;
+    }
+
+    gboolean possible = TRUE;
+    if (crtc_index >= 0 && (plane->possible_crtcs & (1u << crtc_index)) == 0) {
+        possible = FALSE;
+    } else if (crtc_index < 0) {
+        drmModeRes *res = drmModeGetResources(fd);
+        if (res != NULL) {
+            for (int i = 0; i < res->count_crtcs; ++i) {
+                if ((uint32_t)res->crtcs[i] == crtc_id) {
+                    possible = ((plane->possible_crtcs & (1u << i)) != 0);
+                    break;
+                }
+            }
+            drmModeFreeResources(res);
+        }
+    }
+
+    gboolean has_nv12 = FALSE;
+    if (possible) {
+        for (uint32_t i = 0; i < plane->count_formats; ++i) {
+            if (plane->formats[i] == DRM_FORMAT_NV12) {
+                has_nv12 = TRUE;
+                break;
+            }
+        }
+    }
+
+    drmModeFreePlane(plane);
+
+    if (!possible || !has_nv12) {
+        return FALSE;
+    }
+
+    gboolean supported = FALSE;
+    if (plane_has_linear_nv12_from_blob(fd, plane_id, &supported)) {
+        return supported;
+    }
+
+    return plane_accepts_linear_nv12_atomic(fd, plane_id, crtc_id);
+}
+
+static gboolean video_decoder_select_plane(int fd, uint32_t crtc_id, uint32_t requested,
+                                           uint32_t *out_plane) {
+    if (out_plane == NULL) {
+        return FALSE;
+    }
+
+    drmModePlaneRes *pres = drmModeGetPlaneResources(fd);
+    if (pres == NULL) {
+        return FALSE;
+    }
+
+    drmModeRes *res = drmModeGetResources(fd);
+    int crtc_index = -1;
+    if (res != NULL) {
+        for (int i = 0; i < res->count_crtcs; ++i) {
+            if ((uint32_t)res->crtcs[i] == crtc_id) {
+                crtc_index = i;
+                break;
+            }
+        }
+    }
+
+    gboolean found = FALSE;
+
+    if (requested != 0) {
+        if (plane_accepts_linear_nv12(fd, requested, crtc_id, crtc_index)) {
+            *out_plane = requested;
+            found = TRUE;
+        } else {
+            LOGW("Video decoder: requested plane %u does not support linear NV12 on CRTC %u; searching for alternative",
+                 requested, crtc_id);
+        }
+    }
+
+    for (uint32_t i = 0; !found && i < pres->count_planes; ++i) {
+        uint32_t plane_id = pres->planes[i];
+        if (plane_id == requested) {
+            continue;
+        }
+
+        if (plane_accepts_linear_nv12(fd, plane_id, crtc_id, crtc_index)) {
+            *out_plane = plane_id;
+            found = TRUE;
+        }
+    }
+
+    if (!found) {
+        LOGE("Video decoder: no NV12-compatible plane available on CRTC %u", crtc_id);
+    } else if (requested != 0 && *out_plane != requested) {
+        LOGI("Video decoder: using plane %u instead of requested plane %u", *out_plane, requested);
+    } else if (requested == 0) {
+        LOGI("Video decoder: auto-selected plane %u for linear NV12", *out_plane);
+    }
+
+    if (res != NULL) {
+        drmModeFreeResources(res);
+    }
+    drmModeFreePlaneResources(pres);
+    return found;
+}
 
 static gboolean video_decoder_fourcc_is_rgb(uint32_t fourcc) {
     return (fourcc == DRM_FORMAT_XRGB8888 || fourcc == DRM_FORMAT_ARGB8888 ||
@@ -1239,6 +1552,13 @@ size_t video_decoder_max_packet_size(const VideoDecoder *vd) {
     return vd->packet_buf_size;
 }
 
+uint32_t video_decoder_get_plane_id(const VideoDecoder *vd) {
+    if (vd == NULL) {
+        return 0;
+    }
+    return vd->plane_id;
+}
+
 void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *update) {
     if (vd == NULL || update == NULL || update->fields == 0) {
         return;
@@ -1290,7 +1610,7 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
 
     memset(vd, 0, sizeof(*vd));
     vd->drm_fd = -1;
-    vd->plane_id = (uint32_t)cfg->plane_id;
+    vd->plane_id = 0;
     vd->crtc_id = ms->crtc_id;
     vd->mode_w = ms->mode_w;
     vd->mode_h = ms->mode_h;
@@ -1300,6 +1620,16 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->frame_ver_stride = 0;
     vd->ctm_fourcc = 0;
     vd->ctm_pitch = 0;
+    vd->packet_buf_size = 0;
+    vd->packet_buf = NULL;
+
+    uint32_t chosen_plane = 0;
+    if (!video_decoder_select_plane(drm_fd, vd->crtc_id, (uint32_t)cfg->plane_id, &chosen_plane)) {
+        LOGE("Video decoder: unable to find NV12-capable plane for CRTC %u", vd->crtc_id);
+        return -1;
+    }
+    vd->plane_id = chosen_plane;
+
     vd->packet_buf_size = DECODER_READ_BUF_SIZE;
     vd->packet_buf = g_malloc0(vd->packet_buf_size);
     if (vd->packet_buf == NULL) {

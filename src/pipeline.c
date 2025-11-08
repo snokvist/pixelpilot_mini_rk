@@ -1312,6 +1312,13 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     }
     ps->decoder_initialized = TRUE;
 
+    uint32_t active_plane = video_decoder_get_plane_id(ps->decoder);
+    if (active_plane != 0 && (uint32_t)cfg->plane_id != active_plane) {
+        AppCfg *mutable_cfg = (AppCfg *)cfg;
+        LOGI("Video decoder: updating configured video plane id to %u", active_plane);
+        mutable_cfg->plane_id = (int)active_plane;
+    }
+
     video_decoder_set_idr_requester(ps->decoder, ps->idr_requester);
 
     if (video_decoder_start(ps->decoder) != 0) {

@@ -45,5 +45,6 @@ int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecode
 size_t video_decoder_max_packet_size(const VideoDecoder *vd);
 void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *update);
 void video_decoder_get_ctm_metrics(const VideoDecoder *vd, VideoCtmMetrics *metrics);
+uint32_t video_decoder_get_plane_id(const VideoDecoder *vd);
 
 #endif // VIDEO_DECODER_H
