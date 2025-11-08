@@ -34,6 +34,28 @@ typedef struct VideoCtm {
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
     struct VideoCtmGpuState *gpu_state;
 #endif
+    struct {
+        guint64 frame_count;
+        guint64 last_gpu_issue_ns;
+        guint64 last_gpu_wait_ns;
+        guint64 last_gpu_total_ns;
+        guint64 last_convert_ns;
+        guint64 last_frame_ns;
+        guint64 sum_gpu_issue_ns;
+        guint64 sum_gpu_wait_ns;
+        guint64 sum_gpu_total_ns;
+        guint64 sum_convert_ns;
+        guint64 sum_frame_ns;
+        guint64 max_gpu_issue_ns;
+        guint64 max_gpu_wait_ns;
+        guint64 max_gpu_total_ns;
+        guint64 max_convert_ns;
+        guint64 max_frame_ns;
+        guint64 pending_gpu_issue_ns;
+        guint64 pending_gpu_wait_ns;
+        guint64 pending_gpu_total_ns;
+        gboolean pending_gpu_valid;
+    } metrics;
 } VideoCtm;
 
 #define VIDEO_CTM_UPDATE_MATRIX (1u << 0)
@@ -70,5 +92,26 @@ int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t h
 int video_ctm_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t width, uint32_t height,
                       uint32_t hor_stride, uint32_t ver_stride, uint32_t fourcc);
 void video_ctm_apply_update(VideoCtm *ctm, const VideoCtmUpdate *update);
+
+typedef struct VideoCtmMetrics {
+    guint64 frame_count;
+    double last_gpu_issue_ms;
+    double last_gpu_wait_ms;
+    double last_gpu_total_ms;
+    double last_convert_ms;
+    double last_frame_ms;
+    double avg_gpu_issue_ms;
+    double avg_gpu_wait_ms;
+    double avg_gpu_total_ms;
+    double avg_convert_ms;
+    double avg_frame_ms;
+    double max_gpu_issue_ms;
+    double max_gpu_wait_ms;
+    double max_gpu_total_ms;
+    double max_convert_ms;
+    double max_frame_ms;
+} VideoCtmMetrics;
+
+void video_ctm_get_metrics(const VideoCtm *ctm, VideoCtmMetrics *out_metrics);
 
 #endif // VIDEO_CTM_H

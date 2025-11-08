@@ -1558,6 +1558,18 @@ int pipeline_get_recording_stats(const PipelineState *ps, PipelineRecordingStats
     return 0;
 }
 
+int pipeline_get_ctm_metrics(const PipelineState *ps, VideoCtmMetrics *metrics) {
+    if (metrics == NULL) {
+        return -1;
+    }
+    memset(metrics, 0, sizeof(*metrics));
+    if (ps == NULL || !ps->decoder_initialized || ps->decoder == NULL) {
+        return -1;
+    }
+    video_decoder_get_ctm_metrics(ps->decoder, metrics);
+    return 0;
+}
+
 gboolean pipeline_consume_reinit_request(PipelineState *ps) {
     if (ps == NULL || !ps->initialized) {
         return FALSE;

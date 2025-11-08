@@ -75,6 +75,7 @@ gboolean pipeline_is_recording(const PipelineState *ps);
 int pipeline_enable_recording(PipelineState *ps, const RecordCfg *cfg);
 void pipeline_disable_recording(PipelineState *ps);
 int pipeline_get_recording_stats(const PipelineState *ps, PipelineRecordingStats *stats);
+int pipeline_get_ctm_metrics(const PipelineState *ps, VideoCtmMetrics *metrics);
 gboolean pipeline_consume_reinit_request(PipelineState *ps);
 void pipeline_apply_zoom_command(PipelineState *ps, gboolean enabled, const VideoDecoderZoomRequest *request);
 void pipeline_apply_ctm_update(PipelineState *ps, const VideoCtmUpdate *update);

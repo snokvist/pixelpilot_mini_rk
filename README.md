@@ -78,6 +78,25 @@ The payload may contain a subset of the keys to update only the fields you care 
 }
 ```
 
+### CTM performance telemetry
+
+The GPU CTM path now timestamps its hot spots so you can monitor how much CPU time each frame spends waiting on the fragment
+shader and the follow-up RGA conversion. Every successful GPU pass records the most recent sample together with running averages
+and peaks. The metrics surface through the OSD token namespace under `video.ctm.*` and therefore integrate with the existing
+layout system. The most commonly useful counters are:
+
+* `video.ctm.gpu.issue_ms` – CPU time spent issuing GL work before the GPU fence is inserted.
+* `video.ctm.gpu.wait_ms` / `video.ctm.gpu.total_ms` – time spent waiting for the GPU to finish the CTM shader.
+* `video.ctm.convert.last_ms` – CPU time consumed by the RGBA→NV12 conversion executed after the shader.
+* `video.ctm.frame.last_ms` – total wall-clock time for the CTM stage (shader + conversion).
+* `video.ctm.*.avg_ms` / `video.ctm.*.max_ms` – rolling averages and high-water marks for the same phases.
+* `video.ctm.frame.count` – number of frames that have flowed through the GPU backend since the last reset.
+
+Update `config/osd-external-test.ini` or your own layout to plot or display any of these fields directly (for example,
+`metric = video.ctm.gpu.wait_ms`). The refreshed sample configuration already maps the CTM timings onto the external-value plots
+and augments the text widget with per-frame statistics so you can watch the numbers climb when enabling gamma tweaks or pushing
+the decoder to higher refresh rates.
+
 ## Configuration via INI
 
 All command-line options can be provided in an INI file and loaded with `--config /path/to/file.ini`. The parser merges the INI
