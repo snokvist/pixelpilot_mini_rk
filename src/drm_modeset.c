@@ -1,5 +1,4 @@
 #include "drm_modeset.h"
-#include "drm_fb.h"
 #include "drm_props.h"
 #include "logging.h"
 
@@ -64,7 +63,17 @@ static int vrefresh(const drmModeModeInfo *m) {
     return 0;
 }
 
+static inline int mode_is_preferred(const drmModeModeInfo *m) {
+    return (m->type & DRM_MODE_TYPE_PREFERRED) ? 1 : 0;
+}
+
 static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
+    int ap = mode_is_preferred(a);
+    int bp = mode_is_preferred(b);
+    if (ap != bp) {
+        return ap > bp;
+    }
+
     int ahz = vrefresh(a), bhz = vrefresh(b);
     if (ahz != bhz) {
         return ahz > bhz;
@@ -73,11 +82,6 @@ static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
     long long bb = (long long)b->hdisplay * b->vdisplay;
     if (aa != bb) {
         return aa > bb;
-    }
-    int ap = (a->type & DRM_MODE_TYPE_PREFERRED) ? 1 : 0;
-    int bp = (b->type & DRM_MODE_TYPE_PREFERRED) ? 1 : 0;
-    if (ap != bp) {
-        return ap > bp;
     }
     return a->clock > b->clock;
 }
@@ -172,19 +176,9 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     int hz = vrefresh(&best);
     LOGI("Chosen: %s id=%u  %dx%d@%d  CRTC=%d  plane=%d", cname, conn->connector_id, w, h, hz, crtc->crtc_id, cfg->plane_id);
 
-    struct DumbFB fb = {0};
-    if (create_argb_fb(fd, w, h, 0xFF000000u, &fb) != 0) {
-        LOGE("create_argb_fb failed: %s", strerror(errno));
-        drmModeFreeConnector(conn);
-        drmModeFreeCrtc(crtc);
-        drmModeFreeResources(res);
-        return -3;
-    }
-
     uint32_t mode_blob = 0;
     if (drmModeCreatePropertyBlob(fd, &best, sizeof(best), &mode_blob) != 0) {
         LOGE("drmModeCreatePropertyBlob failed: %s", strerror(errno));
-        destroy_dumb_fb(fd, &fb);
         drmModeFreeConnector(conn);
         drmModeFreeCrtc(crtc);
         drmModeFreeResources(res);
@@ -195,7 +189,6 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     if (!req) {
         LOGE("drmModeAtomicAlloc failed");
         drmModeDestroyPropertyBlob(fd, mode_blob);
-        destroy_dumb_fb(fd, &fb);
         drmModeFreeConnector(conn);
         drmModeFreeCrtc(crtc);
         drmModeFreeResources(res);
@@ -231,16 +224,19 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_W", &plane_src_w);
     drm_get_prop_id(fd, cfg->plane_id, DRM_MODE_OBJECT_PLANE, "SRC_H", &plane_src_h);
 
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_fb_id, fb.fb_id);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_id, crtc->crtc_id);
+    // Disable the video plane until the decoder attaches a real framebuffer.
+    // Some hardware (e.g. Rockchip VOP2 cluster planes) reject linear dummy
+    // buffers, so keep the plane idle instead of binding a placeholder FB.
+    drmModeAtomicAddProperty(req, cfg->plane_id, plane_fb_id, 0);
+    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_id, 0);
     drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_x, 0);
     drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_y, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_w, w);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_h, h);
+    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_w, 0);
+    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_h, 0);
     drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_x, 0);
     drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_y, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_w, (uint64_t)w << 16);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_h, (uint64_t)h << 16);
+    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_w, 0);
+    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_h, 0);
 
     if (have_zpos) {
         uint64_t v_z = zmax;
@@ -256,7 +252,6 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         LOGE("drmModeAtomicCommit failed: %s", strerror(errno));
         drmModeAtomicFree(req);
         drmModeDestroyPropertyBlob(fd, mode_blob);
-        destroy_dumb_fb(fd, &fb);
         drmModeFreeConnector(conn);
         drmModeFreeCrtc(crtc);
         drmModeFreeResources(res);
@@ -267,7 +262,6 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
 
     drmModeAtomicFree(req);
     drmModeDestroyPropertyBlob(fd, mode_blob);
-    destroy_dumb_fb(fd, &fb);
 
     if (out) {
         out->connector_id = conn->connector_id;
