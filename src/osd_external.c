@@ -350,8 +350,16 @@ static const char *skip_json_value(const char *p) {
         while (*p && depth > 0) {
             if (*p == '{') {
                 depth++;
+                ++p;
+                continue;
             } else if (*p == '}') {
                 depth--;
+                if (depth == 0) {
+                    ++p;
+                    break;
+                }
+                ++p;
+                continue;
             } else if (*p == '"') {
                 const char *tmp = parse_string(p, NULL, 0);
                 if (!tmp) {
@@ -365,7 +373,7 @@ static const char *skip_json_value(const char *p) {
         if (depth != 0) {
             return NULL;
         }
-        return p + 1;
+        return p;
     }
     if (*p == '[') {
         int depth = 1;
@@ -373,8 +381,16 @@ static const char *skip_json_value(const char *p) {
         while (*p && depth > 0) {
             if (*p == '[') {
                 depth++;
+                ++p;
+                continue;
             } else if (*p == ']') {
                 depth--;
+                if (depth == 0) {
+                    ++p;
+                    break;
+                }
+                ++p;
+                continue;
             } else if (*p == '"') {
                 const char *tmp = parse_string(p, NULL, 0);
                 if (!tmp) {
@@ -388,7 +404,7 @@ static const char *skip_json_value(const char *p) {
         if (depth != 0) {
             return NULL;
         }
-        return p + 1;
+        return p;
     }
     if (*p == '"') {
         return parse_string(p, NULL, 0);
