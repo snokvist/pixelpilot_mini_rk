@@ -61,20 +61,6 @@ static void video_decoder_fourcc_to_string(uint32_t fourcc, char out[5]) {
     out[4] = '\0';
 }
 
-static void video_decoder_log_ctm_target(const VideoDecoder *vd, const char *context) {
-    if (vd == NULL || !vd->ctm.enabled) {
-        return;
-    }
-    uint32_t dst_fourcc = vd->ctm_fourcc != 0 ? vd->ctm_fourcc : DRM_FORMAT_NV12;
-    gboolean dst_is_rgb = video_decoder_fourcc_is_rgb(dst_fourcc);
-    char dst_str[5];
-    video_decoder_fourcc_to_string(dst_fourcc, dst_str);
-    if (context == NULL) {
-        context = "configured";
-    }
-    LOGI("Video decoder: CTM %s to use %s target (fourcc=%s, pitch=%u)", context,
-         dst_is_rgb ? "RGB" : "NV12", dst_str, vd->ctm_pitch);
-}
 /*
  * RK356x VOP planes sampling NV12 surfaces expect crop widths/heights that
  * align to chroma blocks and even source offsets. Align crops to 4 pixels in
@@ -154,6 +140,21 @@ struct VideoDecoder {
     uint32_t ctm_fourcc;
     uint32_t ctm_pitch;
 };
+
+static void video_decoder_log_ctm_target(const VideoDecoder *vd, const char *context) {
+    if (vd == NULL || !vd->ctm.enabled) {
+        return;
+    }
+    uint32_t dst_fourcc = vd->ctm_fourcc != 0 ? vd->ctm_fourcc : DRM_FORMAT_NV12;
+    gboolean dst_is_rgb = video_decoder_fourcc_is_rgb(dst_fourcc);
+    char dst_str[5];
+    video_decoder_fourcc_to_string(dst_fourcc, dst_str);
+    if (context == NULL) {
+        context = "configured";
+    }
+    LOGI("Video decoder: CTM %s to use %s target (fourcc=%s, pitch=%u)", context,
+         dst_is_rgb ? "RGB" : "NV12", dst_str, vd->ctm_pitch);
+}
 
 VideoDecoder *video_decoder_new(void) {
     return g_new0(VideoDecoder, 1);
