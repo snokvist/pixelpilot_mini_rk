@@ -65,14 +65,17 @@ static void osd_external_update_expiry_locked(OsdExternalBridge *bridge) {
     bridge->snapshot.expiry_ns = next_expiry;
 }
 
+static double osd_external_missing_value(void) {
+    return nan("");
+}
+
 static void osd_external_reset_locked(OsdExternalBridge *bridge) {
     if (!bridge) {
         return;
     }
     memset(bridge->snapshot.text, 0, sizeof(bridge->snapshot.text));
-    memset(bridge->snapshot.value_valid, 0, sizeof(bridge->snapshot.value_valid));
     for (size_t i = 0; i < ARRAY_SIZE(bridge->snapshot.value); ++i) {
-        bridge->snapshot.value[i] = 0.0;
+        bridge->snapshot.value[i] = osd_external_missing_value();
     }
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
@@ -102,8 +105,7 @@ static void osd_external_expire_locked(OsdExternalBridge *bridge, uint64_t now_n
         if (slot->value_active && slot->value_expiry_ns > 0 && now_ns >= slot->value_expiry_ns && i < OSD_EXTERNAL_MAX_VALUES) {
             slot->value_active = 0;
             slot->value_expiry_ns = 0;
-            bridge->snapshot.value[i] = 0.0;
-            bridge->snapshot.value_valid[i] = 0;
+            bridge->snapshot.value[i] = osd_external_missing_value();
             if (!slot->text_active) {
                 slot->is_metric = 0;
             }
@@ -113,9 +115,6 @@ static void osd_external_expire_locked(OsdExternalBridge *bridge, uint64_t now_n
             slot->text_expiry_ns = 0;
             slot->value_expiry_ns = 0;
             slot->is_metric = 0;
-            if (i < OSD_EXTERNAL_MAX_VALUES) {
-                bridge->snapshot.value_valid[i] = 0;
-            }
         }
     }
     osd_external_update_expiry_locked(bridge);
@@ -709,13 +708,12 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
     if (msg->has_value && msg->value_count == 0) {
         for (size_t i = 0; i < value_limit; ++i) {
             OsdExternalSlotState *slot = &bridge->slots[i];
-            if (slot->value_active || bridge->snapshot.value[i] != 0.0 || bridge->snapshot.value_valid[i]) {
+            if (slot->value_active || !isnan(bridge->snapshot.value[i])) {
                 changed = 1;
             }
             slot->value_active = 0;
             slot->value_expiry_ns = 0;
-            bridge->snapshot.value[i] = 0.0;
-            bridge->snapshot.value_valid[i] = 0;
+            bridge->snapshot.value[i] = osd_external_missing_value();
             if (!slot->text_active) {
                 slot->is_metric = 0;
             }
@@ -754,14 +752,13 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
                     slot->text_expiry_ns = 0;
                 }
                 if (!value_present || i >= value_limit) {
-                    if (slot->value_active || (i < value_limit && bridge->snapshot.value_valid[i])) {
+                    if (slot->value_active || (i < value_limit && !isnan(bridge->snapshot.value[i]))) {
                         changed = 1;
                     }
                     slot->value_active = 0;
                     slot->value_expiry_ns = 0;
                     if (i < value_limit) {
-                        bridge->snapshot.value[i] = 0.0;
-                        bridge->snapshot.value_valid[i] = 0;
+                        bridge->snapshot.value[i] = osd_external_missing_value();
                     }
                     slot->is_metric = 0;
                 }
@@ -773,22 +770,20 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
             int locked_by_text = slot->text_active && slot->text_expiry_ns > now_ns && !slot->is_metric && !has_ttl_field;
             if (!ttl_guard && !locked_by_text) {
                 if (!isfinite(incoming_value)) {
-                    if (slot->value_active || bridge->snapshot.value_valid[i]) {
+                    if (slot->value_active || !isnan(bridge->snapshot.value[i])) {
                         changed = 1;
                     }
                     slot->value_active = 0;
                     slot->value_expiry_ns = 0;
-                    bridge->snapshot.value[i] = 0.0;
-                    bridge->snapshot.value_valid[i] = 0;
+                    bridge->snapshot.value[i] = osd_external_missing_value();
                     if (!slot->text_active) {
                         slot->is_metric = 0;
                     }
                 } else {
-                    if (!slot->value_active || bridge->snapshot.value[i] != incoming_value || !bridge->snapshot.value_valid[i]) {
+                    if (!slot->value_active || isnan(bridge->snapshot.value[i]) || bridge->snapshot.value[i] != incoming_value) {
                         changed = 1;
                     }
                     bridge->snapshot.value[i] = incoming_value;
-                    bridge->snapshot.value_valid[i] = 1;
                     slot->value_active = 1;
                     slot->is_metric = 1;
                     if (has_ttl_field) {
@@ -814,15 +809,9 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
                 bridge->snapshot.text[i][0] = '\0';
                 changed = 1;
             }
-            if (i < value_limit) {
-                if (bridge->snapshot.value[i] != 0.0) {
-                    bridge->snapshot.value[i] = 0.0;
-                    changed = 1;
-                }
-                if (bridge->snapshot.value_valid[i]) {
-                    bridge->snapshot.value_valid[i] = 0;
-                    changed = 1;
-                }
+            if (i < value_limit && !isnan(bridge->snapshot.value[i])) {
+                bridge->snapshot.value[i] = osd_external_missing_value();
+                changed = 1;
             }
         }
     }
