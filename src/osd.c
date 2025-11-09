@@ -249,6 +249,8 @@ static int osd_outline_compute_thickness(const OSD *o, const OsdOutlineConfig *c
     return thickness;
 }
 
+static void osd_damage_add_rect(OSD *o, int x, int y, int w, int h);
+
 static void osd_outline_clear(OSD *o, int thickness) {
     if (!o || thickness <= 0 || o->w <= 0 || o->h <= 0) {
         return;
