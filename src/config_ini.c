@@ -257,6 +257,23 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
             if (elem->data.bar.bar_width_px <= 0) {
                 elem->data.bar.bar_width_px = 8;
             }
+        } else if (elem->type == OSD_WIDGET_OUTLINE) {
+            if (elem->data.outline.thickness_px <= 0) {
+                elem->data.outline.thickness_px = 8;
+            }
+            if (elem->data.outline.pattern_length_px <= 0) {
+                elem->data.outline.pattern_length_px = 48;
+            }
+            if (elem->data.outline.pattern_active_px <= 0 ||
+                elem->data.outline.pattern_active_px > elem->data.outline.pattern_length_px) {
+                elem->data.outline.pattern_active_px = elem->data.outline.pattern_length_px / 2;
+                if (elem->data.outline.pattern_active_px <= 0) {
+                    elem->data.outline.pattern_active_px = elem->data.outline.pattern_length_px;
+                }
+            }
+            if (elem->data.outline.speed_px <= 0) {
+                elem->data.outline.speed_px = 2;
+            }
         } else {
             LOGE("config: osd element '%s' has unsupported type", elem->name);
             return -1;
