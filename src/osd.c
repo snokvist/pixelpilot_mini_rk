@@ -3,6 +3,7 @@
 #include "drm_props.h"
 #include "logging.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -2994,17 +2995,48 @@ static int osd_commit_enable(int fd, uint32_t crtc_id, OSD *o) {
 }
 
 static int osd_commit_disable(int fd, OSD *o) {
-    if (!o->active) {
+    if (o == NULL) {
+        return -1;
+    }
+    if (o->plane_id == 0 || o->p_fb_id == 0 || o->p_crtc_id == 0) {
         return 0;
     }
     drmModeAtomicReq *req = drmModeAtomicAlloc();
     if (!req) {
+        LOGW("OSD: failed to allocate atomic request for disable");
         return -1;
     }
     drmModeAtomicAddProperty(req, o->plane_id, o->p_fb_id, 0);
     drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_id, 0);
+    if (o->p_crtc_x) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_x, 0);
+    }
+    if (o->p_crtc_y) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_y, 0);
+    }
+    if (o->p_crtc_w) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_w, 0);
+    }
+    if (o->p_crtc_h) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_crtc_h, 0);
+    }
+    if (o->p_src_x) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_src_x, 0);
+    }
+    if (o->p_src_y) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_src_y, 0);
+    }
+    if (o->p_src_w) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_src_w, 0);
+    }
+    if (o->p_src_h) {
+        drmModeAtomicAddProperty(req, o->plane_id, o->p_src_h, 0);
+    }
     int ret = drmModeAtomicCommit(fd, req, 0, NULL);
     drmModeAtomicFree(req);
+    if (ret != 0) {
+        LOGW("OSD: atomic disable failed: %s", strerror(errno));
+    }
     return ret;
 }
 
@@ -3229,7 +3261,7 @@ int osd_enable(int fd, OSD *o) {
 }
 
 void osd_disable(int fd, OSD *o) {
-    if (!o->active) {
+    if (o == NULL) {
         return;
     }
     if (osd_commit_disable(fd, o) == 0) {
@@ -3238,8 +3270,10 @@ void osd_disable(int fd, OSD *o) {
 }
 
 void osd_teardown(int fd, OSD *o) {
-    if (o->active) {
-        osd_commit_disable(fd, o);
+    if (o == NULL) {
+        return;
+    }
+    if (osd_commit_disable(fd, o) == 0) {
         o->active = 0;
     }
     if (o->scratch) {
