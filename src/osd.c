@@ -921,7 +921,7 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
 
     int ext_slot = osd_external_slot_from_key(metric, "ext.value", OSD_EXTERNAL_MAX_VALUES);
     if (ext_slot >= 0) {
-        if (ctx->external) {
+        if (ctx->external && ctx->external->value_active[ext_slot]) {
             *out_value = ctx->external->value[ext_slot];
             return 1;
         }

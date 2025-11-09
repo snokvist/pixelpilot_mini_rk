@@ -70,7 +70,8 @@ static void osd_external_reset_locked(OsdExternalBridge *bridge) {
     }
     memset(bridge->snapshot.text, 0, sizeof(bridge->snapshot.text));
     for (size_t i = 0; i < ARRAY_SIZE(bridge->snapshot.value); ++i) {
-    bridge->snapshot.value[i] = 0.0;
+        bridge->snapshot.value[i] = 0.0;
+        bridge->snapshot.value_active[i] = 0;
     }
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
@@ -101,6 +102,9 @@ static void osd_external_expire_locked(OsdExternalBridge *bridge, uint64_t now_n
             slot->value_active = 0;
             slot->value_expiry_ns = 0;
             bridge->snapshot.value[i] = 0.0;
+            if (bridge->snapshot.value_active[i]) {
+                bridge->snapshot.value_active[i] = 0;
+            }
             if (!slot->text_active) {
                 slot->is_metric = 0;
             }
@@ -709,6 +713,10 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
             slot->value_active = 0;
             slot->value_expiry_ns = 0;
             bridge->snapshot.value[i] = 0.0;
+            if (bridge->snapshot.value_active[i]) {
+                bridge->snapshot.value_active[i] = 0;
+                changed = 1;
+            }
             if (!slot->text_active) {
                 slot->is_metric = 0;
             }
@@ -754,6 +762,10 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
                     slot->value_expiry_ns = 0;
                     if (i < value_limit) {
                         bridge->snapshot.value[i] = 0.0;
+                        if (bridge->snapshot.value_active[i]) {
+                            bridge->snapshot.value_active[i] = 0;
+                            changed = 1;
+                        }
                     }
                     slot->is_metric = 0;
                 }
@@ -768,6 +780,10 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
                     changed = 1;
                 }
                 bridge->snapshot.value[i] = incoming_value;
+                if (!bridge->snapshot.value_active[i]) {
+                    changed = 1;
+                }
+                bridge->snapshot.value_active[i] = 1;
                 slot->value_active = 1;
                 slot->is_metric = 1;
                 if (has_ttl_field) {
@@ -794,6 +810,10 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
             }
             if (i < value_limit && bridge->snapshot.value[i] != 0.0) {
                 bridge->snapshot.value[i] = 0.0;
+                changed = 1;
+            }
+            if (i < value_limit && bridge->snapshot.value_active[i]) {
+                bridge->snapshot.value_active[i] = 0;
                 changed = 1;
             }
         }
