@@ -280,50 +280,6 @@ static void osd_outline_clear(OSD *o, int thickness) {
     osd_damage_add_rect(o, right_x, 0, thickness, o->h);
 }
 
-static void osd_outline_draw_horizontal(OSD *o, int y, int width, int thickness, int phase, int pattern, int active_len,
-                                        uint32_t color) {
-    if (!o || width <= 0 || thickness <= 0 || pattern <= 0 || active_len <= 0) {
-        return;
-    }
-    int offset = phase % pattern;
-    if (offset < 0) {
-        offset += pattern;
-    }
-    for (int start = -offset; start < width; start += pattern) {
-        int seg_start = start;
-        int seg_end = start + active_len;
-        int x0 = clampi(seg_start, 0, width);
-        int x1 = clampi(seg_end, 0, width);
-        if (x1 <= x0) {
-            continue;
-        }
-        osd_fill_rect(o, x0, y, x1 - x0, thickness, color);
-        osd_damage_add_rect(o, x0, y, x1 - x0, thickness);
-    }
-}
-
-static void osd_outline_draw_vertical(OSD *o, int x, int height, int thickness, int phase, int pattern, int active_len,
-                                      uint32_t color) {
-    if (!o || height <= 0 || thickness <= 0 || pattern <= 0 || active_len <= 0) {
-        return;
-    }
-    int offset = phase % pattern;
-    if (offset < 0) {
-        offset += pattern;
-    }
-    for (int start = -offset; start < height; start += pattern) {
-        int seg_start = start;
-        int seg_end = start + active_len;
-        int y0 = clampi(seg_start, 0, height);
-        int y1 = clampi(seg_end, 0, height);
-        if (y1 <= y0) {
-            continue;
-        }
-        osd_fill_rect(o, x, y0, thickness, y1 - y0, color);
-        osd_damage_add_rect(o, x, y0, thickness, y1 - y0);
-    }
-}
-
 static void osd_damage_reset(OSD *o) {
     if (!o) {
         return;
@@ -2637,16 +2593,9 @@ static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *
 
     if (active) {
         int scale = (o->scale > 0) ? o->scale : 1;
-        int pattern = (cfg && cfg->pattern_length_px > 0) ? cfg->pattern_length_px : (48 * scale);
-        if (pattern < thickness * 2) {
-            pattern = thickness * 2;
-        }
-        int active_len = (cfg && cfg->pattern_active_px > 0) ? cfg->pattern_active_px : (pattern / 3);
-        if (active_len <= 0) {
-            active_len = thickness;
-        }
-        if (active_len > pattern) {
-            active_len = pattern;
+        int period = (cfg && cfg->pattern_length_px > 0) ? cfg->pattern_length_px : (48 * scale);
+        if (period <= 0) {
+            period = 1;
         }
         int speed = (cfg && cfg->speed_px != 0) ? cfg->speed_px : scale;
         if (speed < 0) {
@@ -2655,28 +2604,85 @@ static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *
         if (speed <= 0) {
             speed = 1;
         }
-        if (pattern <= 0) {
-            pattern = 1;
+
+        int amplitude = (cfg && cfg->pattern_active_px > 0) ? cfg->pattern_active_px : (thickness / 2);
+        if (amplitude < 0) {
+            amplitude = 0;
         }
-        int phase = state->phase % pattern;
+
+        int min_thickness = thickness - amplitude;
+        if (min_thickness < 1) {
+            min_thickness = 1;
+        }
+        if (min_thickness > thickness) {
+            min_thickness = thickness;
+        }
+
+        int max_thickness = thickness + amplitude;
+        int max_allowed = o->h / 2;
+        if (max_allowed <= 0) {
+            max_allowed = 1;
+        }
+        if (max_thickness > max_allowed) {
+            max_thickness = max_allowed;
+        }
+        max_allowed = o->w / 2;
+        if (max_allowed <= 0) {
+            max_allowed = 1;
+        }
+        if (max_thickness > max_allowed) {
+            max_thickness = max_allowed;
+        }
+        if (max_thickness < min_thickness) {
+            max_thickness = min_thickness;
+        }
+
+        int range = max_thickness - min_thickness;
+        int double_period = period * 2;
+        if (double_period <= 0) {
+            double_period = 2;
+        }
+        int phase = state->phase % double_period;
         if (phase < 0) {
-            phase += pattern;
+            phase += double_period;
         }
-        int offsets[4] = {0, o->w, o->w + o->h, o->w + o->h + o->w};
-        int right_x = o->w - thickness;
+        int cycle = phase;
+        if (cycle >= period) {
+            cycle = double_period - cycle;
+            if (cycle > period) {
+                cycle = period;
+            }
+        }
+        int pulse_thickness = max_thickness;
+        if (period > 0 && range > 0) {
+            pulse_thickness = min_thickness + (range * cycle) / period;
+        }
+
+        int right_x = o->w - pulse_thickness;
         if (right_x < 0) {
             right_x = 0;
         }
-        int bottom_y = o->h - thickness;
+        int bottom_y = o->h - pulse_thickness;
         if (bottom_y < 0) {
             bottom_y = 0;
         }
-        osd_outline_draw_horizontal(o, 0, o->w, thickness, phase + offsets[0], pattern, active_len, active_color);
-        osd_outline_draw_vertical(o, right_x, o->h, thickness, phase + offsets[1], pattern, active_len, active_color);
-        osd_outline_draw_horizontal(o, bottom_y, o->w, thickness, phase + offsets[2], pattern, active_len, active_color);
-        osd_outline_draw_vertical(o, 0, o->h, thickness, phase + offsets[3], pattern, active_len, active_color);
-        state->phase = (phase + speed) % pattern;
+
+        osd_fill_rect(o, 0, 0, o->w, pulse_thickness, active_color);
+        osd_damage_add_rect(o, 0, 0, o->w, pulse_thickness);
+        osd_fill_rect(o, 0, bottom_y, o->w, pulse_thickness, active_color);
+        osd_damage_add_rect(o, 0, bottom_y, o->w, pulse_thickness);
+        osd_fill_rect(o, 0, 0, pulse_thickness, o->h, active_color);
+        osd_damage_add_rect(o, 0, 0, pulse_thickness, o->h);
+        osd_fill_rect(o, right_x, 0, pulse_thickness, o->h, active_color);
+        osd_damage_add_rect(o, right_x, 0, pulse_thickness, o->h);
+
+        int next_phase = (phase + speed) % double_period;
+        if (next_phase < 0) {
+            next_phase += double_period;
+        }
+        state->phase = next_phase;
         state->last_active = 1;
+        state->last_thickness = pulse_thickness;
     } else if (inactive_color != 0) {
         int right_x = o->w - thickness;
         if (right_x < 0) {
@@ -2696,12 +2702,13 @@ static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *
         osd_damage_add_rect(o, right_x, 0, thickness, o->h);
         state->last_active = 0;
         state->phase = 0;
+        state->last_thickness = thickness;
     } else {
         state->last_active = 0;
         state->phase = 0;
+        state->last_thickness = thickness;
     }
 
-    state->last_thickness = thickness;
     osd_store_rect(o, &o->elements[idx].rect, 0, 0, 0, 0);
 }
 

@@ -150,10 +150,13 @@ pattern-active = 18
 speed = 2
 ```
 
-With the example above the outline begins moving when `ext.value1 < 30`. The
+With the example above the outline begins pulsing when `ext.value1 < 30`. The
 color accepts any ARGB value, so using a partially transparent colour ensures
-the animation blends with the video underneath. Setting `inactive-color` keeps
-a static border visible even when the trigger is not met.
+the animation blends with the video underneath. The `pattern-length` value
+controls the full in/out pulse cycle (higher numbers slow the animation),
+while `pattern-active` sets how far the outline expands beyond its base
+thickness. Setting `inactive-color` keeps a static border visible even when
+the trigger is not met.
 
 ## Error handling and observability
 
