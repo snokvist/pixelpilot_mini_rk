@@ -1328,9 +1328,9 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
         if (vd->ctm.enabled && fmt == MPP_FMT_YUV420SP) {
             struct drm_mode_create_dumb ctm_dmcd;
             memset(&ctm_dmcd, 0, sizeof(ctm_dmcd));
-            ctm_dmcd.bpp = 32;
-            ctm_dmcd.width = width;
-            ctm_dmcd.height = height;
+            ctm_dmcd.bpp = 8;
+            ctm_dmcd.width = hor_stride;
+            ctm_dmcd.height = ver_stride * 2;
 
             do {
                 ret = ioctl(vd->drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &ctm_dmcd);
@@ -1357,14 +1357,31 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
             }
             vd->frame_map[i].ctm_prime_fd = ctm_prime.fd;
             vd->frame_map[i].ctm_pitch = ctm_dmcd.pitch;
-            vd->frame_map[i].ctm_fourcc = DRM_FORMAT_XRGB8888;
+            vd->frame_map[i].ctm_fourcc = DRM_FORMAT_NV12;
+
+            uint64_t chroma_offset = (uint64_t)ctm_dmcd.pitch * (uint64_t)ver_stride;
+            if (chroma_offset > G_MAXUINT32) {
+                LOGW("Video CTM: transform buffer chroma offset overflow (%llu)",
+                     (unsigned long long)chroma_offset);
+                close(vd->frame_map[i].ctm_prime_fd);
+                vd->frame_map[i].ctm_prime_fd = -1;
+                struct drm_mode_destroy_dumb dmd_fail = {.handle = vd->frame_map[i].ctm_handle};
+                ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_fail);
+                vd->frame_map[i].ctm_handle = 0;
+                vd->frame_map[i].ctm_pitch = 0;
+                vd->frame_map[i].ctm_fourcc = 0;
+                continue;
+            }
 
             uint32_t ctm_handles[4] = {0};
             uint32_t ctm_pitches[4] = {0};
             uint32_t ctm_offsets[4] = {0};
             ctm_handles[0] = vd->frame_map[i].ctm_handle;
+            ctm_handles[1] = vd->frame_map[i].ctm_handle;
             ctm_pitches[0] = ctm_dmcd.pitch;
+            ctm_pitches[1] = ctm_dmcd.pitch;
             ctm_offsets[0] = 0;
+            ctm_offsets[1] = (uint32_t)chroma_offset;
 
             ret = drmModeAddFB2(vd->drm_fd, width, height, vd->frame_map[i].ctm_fourcc, ctm_handles,
                                 ctm_pitches, ctm_offsets, &vd->frame_map[i].ctm_fb_id, 0);

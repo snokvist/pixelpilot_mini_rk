@@ -1094,8 +1094,15 @@ static int video_ctm_gpu_process(VideoCtm *ctm, int src_fd, int dst_fd, uint32_t
         }
         rga_buffer_t src = wrapbuffer_fd(gpu->dst_fd, (int)width, (int)height, RK_FORMAT_RGBA_8888,
                                          rgba_stride_px, (int)height);
+        int dst_stride_px = (int)hor_stride;
+        if (dst_pitch != 0 && dst_fourcc == DRM_FORMAT_NV12) {
+            dst_stride_px = (int)dst_pitch;
+        }
+        if (dst_stride_px <= 0) {
+            dst_stride_px = (int)width;
+        }
         rga_buffer_t dst = wrapbuffer_fd(dst_fd, (int)width, (int)height, RK_FORMAT_YCbCr_420_SP,
-                                         (int)hor_stride, (int)ver_stride);
+                                         dst_stride_px, (int)ver_stride);
         uint64_t convert_start_ns = video_ctm_monotonic_ns();
         IM_STATUS ret = imcvtcolor(src, dst, src.format, dst.format, IM_COLOR_SPACE_DEFAULT);
         uint64_t convert_end_ns = video_ctm_monotonic_ns();
