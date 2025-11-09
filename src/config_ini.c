@@ -182,6 +182,19 @@ static void builder_reset_bar(OsdElementConfig *elem) {
     }
 }
 
+static void builder_reset_outline(OsdElementConfig *elem) {
+    elem->type = OSD_WIDGET_OUTLINE;
+    ini_copy_string(elem->data.outline.metric, sizeof(elem->data.outline.metric), "ext.value1");
+    elem->data.outline.threshold = 30.0;
+    elem->data.outline.activate_when_below = 1;
+    elem->data.outline.active_color = 0x90FF4500u;
+    elem->data.outline.inactive_color = 0x00000000u;
+    elem->data.outline.thickness_px = 8;
+    elem->data.outline.pattern_length_px = 48;
+    elem->data.outline.pattern_active_px = 18;
+    elem->data.outline.speed_px = 2;
+}
+
 static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
     if (!out_layout) {
         return -1;
@@ -790,6 +803,88 @@ static int parse_osd_element_bar(OsdElementConfig *elem, const char *key, const 
     return -1;
 }
 
+static int parse_osd_element_outline(OsdElementConfig *elem, const char *key, const char *value) {
+    if (strcasecmp(key, "metric") == 0) {
+        ini_copy_string(elem->data.outline.metric, sizeof(elem->data.outline.metric), value);
+        return 0;
+    }
+    if (strcasecmp(key, "threshold") == 0 || strcasecmp(key, "limit") == 0) {
+        double v = 0.0;
+        if (parse_double(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.outline.threshold = v;
+        return 0;
+    }
+    if (strcasecmp(key, "activate-below") == 0) {
+        double v = 0.0;
+        if (parse_double(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.outline.threshold = v;
+        elem->data.outline.activate_when_below = 1;
+        return 0;
+    }
+    if (strcasecmp(key, "activate-above") == 0) {
+        double v = 0.0;
+        if (parse_double(value, &v) != 0) {
+            return -1;
+        }
+        elem->data.outline.threshold = v;
+        elem->data.outline.activate_when_below = 0;
+        return 0;
+    }
+    if (strcasecmp(key, "trigger") == 0 || strcasecmp(key, "mode") == 0) {
+        if (strcasecmp(value, "below") == 0 || strcasecmp(value, "less") == 0) {
+            elem->data.outline.activate_when_below = 1;
+            return 0;
+        }
+        if (strcasecmp(value, "above") == 0 || strcasecmp(value, "greater") == 0) {
+            elem->data.outline.activate_when_below = 0;
+            return 0;
+        }
+        return -1;
+    }
+    if (strcasecmp(key, "color") == 0 || strcasecmp(key, "active-color") == 0 ||
+        strcasecmp(key, "active_colour") == 0) {
+        uint32_t color = 0;
+        if (parse_color(value, &color) != 0) {
+            return -1;
+        }
+        elem->data.outline.active_color = color;
+        return 0;
+    }
+    if (strcasecmp(key, "inactive-color") == 0 || strcasecmp(key, "inactive_colour") == 0) {
+        uint32_t color = 0;
+        if (parse_color(value, &color) != 0) {
+            return -1;
+        }
+        elem->data.outline.inactive_color = color;
+        return 0;
+    }
+    if (strcasecmp(key, "thickness") == 0 || strcasecmp(key, "thickness-px") == 0) {
+        elem->data.outline.thickness_px = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "pattern-length") == 0 || strcasecmp(key, "pattern-length-px") == 0 ||
+        strcasecmp(key, "pattern_length") == 0 || strcasecmp(key, "pattern_length_px") == 0) {
+        elem->data.outline.pattern_length_px = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "pattern-active") == 0 || strcasecmp(key, "pattern-active-px") == 0 ||
+        strcasecmp(key, "pattern-on") == 0 || strcasecmp(key, "pattern_active") == 0 ||
+        strcasecmp(key, "pattern_active_px") == 0) {
+        elem->data.outline.pattern_active_px = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "speed") == 0 || strcasecmp(key, "scroll-speed") == 0 ||
+        strcasecmp(key, "speed-px") == 0 || strcasecmp(key, "speed_px") == 0) {
+        elem->data.outline.speed_px = atoi(value);
+        return 0;
+    }
+    return -1;
+}
+
 static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name, const char *key, const char *value) {
     const char *prefix = "osd.element.";
     size_t prefix_len = strlen(prefix);
@@ -816,6 +911,11 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
         }
         if (strcasecmp(value, "bar") == 0) {
             builder_reset_bar(elem);
+            builder->type_set[idx] = 1;
+            return 0;
+        }
+        if (strcasecmp(value, "outline") == 0) {
+            builder_reset_outline(elem);
             builder->type_set[idx] = 1;
             return 0;
         }
@@ -847,6 +947,9 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
     }
     if (elem->type == OSD_WIDGET_BAR) {
         return parse_osd_element_bar(elem, key, value);
+    }
+    if (elem->type == OSD_WIDGET_OUTLINE) {
+        return parse_osd_element_outline(elem, key, value);
     }
     return -1;
 }
@@ -1101,6 +1204,11 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         if (strcasecmp(key, "refresh-ms") == 0) {
             cfg->osd_refresh_ms = atoi(value);
+            if (cfg->osd_refresh_ms < OSD_REFRESH_MIN_MS) {
+                LOGW("config: osd refresh interval %dms below minimum; using %dms", cfg->osd_refresh_ms,
+                     OSD_REFRESH_MIN_MS);
+                cfg->osd_refresh_ms = OSD_REFRESH_MIN_MS;
+            }
             return 0;
         }
         if (strcasecmp(key, "plane-id") == 0) {

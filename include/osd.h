@@ -92,6 +92,12 @@ typedef struct {
     OSDRect footer_rect;
 } OsdBarState;
 
+typedef struct {
+    int phase;
+    int last_active;
+    int last_thickness;
+} OsdOutlineState;
+
 typedef struct OSD {
     int enabled;
     int active;
@@ -140,6 +146,7 @@ typedef struct OSD {
             OsdTextState text;
             OsdLineState line;
             OsdBarState bar;
+            OsdOutlineState outline;
         } data;
     } elements[OSD_MAX_ELEMENTS];
 } OSD;

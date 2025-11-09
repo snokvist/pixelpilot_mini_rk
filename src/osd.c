@@ -228,6 +228,100 @@ static void osd_fill_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
     }
 }
 
+static int osd_outline_compute_thickness(const OSD *o, const OsdOutlineConfig *cfg) {
+    if (!o) {
+        return 0;
+    }
+    int scale = (o->scale > 0) ? o->scale : 1;
+    int thickness = (cfg && cfg->thickness_px > 0) ? cfg->thickness_px : (6 * scale);
+    if (thickness < 2) {
+        thickness = 2;
+    }
+    if (thickness > o->h / 2) {
+        thickness = o->h / 2;
+    }
+    if (thickness > o->w / 2) {
+        thickness = o->w / 2;
+    }
+    if (thickness <= 0) {
+        thickness = 1;
+    }
+    return thickness;
+}
+
+static void osd_outline_clear(OSD *o, int thickness) {
+    if (!o || thickness <= 0 || o->w <= 0 || o->h <= 0) {
+        return;
+    }
+    if (thickness > o->h) {
+        thickness = o->h;
+    }
+    if (thickness > o->w) {
+        thickness = o->w;
+    }
+    int bottom_y = o->h - thickness;
+    if (bottom_y < 0) {
+        bottom_y = 0;
+    }
+    int right_x = o->w - thickness;
+    if (right_x < 0) {
+        right_x = 0;
+    }
+
+    osd_fill_rect(o, 0, 0, o->w, thickness, 0x00000000u);
+    osd_damage_add_rect(o, 0, 0, o->w, thickness);
+    osd_fill_rect(o, 0, bottom_y, o->w, thickness, 0x00000000u);
+    osd_damage_add_rect(o, 0, bottom_y, o->w, thickness);
+    osd_fill_rect(o, 0, 0, thickness, o->h, 0x00000000u);
+    osd_damage_add_rect(o, 0, 0, thickness, o->h);
+    osd_fill_rect(o, right_x, 0, thickness, o->h, 0x00000000u);
+    osd_damage_add_rect(o, right_x, 0, thickness, o->h);
+}
+
+static void osd_outline_draw_horizontal(OSD *o, int y, int width, int thickness, int phase, int pattern, int active_len,
+                                        uint32_t color) {
+    if (!o || width <= 0 || thickness <= 0 || pattern <= 0 || active_len <= 0) {
+        return;
+    }
+    int offset = phase % pattern;
+    if (offset < 0) {
+        offset += pattern;
+    }
+    for (int start = -offset; start < width; start += pattern) {
+        int seg_start = start;
+        int seg_end = start + active_len;
+        int x0 = clampi(seg_start, 0, width);
+        int x1 = clampi(seg_end, 0, width);
+        if (x1 <= x0) {
+            continue;
+        }
+        osd_fill_rect(o, x0, y, x1 - x0, thickness, color);
+        osd_damage_add_rect(o, x0, y, x1 - x0, thickness);
+    }
+}
+
+static void osd_outline_draw_vertical(OSD *o, int x, int height, int thickness, int phase, int pattern, int active_len,
+                                      uint32_t color) {
+    if (!o || height <= 0 || thickness <= 0 || pattern <= 0 || active_len <= 0) {
+        return;
+    }
+    int offset = phase % pattern;
+    if (offset < 0) {
+        offset += pattern;
+    }
+    for (int start = -offset; start < height; start += pattern) {
+        int seg_start = start;
+        int seg_end = start + active_len;
+        int y0 = clampi(seg_start, 0, height);
+        int y1 = clampi(seg_end, 0, height);
+        if (y1 <= y0) {
+            continue;
+        }
+        osd_fill_rect(o, x, y0, thickness, y1 - y0, color);
+        osd_damage_add_rect(o, x, y0, thickness, y1 - y0);
+    }
+}
+
 static void osd_damage_reset(OSD *o) {
     if (!o) {
         return;
@@ -2499,6 +2593,116 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
     o->elements[idx].data.text.last_line_count = actual_lines;
 }
 
+static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *ctx) {
+    if (!o || idx < 0 || idx >= o->element_count) {
+        return;
+    }
+
+    const OsdElementConfig *elem_cfg = &o->layout.elements[idx];
+    const OsdOutlineConfig *cfg = &elem_cfg->data.outline;
+    OsdOutlineState *state = &o->elements[idx].data.outline;
+
+    int thickness = osd_outline_compute_thickness(o, cfg);
+    int clear_thickness = thickness;
+    if (state->last_thickness > clear_thickness) {
+        clear_thickness = state->last_thickness;
+    }
+    if (clear_thickness > 0) {
+        osd_outline_clear(o, clear_thickness);
+    }
+
+    const char *metric_key = NULL;
+    if (cfg && cfg->metric[0] != '\0') {
+        metric_key = cfg->metric;
+    }
+    if (!metric_key) {
+        metric_key = "ext.value1";
+    }
+
+    double value = 0.0;
+    int have_value = osd_metric_sample(ctx, metric_key, &value);
+    int active = 0;
+    if (have_value) {
+        if (cfg && cfg->activate_when_below) {
+            active = (value < cfg->threshold);
+        } else {
+            active = (value > cfg->threshold);
+        }
+    }
+
+    uint32_t active_color = (cfg && cfg->active_color != 0) ? cfg->active_color : 0x90FF4500u;
+    uint32_t inactive_color = cfg ? cfg->inactive_color : 0x00000000u;
+
+    if (active) {
+        int scale = (o->scale > 0) ? o->scale : 1;
+        int pattern = (cfg && cfg->pattern_length_px > 0) ? cfg->pattern_length_px : (48 * scale);
+        if (pattern < thickness * 2) {
+            pattern = thickness * 2;
+        }
+        int active_len = (cfg && cfg->pattern_active_px > 0) ? cfg->pattern_active_px : (pattern / 3);
+        if (active_len <= 0) {
+            active_len = thickness;
+        }
+        if (active_len > pattern) {
+            active_len = pattern;
+        }
+        int speed = (cfg && cfg->speed_px != 0) ? cfg->speed_px : scale;
+        if (speed < 0) {
+            speed = -speed;
+        }
+        if (speed <= 0) {
+            speed = 1;
+        }
+        if (pattern <= 0) {
+            pattern = 1;
+        }
+        int phase = state->phase % pattern;
+        if (phase < 0) {
+            phase += pattern;
+        }
+        int offsets[4] = {0, o->w, o->w + o->h, o->w + o->h + o->w};
+        int right_x = o->w - thickness;
+        if (right_x < 0) {
+            right_x = 0;
+        }
+        int bottom_y = o->h - thickness;
+        if (bottom_y < 0) {
+            bottom_y = 0;
+        }
+        osd_outline_draw_horizontal(o, 0, o->w, thickness, phase + offsets[0], pattern, active_len, active_color);
+        osd_outline_draw_vertical(o, right_x, o->h, thickness, phase + offsets[1], pattern, active_len, active_color);
+        osd_outline_draw_horizontal(o, bottom_y, o->w, thickness, phase + offsets[2], pattern, active_len, active_color);
+        osd_outline_draw_vertical(o, 0, o->h, thickness, phase + offsets[3], pattern, active_len, active_color);
+        state->phase = (phase + speed) % pattern;
+        state->last_active = 1;
+    } else if (inactive_color != 0) {
+        int right_x = o->w - thickness;
+        if (right_x < 0) {
+            right_x = 0;
+        }
+        int bottom_y = o->h - thickness;
+        if (bottom_y < 0) {
+            bottom_y = 0;
+        }
+        osd_fill_rect(o, 0, 0, o->w, thickness, inactive_color);
+        osd_damage_add_rect(o, 0, 0, o->w, thickness);
+        osd_fill_rect(o, 0, bottom_y, o->w, thickness, inactive_color);
+        osd_damage_add_rect(o, 0, bottom_y, o->w, thickness);
+        osd_fill_rect(o, 0, 0, thickness, o->h, inactive_color);
+        osd_damage_add_rect(o, 0, 0, thickness, o->h);
+        osd_fill_rect(o, right_x, 0, thickness, o->h, inactive_color);
+        osd_damage_add_rect(o, right_x, 0, thickness, o->h);
+        state->last_active = 0;
+        state->phase = 0;
+    } else {
+        state->last_active = 0;
+        state->phase = 0;
+    }
+
+    state->last_thickness = thickness;
+    osd_store_rect(o, &o->elements[idx].rect, 0, 0, 0, 0);
+}
+
 static void osd_bar_draw(OSD *o, int idx) {
     OsdBarState *state = &o->elements[idx].data.bar;
     const OsdBarConfig *cfg = &o->layout.elements[idx].data.bar;
@@ -3096,6 +3300,10 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
             osd_bar_reset(o, cfg, i);
         } else if (o->elements[i].type == OSD_WIDGET_TEXT) {
             o->elements[i].data.text.last_line_count = 0;
+        } else if (o->elements[i].type == OSD_WIDGET_OUTLINE) {
+            o->elements[i].data.outline.phase = 0;
+            o->elements[i].data.outline.last_active = 0;
+            o->elements[i].data.outline.last_thickness = 0;
         }
     }
 
@@ -3182,6 +3390,9 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
             break;
         case OSD_WIDGET_BAR:
             osd_render_bar_element(o, i, &ctx);
+            break;
+        case OSD_WIDGET_OUTLINE:
+            osd_render_outline_element(o, i, &ctx);
             break;
         default:
             osd_clear_rect(o, &o->elements[i].rect);
