@@ -718,8 +718,14 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
     }
     ext_slot = osd_external_slot_from_key(key, "ext.value", OSD_EXTERNAL_MAX_VALUES);
     if (ext_slot >= 0) {
-        double v = (ctx->external) ? ctx->external->value[ext_slot] : 0.0;
-        osd_format_metric_value(key, v, buf, buf_sz);
+        if (ctx->external && ctx->external->value_valid[ext_slot]) {
+            double v = ctx->external->value[ext_slot];
+            osd_format_metric_value(key, v, buf, buf_sz);
+        } else {
+            if (buf_sz > 0) {
+                buf[0] = '\0';
+            }
+        }
         return 0;
     }
 
@@ -921,7 +927,7 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
 
     int ext_slot = osd_external_slot_from_key(metric, "ext.value", OSD_EXTERNAL_MAX_VALUES);
     if (ext_slot >= 0) {
-        if (ctx->external) {
+        if (ctx->external && ctx->external->value_valid[ext_slot]) {
             *out_value = ctx->external->value[ext_slot];
             return 1;
         }

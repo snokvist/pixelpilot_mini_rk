@@ -27,6 +27,7 @@ typedef enum {
 typedef struct {
     char text[OSD_EXTERNAL_MAX_TEXT][OSD_EXTERNAL_TEXT_LEN];
     double value[OSD_EXTERNAL_MAX_VALUES];
+    uint8_t value_valid[OSD_EXTERNAL_MAX_VALUES];
     uint64_t last_update_ns;
     uint64_t expiry_ns;
     OsdExternalStatus status;

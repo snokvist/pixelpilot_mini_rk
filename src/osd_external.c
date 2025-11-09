@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <time.h>
 #include <limits.h>
+#include <math.h>
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
@@ -69,8 +70,9 @@ static void osd_external_reset_locked(OsdExternalBridge *bridge) {
         return;
     }
     memset(bridge->snapshot.text, 0, sizeof(bridge->snapshot.text));
+    memset(bridge->snapshot.value_valid, 0, sizeof(bridge->snapshot.value_valid));
     for (size_t i = 0; i < ARRAY_SIZE(bridge->snapshot.value); ++i) {
-    bridge->snapshot.value[i] = 0.0;
+        bridge->snapshot.value[i] = 0.0;
     }
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
@@ -101,6 +103,7 @@ static void osd_external_expire_locked(OsdExternalBridge *bridge, uint64_t now_n
             slot->value_active = 0;
             slot->value_expiry_ns = 0;
             bridge->snapshot.value[i] = 0.0;
+            bridge->snapshot.value_valid[i] = 0;
             if (!slot->text_active) {
                 slot->is_metric = 0;
             }
@@ -110,6 +113,9 @@ static void osd_external_expire_locked(OsdExternalBridge *bridge, uint64_t now_n
             slot->text_expiry_ns = 0;
             slot->value_expiry_ns = 0;
             slot->is_metric = 0;
+            if (i < OSD_EXTERNAL_MAX_VALUES) {
+                bridge->snapshot.value_valid[i] = 0;
+            }
         }
     }
     osd_external_update_expiry_locked(bridge);
@@ -703,12 +709,13 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
     if (msg->has_value && msg->value_count == 0) {
         for (size_t i = 0; i < value_limit; ++i) {
             OsdExternalSlotState *slot = &bridge->slots[i];
-            if (slot->value_active || bridge->snapshot.value[i] != 0.0) {
+            if (slot->value_active || bridge->snapshot.value[i] != 0.0 || bridge->snapshot.value_valid[i]) {
                 changed = 1;
             }
             slot->value_active = 0;
             slot->value_expiry_ns = 0;
             bridge->snapshot.value[i] = 0.0;
+            bridge->snapshot.value_valid[i] = 0;
             if (!slot->text_active) {
                 slot->is_metric = 0;
             }
@@ -747,13 +754,14 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
                     slot->text_expiry_ns = 0;
                 }
                 if (!value_present || i >= value_limit) {
-                    if (slot->value_active) {
+                    if (slot->value_active || (i < value_limit && bridge->snapshot.value_valid[i])) {
                         changed = 1;
                     }
                     slot->value_active = 0;
                     slot->value_expiry_ns = 0;
                     if (i < value_limit) {
                         bridge->snapshot.value[i] = 0.0;
+                        bridge->snapshot.value_valid[i] = 0;
                     }
                     slot->is_metric = 0;
                 }
@@ -764,22 +772,36 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
             int ttl_guard = slot->value_active && slot->value_expiry_ns > now_ns && !has_ttl_field;
             int locked_by_text = slot->text_active && slot->text_expiry_ns > now_ns && !slot->is_metric && !has_ttl_field;
             if (!ttl_guard && !locked_by_text) {
-                if (!slot->value_active || bridge->snapshot.value[i] != incoming_value) {
-                    changed = 1;
-                }
-                bridge->snapshot.value[i] = incoming_value;
-                slot->value_active = 1;
-                slot->is_metric = 1;
-                if (has_ttl_field) {
-                    if (ttl_ns > 0 && ttl_ns <= UINT64_MAX - now_ns) {
-                        slot->value_expiry_ns = now_ns + ttl_ns;
-                    } else if (ttl_ns > 0) {
-                        slot->value_expiry_ns = 0;
+                if (!isfinite(incoming_value)) {
+                    if (slot->value_active || bridge->snapshot.value_valid[i]) {
+                        changed = 1;
+                    }
+                    slot->value_active = 0;
+                    slot->value_expiry_ns = 0;
+                    bridge->snapshot.value[i] = 0.0;
+                    bridge->snapshot.value_valid[i] = 0;
+                    if (!slot->text_active) {
+                        slot->is_metric = 0;
+                    }
+                } else {
+                    if (!slot->value_active || bridge->snapshot.value[i] != incoming_value || !bridge->snapshot.value_valid[i]) {
+                        changed = 1;
+                    }
+                    bridge->snapshot.value[i] = incoming_value;
+                    bridge->snapshot.value_valid[i] = 1;
+                    slot->value_active = 1;
+                    slot->is_metric = 1;
+                    if (has_ttl_field) {
+                        if (ttl_ns > 0 && ttl_ns <= UINT64_MAX - now_ns) {
+                            slot->value_expiry_ns = now_ns + ttl_ns;
+                        } else if (ttl_ns > 0) {
+                            slot->value_expiry_ns = 0;
+                        } else {
+                            slot->value_expiry_ns = 0;
+                        }
                     } else {
                         slot->value_expiry_ns = 0;
                     }
-                } else {
-                    slot->value_expiry_ns = 0;
                 }
             }
         }
@@ -792,9 +814,15 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
                 bridge->snapshot.text[i][0] = '\0';
                 changed = 1;
             }
-            if (i < value_limit && bridge->snapshot.value[i] != 0.0) {
-                bridge->snapshot.value[i] = 0.0;
-                changed = 1;
+            if (i < value_limit) {
+                if (bridge->snapshot.value[i] != 0.0) {
+                    bridge->snapshot.value[i] = 0.0;
+                    changed = 1;
+                }
+                if (bridge->snapshot.value_valid[i]) {
+                    bridge->snapshot.value_valid[i] = 0;
+                    changed = 1;
+                }
             }
         }
     }
