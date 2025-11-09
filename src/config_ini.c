@@ -193,7 +193,6 @@ static void builder_reset_outline(OsdElementConfig *elem) {
     elem->data.outline.pulse_period_ticks = 48;
     elem->data.outline.pulse_amplitude_px = 4;
     elem->data.outline.pulse_step_ticks = 2;
-    elem->data.outline.show_when_missing = 1;
 }
 
 static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
@@ -274,7 +273,6 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
             if (elem->data.outline.pulse_step_ticks <= 0) {
                 elem->data.outline.pulse_step_ticks = 2;
             }
-            elem->data.outline.show_when_missing = elem->data.outline.show_when_missing ? 1 : 0;
         } else {
             LOGE("config: osd element '%s' has unsupported type", elem->name);
             return -1;
@@ -906,15 +904,6 @@ static int parse_osd_element_outline(OsdElementConfig *elem, const char *key, co
         strcasecmp(key, "speed") == 0 || strcasecmp(key, "scroll-speed") == 0 ||
         strcasecmp(key, "speed-px") == 0 || strcasecmp(key, "speed_px") == 0) {
         elem->data.outline.pulse_step_ticks = atoi(value);
-        return 0;
-    }
-    if (strcasecmp(key, "show-when-missing") == 0 || strcasecmp(key, "show_when_missing") == 0 ||
-        strcasecmp(key, "display-when-missing") == 0) {
-        int flag = 0;
-        if (parse_bool(value, &flag) != 0) {
-            return -1;
-        }
-        elem->data.outline.show_when_missing = flag;
         return 0;
     }
     return -1;

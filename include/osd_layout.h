@@ -103,7 +103,6 @@ typedef struct {
     int pulse_period_ticks;
     int pulse_amplitude_px;
     int pulse_step_ticks;
-    int show_when_missing;
 } OsdOutlineConfig;
 
 typedef struct {

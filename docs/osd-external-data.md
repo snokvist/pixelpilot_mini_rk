@@ -149,7 +149,6 @@ base-thickness = 8
 pulse-period = 48
 pulse-amplitude = 4
 pulse-step = 2
-show-when-missing = false
 ```
 
 With the example above the outline begins pulsing when `ext.value1 < 30`. The
@@ -159,10 +158,7 @@ the baseline border width, `pulse-period` controls the full in/out pulse cycle
 (higher numbers slow the animation), and `pulse-amplitude` defines how far the
 border expands beyond the baseline. `pulse-step` advances the animation phase on
 each refresh, so larger steps make the pulse travel faster. Setting
-`inactive-color` keeps a static border visible even when the trigger is not met,
-while `show-when-missing` toggles whether the outline should be rendered at all
-when the metric source has not yet published a value (for example immediately
-after a TTL expires).
+`inactive-color` keeps a static border visible even when the trigger is not met.
 
 ## Error handling and observability
 

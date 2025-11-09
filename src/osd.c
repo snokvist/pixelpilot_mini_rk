@@ -2580,9 +2580,6 @@ static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *
     double value = 0.0;
     int have_value = osd_metric_sample(ctx, metric_key, &value);
     int should_render = have_value;
-    if (!should_render && cfg) {
-        should_render = cfg->show_when_missing;
-    }
     if (!should_render) {
         state->last_active = 0;
         state->phase = 0;
