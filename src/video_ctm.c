@@ -15,6 +15,11 @@
 #include <drm/drm_mode.h>
 #include <drm_fourcc.h>
 
+#include <rga/im2d_type.h>
+#include <rga/im2d.h>
+#include <rga/rga.h>         // sometimes needed for legacy symbols
+#include <rga/RgaApi.h>      // optional; some distros put helpers here
+
 #if defined(HAVE_LIBRGA) && defined(HAVE_GBM_GLES2)
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
