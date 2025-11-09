@@ -23,13 +23,6 @@ typedef struct VideoCtm {
     double gamma_b_mult;
     gboolean flip;
     VideoCtmBackend backend;
-    gboolean hw_supported;
-    gboolean hw_applied;
-    int hw_fd;
-    uint32_t hw_object_id;
-    uint32_t hw_object_type;
-    uint32_t hw_prop_id;
-    uint32_t hw_blob_id;
     int render_fd;
     uint32_t src_fourcc;
     uint32_t dst_fourcc;
@@ -87,9 +80,6 @@ typedef struct VideoCtmUpdate {
 void video_ctm_init(VideoCtm *ctm, const AppCfg *cfg);
 void video_ctm_reset(VideoCtm *ctm);
 void video_ctm_set_render_fd(VideoCtm *ctm, int drm_fd);
-void video_ctm_use_drm_property(VideoCtm *ctm, int drm_fd, uint32_t object_id,
-                                uint32_t object_type, uint32_t prop_id);
-void video_ctm_disable_drm(VideoCtm *ctm);
 int video_ctm_prepare(VideoCtm *ctm, uint32_t width, uint32_t height, uint32_t src_hor_stride,
                       uint32_t src_ver_stride, uint32_t src_fourcc, uint32_t dst_pitch,
                       uint32_t dst_fourcc);
