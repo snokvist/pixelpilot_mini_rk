@@ -189,10 +189,11 @@ static void builder_reset_outline(OsdElementConfig *elem) {
     elem->data.outline.activate_when_below = 1;
     elem->data.outline.active_color = 0x90FF4500u;
     elem->data.outline.inactive_color = 0x00000000u;
-    elem->data.outline.thickness_px = 8;
-    elem->data.outline.pattern_length_px = 48;
-    elem->data.outline.pattern_active_px = 18;
-    elem->data.outline.speed_px = 2;
+    elem->data.outline.base_thickness_px = 8;
+    elem->data.outline.pulse_period_ticks = 48;
+    elem->data.outline.pulse_amplitude_px = 4;
+    elem->data.outline.pulse_step_ticks = 2;
+    elem->data.outline.show_when_missing = 1;
 }
 
 static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
@@ -258,22 +259,22 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
                 elem->data.bar.bar_width_px = 8;
             }
         } else if (elem->type == OSD_WIDGET_OUTLINE) {
-            if (elem->data.outline.thickness_px <= 0) {
-                elem->data.outline.thickness_px = 8;
+            if (elem->data.outline.base_thickness_px <= 0) {
+                elem->data.outline.base_thickness_px = 8;
             }
-            if (elem->data.outline.pattern_length_px <= 0) {
-                elem->data.outline.pattern_length_px = 48;
+            if (elem->data.outline.pulse_period_ticks <= 0) {
+                elem->data.outline.pulse_period_ticks = 48;
             }
-            if (elem->data.outline.pattern_active_px <= 0 ||
-                elem->data.outline.pattern_active_px > elem->data.outline.pattern_length_px) {
-                elem->data.outline.pattern_active_px = elem->data.outline.pattern_length_px / 2;
-                if (elem->data.outline.pattern_active_px <= 0) {
-                    elem->data.outline.pattern_active_px = elem->data.outline.pattern_length_px;
-                }
+            if (elem->data.outline.pulse_amplitude_px < 0) {
+                elem->data.outline.pulse_amplitude_px = 0;
             }
-            if (elem->data.outline.speed_px <= 0) {
-                elem->data.outline.speed_px = 2;
+            if (elem->data.outline.pulse_amplitude_px > elem->data.outline.base_thickness_px) {
+                elem->data.outline.pulse_amplitude_px = elem->data.outline.base_thickness_px;
             }
+            if (elem->data.outline.pulse_step_ticks <= 0) {
+                elem->data.outline.pulse_step_ticks = 2;
+            }
+            elem->data.outline.show_when_missing = elem->data.outline.show_when_missing ? 1 : 0;
         } else {
             LOGE("config: osd element '%s' has unsupported type", elem->name);
             return -1;
@@ -879,24 +880,41 @@ static int parse_osd_element_outline(OsdElementConfig *elem, const char *key, co
         elem->data.outline.inactive_color = color;
         return 0;
     }
-    if (strcasecmp(key, "thickness") == 0 || strcasecmp(key, "thickness-px") == 0) {
-        elem->data.outline.thickness_px = atoi(value);
+    if (strcasecmp(key, "base-thickness") == 0 || strcasecmp(key, "base-thickness-px") == 0 ||
+        strcasecmp(key, "base_thickness") == 0 || strcasecmp(key, "base_thickness_px") == 0 ||
+        strcasecmp(key, "thickness") == 0 || strcasecmp(key, "thickness-px") == 0) {
+        elem->data.outline.base_thickness_px = atoi(value);
         return 0;
     }
-    if (strcasecmp(key, "pattern-length") == 0 || strcasecmp(key, "pattern-length-px") == 0 ||
+    if (strcasecmp(key, "pulse-period") == 0 || strcasecmp(key, "pulse-period-ticks") == 0 ||
+        strcasecmp(key, "pulse_period") == 0 || strcasecmp(key, "pulse_period_ticks") == 0 ||
+        strcasecmp(key, "pattern-length") == 0 || strcasecmp(key, "pattern-length-px") == 0 ||
         strcasecmp(key, "pattern_length") == 0 || strcasecmp(key, "pattern_length_px") == 0) {
-        elem->data.outline.pattern_length_px = atoi(value);
+        elem->data.outline.pulse_period_ticks = atoi(value);
         return 0;
     }
-    if (strcasecmp(key, "pattern-active") == 0 || strcasecmp(key, "pattern-active-px") == 0 ||
-        strcasecmp(key, "pattern-on") == 0 || strcasecmp(key, "pattern_active") == 0 ||
-        strcasecmp(key, "pattern_active_px") == 0) {
-        elem->data.outline.pattern_active_px = atoi(value);
+    if (strcasecmp(key, "pulse-amplitude") == 0 || strcasecmp(key, "pulse-amplitude-px") == 0 ||
+        strcasecmp(key, "pulse-on") == 0 || strcasecmp(key, "pulse_amplitude") == 0 ||
+        strcasecmp(key, "pulse_amplitude_px") == 0 || strcasecmp(key, "pattern-active") == 0 ||
+        strcasecmp(key, "pattern-active-px") == 0 || strcasecmp(key, "pattern-on") == 0 ||
+        strcasecmp(key, "pattern_active") == 0 || strcasecmp(key, "pattern_active_px") == 0) {
+        elem->data.outline.pulse_amplitude_px = atoi(value);
         return 0;
     }
-    if (strcasecmp(key, "speed") == 0 || strcasecmp(key, "scroll-speed") == 0 ||
+    if (strcasecmp(key, "pulse-step") == 0 || strcasecmp(key, "pulse-step-ticks") == 0 ||
+        strcasecmp(key, "pulse_step") == 0 || strcasecmp(key, "pulse_step_ticks") == 0 ||
+        strcasecmp(key, "speed") == 0 || strcasecmp(key, "scroll-speed") == 0 ||
         strcasecmp(key, "speed-px") == 0 || strcasecmp(key, "speed_px") == 0) {
-        elem->data.outline.speed_px = atoi(value);
+        elem->data.outline.pulse_step_ticks = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "show-when-missing") == 0 || strcasecmp(key, "show_when_missing") == 0 ||
+        strcasecmp(key, "display-when-missing") == 0) {
+        int flag = 0;
+        if (parse_bool(value, &flag) != 0) {
+            return -1;
+        }
+        elem->data.outline.show_when_missing = flag;
         return 0;
     }
     return -1;

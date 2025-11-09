@@ -99,10 +99,11 @@ typedef struct {
     int activate_when_below;
     uint32_t active_color;
     uint32_t inactive_color;
-    int thickness_px;
-    int pattern_length_px;
-    int pattern_active_px;
-    int speed_px;
+    int base_thickness_px;
+    int pulse_period_ticks;
+    int pulse_amplitude_px;
+    int pulse_step_ticks;
+    int show_when_missing;
 } OsdOutlineConfig;
 
 typedef struct {

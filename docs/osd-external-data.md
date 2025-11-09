@@ -145,18 +145,24 @@ metric = ext.value1
 threshold = 30
 trigger = below
 color = 0x90FF4500
-pattern-length = 48
-pattern-active = 18
-speed = 2
+base-thickness = 8
+pulse-period = 48
+pulse-amplitude = 4
+pulse-step = 2
+show-when-missing = false
 ```
 
 With the example above the outline begins pulsing when `ext.value1 < 30`. The
 color accepts any ARGB value, so using a partially transparent colour ensures
-the animation blends with the video underneath. The `pattern-length` value
-controls the full in/out pulse cycle (higher numbers slow the animation),
-while `pattern-active` sets how far the outline expands beyond its base
-thickness. Setting `inactive-color` keeps a static border visible even when
-the trigger is not met.
+the animation blends with the video underneath. `base-thickness` establishes
+the baseline border width, `pulse-period` controls the full in/out pulse cycle
+(higher numbers slow the animation), and `pulse-amplitude` defines how far the
+border expands beyond the baseline. `pulse-step` advances the animation phase on
+each refresh, so larger steps make the pulse travel faster. Setting
+`inactive-color` keeps a static border visible even when the trigger is not met,
+while `show-when-missing` toggles whether the outline should be rendered at all
+when the metric source has not yet published a value (for example immediately
+after a TTL expires).
 
 ## Error handling and observability
 

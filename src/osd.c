@@ -233,7 +233,7 @@ static int osd_outline_compute_thickness(const OSD *o, const OsdOutlineConfig *c
         return 0;
     }
     int scale = (o->scale > 0) ? o->scale : 1;
-    int thickness = (cfg && cfg->thickness_px > 0) ? cfg->thickness_px : (6 * scale);
+    int thickness = (cfg && cfg->base_thickness_px > 0) ? cfg->base_thickness_px : (6 * scale);
     if (thickness < 2) {
         thickness = 2;
     }
@@ -2579,6 +2579,16 @@ static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *
 
     double value = 0.0;
     int have_value = osd_metric_sample(ctx, metric_key, &value);
+    int should_render = have_value;
+    if (!should_render && cfg) {
+        should_render = cfg->show_when_missing;
+    }
+    if (!should_render) {
+        state->last_active = 0;
+        state->phase = 0;
+        state->last_thickness = 0;
+        goto store_rect;
+    }
     int active = 0;
     if (have_value) {
         if (cfg && cfg->activate_when_below) {
@@ -2593,19 +2603,19 @@ static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *
 
     if (active) {
         int scale = (o->scale > 0) ? o->scale : 1;
-        int period = (cfg && cfg->pattern_length_px > 0) ? cfg->pattern_length_px : (48 * scale);
+        int period = (cfg && cfg->pulse_period_ticks > 0) ? cfg->pulse_period_ticks : (48 * scale);
         if (period <= 0) {
             period = 1;
         }
-        int speed = (cfg && cfg->speed_px != 0) ? cfg->speed_px : scale;
-        if (speed < 0) {
-            speed = -speed;
+        int step = (cfg && cfg->pulse_step_ticks != 0) ? cfg->pulse_step_ticks : scale;
+        if (step < 0) {
+            step = -step;
         }
-        if (speed <= 0) {
-            speed = 1;
+        if (step <= 0) {
+            step = 1;
         }
 
-        int amplitude = (cfg && cfg->pattern_active_px > 0) ? cfg->pattern_active_px : (thickness / 2);
+        int amplitude = (cfg && cfg->pulse_amplitude_px > 0) ? cfg->pulse_amplitude_px : (thickness / 2);
         if (amplitude < 0) {
             amplitude = 0;
         }
@@ -2676,7 +2686,7 @@ static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *
         osd_fill_rect(o, right_x, 0, pulse_thickness, o->h, active_color);
         osd_damage_add_rect(o, right_x, 0, pulse_thickness, o->h);
 
-        int next_phase = (phase + speed) % double_period;
+        int next_phase = (phase + step) % double_period;
         if (next_phase < 0) {
             next_phase += double_period;
         }
@@ -2709,6 +2719,7 @@ static void osd_render_outline_element(OSD *o, int idx, const OsdRenderContext *
         state->last_thickness = thickness;
     }
 
+store_rect:
     osd_store_rect(o, &o->elements[idx].rect, 0, 0, 0, 0);
 }
 
