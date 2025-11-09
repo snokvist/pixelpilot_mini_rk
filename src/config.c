@@ -363,6 +363,10 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->osd_plane_id = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--osd-refresh-ms") && i + 1 < argc) {
             cfg->osd_refresh_ms = atoi(argv[++i]);
+            if (cfg->osd_refresh_ms < OSD_REFRESH_MIN_MS) {
+                LOGW("--osd-refresh-ms=%d clamped to minimum %d", cfg->osd_refresh_ms, OSD_REFRESH_MIN_MS);
+                cfg->osd_refresh_ms = OSD_REFRESH_MIN_MS;
+            }
         } else if (!strcmp(argv[i], "--osd-external")) {
             cfg->osd_external.enable = 1;
             cfg->osd_external.enable_set = 1;

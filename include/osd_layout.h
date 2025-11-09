@@ -11,7 +11,8 @@ extern "C" {
 typedef enum {
     OSD_WIDGET_TEXT = 0,
     OSD_WIDGET_LINE,
-    OSD_WIDGET_BAR
+    OSD_WIDGET_BAR,
+    OSD_WIDGET_OUTLINE
 } OsdElementType;
 
 typedef enum {
@@ -93,6 +94,18 @@ typedef struct {
 } OsdBarConfig;
 
 typedef struct {
+    char metric[64];
+    double threshold;
+    int activate_when_below;
+    uint32_t active_color;
+    uint32_t inactive_color;
+    int base_thickness_px;
+    int pulse_period_ticks;
+    int pulse_amplitude_px;
+    int pulse_step_ticks;
+} OsdOutlineConfig;
+
+typedef struct {
     OsdElementType type;
     char name[48];
     OsdPlacement placement;
@@ -100,6 +113,7 @@ typedef struct {
         OsdTextConfig text;
         OsdLineConfig line;
         OsdBarConfig bar;
+        OsdOutlineConfig outline;
     } data;
 } OsdElementConfig;
 

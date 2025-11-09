@@ -131,6 +131,35 @@ unknown, configuration files created on older builds keep working: users only
 see `{ext.text1}` until they update the binary to a release containing the
 bridge.
 
+### Animated outline widget
+
+The OSD includes an `outline` element type that renders an alpha-blended frame
+around the screen. The widget listens to any metric (for example
+`ext.value1`) and animates whenever the sampled value crosses a configured
+threshold. A representative INI snippet looks like:
+
+```ini
+[osd.element.signal_outline]
+type = outline
+metric = ext.value1
+threshold = 30
+trigger = below
+color = 0x90FF4500
+base-thickness = 8
+pulse-period = 48
+pulse-amplitude = 4
+pulse-step = 2
+```
+
+With the example above the outline begins pulsing when `ext.value1 < 30`. The
+color accepts any ARGB value, so using a partially transparent colour ensures
+the animation blends with the video underneath. `base-thickness` establishes
+the baseline border width, `pulse-period` controls the full in/out pulse cycle
+(higher numbers slow the animation), and `pulse-amplitude` defines how far the
+border expands beyond the baseline. `pulse-step` advances the animation phase on
+each refresh, so larger steps make the pulse travel faster. Setting
+`inactive-color` keeps a static border visible even when the trigger is not met.
+
 ## Error handling and observability
 
 * Socket creation failures should log a warning and keep the rest of the

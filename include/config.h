@@ -8,6 +8,10 @@
 
 #define SPLASH_MAX_SEQUENCES 32
 
+#ifndef OSD_REFRESH_MIN_MS
+#define OSD_REFRESH_MIN_MS 50
+#endif
+
 #ifndef CPU_SETSIZE
 #define CPU_SETSIZE ((int)(sizeof(cpu_set_t) * CHAR_BIT))
 #endif
