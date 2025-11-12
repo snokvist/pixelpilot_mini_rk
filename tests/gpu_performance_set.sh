@@ -3,6 +3,21 @@
 
 set -e
 
+
+
+# Set governor to performance on every CPU
+for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+  echo performance | sudo tee "$g" >/dev/null
+done
+
+# (Optional) also max the allowed freq range
+for c in /sys/devices/system/cpu/cpu*/cpufreq; do
+  max=$(cat "$c/cpuinfo_max_freq")
+  echo "$max" | sudo tee "$c/scaling_max_freq" >/dev/null
+  echo "$max" | sudo tee "$c/scaling_min_freq" >/dev/null
+done
+
+
 GPU=/sys/class/misc/mali0/device
 DFGPU="$(ls -d "$GPU"/devfreq/* 2>/dev/null | head -n1)" || {
   echo "No Mali devfreq node"; exit 1; }
