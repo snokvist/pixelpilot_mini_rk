@@ -55,6 +55,9 @@ struct VideoRecorder {
     guint audio_default_duration;
     int audio_track_id;
     guint64 audio_total_duration_ns;
+    GstClockTime audio_prev_pts;
+    GstClockTime audio_prev_duration;
+    guint64 audio_last_duration_ts;
     GMutex stats_lock;
 };
 
@@ -322,6 +325,35 @@ static guint32 compute_duration_90k(VideoRecorder *rec, GstClockTime prev_pts, G
     return (guint32)duration;
 }
 
+static guint64 compute_duration_timescale(VideoRecorder *rec,
+                                          GstClockTime prev_pts,
+                                          GstClockTime prev_duration,
+                                          GstClockTime next_pts,
+                                          guint timescale,
+                                          guint default_duration,
+                                          guint64 last_duration) {
+    guint64 duration_ts = 0;
+    if (GST_CLOCK_TIME_IS_VALID(prev_duration)) {
+        duration_ts = gst_duration_to_timescale(prev_duration, timescale);
+    } else if (GST_CLOCK_TIME_IS_VALID(prev_pts) && GST_CLOCK_TIME_IS_VALID(next_pts) && next_pts > prev_pts) {
+        duration_ts = gst_duration_to_timescale(next_pts - prev_pts, timescale);
+    }
+
+    if (duration_ts == 0) {
+        if (last_duration != 0) {
+            duration_ts = last_duration;
+        } else if (default_duration != 0) {
+            duration_ts = default_duration;
+        }
+    }
+
+    if (duration_ts == 0) {
+        duration_ts = default_duration != 0 ? default_duration : 1024;
+    }
+
+    return duration_ts;
+}
+
 static void emit_pending(VideoRecorder *rec, guint32 duration_90k) {
     if (!rec->pending.valid) {
         return;
@@ -404,6 +436,9 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
     rec->audio_default_duration = 1024;
     rec->audio_track_id = -1;
     rec->audio_total_duration_ns = 0;
+    rec->audio_prev_pts = GST_CLOCK_TIME_NONE;
+    rec->audio_prev_duration = GST_CLOCK_TIME_NONE;
+    rec->audio_last_duration_ts = 0;
 
     rec->mode = cfg->mode;
     rec->sequential_mode_flag = 1;
@@ -504,16 +539,20 @@ void video_recorder_handle_audio(VideoRecorder *rec, GstSample *sample, const gu
         return;
     }
 
+    GstClockTime pts = GST_CLOCK_TIME_NONE;
     GstClockTime duration = GST_CLOCK_TIME_NONE;
     GstBuffer *buffer = sample != NULL ? gst_sample_get_buffer(sample) : NULL;
     if (buffer != NULL) {
+        pts = GST_BUFFER_PTS(buffer);
+        if (!GST_CLOCK_TIME_IS_VALID(pts)) {
+            pts = GST_BUFFER_DTS(buffer);
+        }
         duration = GST_BUFFER_DURATION(buffer);
     }
 
-    guint64 duration_ts = gst_duration_to_timescale(duration, rec->audio_timescale);
-    if (duration_ts == 0) {
-        duration_ts = rec->audio_default_duration;
-    }
+    guint64 duration_ts = compute_duration_timescale(rec, rec->audio_prev_pts, rec->audio_prev_duration, pts,
+                                                     rec->audio_timescale, rec->audio_default_duration,
+                                                     rec->audio_last_duration_ts);
 
     int err = MP4E_put_sample(rec->mux, rec->audio_track_id, data, (int)size, (int)duration_ts, MP4E_SAMPLE_DEFAULT);
     if (err != MP4E_STATUS_OK) {
@@ -521,6 +560,10 @@ void video_recorder_handle_audio(VideoRecorder *rec, GstSample *sample, const gu
         rec->failed = TRUE;
         return;
     }
+
+    rec->audio_prev_pts = pts;
+    rec->audio_prev_duration = duration;
+    rec->audio_last_duration_ts = duration_ts;
 
     guint64 duration_ns = gst_duration_from_timescale(duration_ts, rec->audio_timescale);
     if (duration_ns > 0) {

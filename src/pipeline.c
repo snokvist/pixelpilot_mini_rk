@@ -475,7 +475,7 @@ static GstElement *create_udp_app_source(const AppCfg *cfg,
 
     g_object_set(appsrc_elem, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
                  GST_APP_STREAM_TYPE_STREAM, "max-bytes", (guint64)(4 * 1024 * 1024),
-                 "do-timestamp", TRUE, NULL);
+                 "do-timestamp", FALSE, NULL);
 
     GstAppSrc *appsrc = GST_APP_SRC(appsrc_elem);
     gst_app_src_set_caps(appsrc, caps);
@@ -675,7 +675,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         CHECK_ELEM(audio_record_sink, "appsink");
 
         g_object_set(audio_appsrc, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
-                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, NULL);
+                     GST_APP_STREAM_TYPE_STREAM, "do-timestamp", FALSE, NULL);
         gst_app_src_set_latency(GST_APP_SRC(audio_appsrc), 0, 0);
         gst_app_src_set_max_bytes(GST_APP_SRC(audio_appsrc), 1024 * 1024);
 

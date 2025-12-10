@@ -82,6 +82,13 @@ struct UdpReceiver {
     gboolean video_discont_pending;
     gboolean audio_discont_pending;
 
+    gboolean video_ts_initialized;
+    gboolean audio_ts_initialized;
+    guint64 video_rtp_ext_last;
+    guint64 audio_rtp_ext_last;
+    guint64 video_rtp_base;
+    guint64 audio_rtp_base;
+
     GstBufferPool *pool;
     gsize buffer_size;
 
@@ -222,6 +229,55 @@ static inline gint16 seq_delta(guint16 a, guint16 b) {
 
 static inline guint64 get_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
+}
+
+static void reset_rtp_timeline(struct UdpReceiver *ur, gboolean audio) {
+    if (audio) {
+        ur->audio_ts_initialized = FALSE;
+        ur->audio_rtp_ext_last = 0;
+        ur->audio_rtp_base = 0;
+    } else {
+        ur->video_ts_initialized = FALSE;
+        ur->video_rtp_ext_last = 0;
+        ur->video_rtp_base = 0;
+    }
+}
+
+static guint64 extend_rtp_timestamp(gboolean *initialized, guint64 *last_ext, guint32 ts) {
+    if (!*initialized) {
+        *initialized = TRUE;
+        *last_ext = (guint64)ts;
+        return (guint64)ts;
+    }
+
+    guint32 last_low = (guint32)(*last_ext);
+    gint32 delta = (gint32)(ts - last_low);
+    guint64 extended = *last_ext + (gint64)delta;
+    *last_ext = extended;
+    return extended;
+}
+
+static GstClockTime rtp_timestamp_to_gst(struct UdpReceiver *ur, gboolean audio, guint32 ts) {
+    guint32 clock_rate = audio ? 48000u : 90000u;
+    guint64 *last_ext = audio ? &ur->audio_rtp_ext_last : &ur->video_rtp_ext_last;
+    guint64 *base = audio ? &ur->audio_rtp_base : &ur->video_rtp_base;
+    gboolean *initialized = audio ? &ur->audio_ts_initialized : &ur->video_ts_initialized;
+
+    if (clock_rate == 0) {
+        return GST_CLOCK_TIME_NONE;
+    }
+
+    guint64 extended = extend_rtp_timestamp(initialized, last_ext, ts);
+    if (!*initialized) {
+        return GST_CLOCK_TIME_NONE;
+    }
+
+    if (*base == 0) {
+        *base = extended;
+    }
+
+    guint64 offset = extended >= *base ? (extended - *base) : 0;
+    return gst_util_uint64_scale(offset, GST_SECOND, clock_rate);
 }
 
 static inline void advance_expected_sequence(struct UdpReceiver *ur, const RtpParseResult *parsed) {
@@ -537,8 +593,18 @@ static gboolean handle_received_packet_fastpath(struct UdpReceiver *ur,
     gst_buffer_unmap(gstbuf, map);
 
     if (mark_discont) {
+        reset_rtp_timeline(ur, FALSE);
+    }
+
+    if (mark_discont) {
         GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_DISCONT);
         GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
+    }
+
+    GstClockTime pts = rtp_timestamp_to_gst(ur, FALSE, preview.timestamp);
+    if (GST_CLOCK_TIME_IS_VALID(pts)) {
+        GST_BUFFER_PTS(gstbuf) = pts;
+        GST_BUFFER_DTS(gstbuf) = pts;
     }
 
     GstFlowReturn flow = gst_app_src_push_buffer(ur->video_appsrc, gstbuf);
@@ -576,6 +642,8 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     gboolean drop_packet = FALSE;
     gboolean mark_discont = FALSE;
     gboolean target_is_audio = FALSE;
+    gboolean reset_audio_ts = FALSE;
+    gboolean reset_video_ts = FALSE;
     GstAppSrc *target_appsrc = NULL;
     RtpParseResult preview;
     gboolean have_preview = FALSE;
@@ -618,12 +686,14 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
             target_is_audio = TRUE;
             if (g_atomic_int_compare_and_exchange((gint *)&ur->audio_discont_pending, TRUE, FALSE)) {
                 mark_discont = TRUE;
+                reset_audio_ts = TRUE;
             }
         } else {
             target_appsrc = ur->video_appsrc;
             target_is_audio = FALSE;
             if (g_atomic_int_compare_and_exchange((gint *)&ur->video_discont_pending, TRUE, FALSE)) {
                 mark_discont = TRUE;
+                reset_video_ts = TRUE;
             }
         }
     }
@@ -637,9 +707,23 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
         return TRUE;
     }
 
+    if (reset_audio_ts) {
+        reset_rtp_timeline(ur, TRUE);
+    } else if (reset_video_ts) {
+        reset_rtp_timeline(ur, FALSE);
+    }
+
     if (mark_discont) {
         GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_DISCONT);
         GST_BUFFER_FLAG_SET(gstbuf, GST_BUFFER_FLAG_RESYNC);
+    }
+
+    if (parsed != NULL) {
+        GstClockTime pts = rtp_timestamp_to_gst(ur, target_is_audio, parsed->timestamp);
+        if (GST_CLOCK_TIME_IS_VALID(pts)) {
+            GST_BUFFER_PTS(gstbuf) = pts;
+            GST_BUFFER_DTS(gstbuf) = pts;
+        }
     }
 
     GstFlowReturn flow = gst_app_src_push_buffer(target_appsrc, gstbuf);
@@ -870,6 +954,8 @@ UdpReceiver *udp_receiver_create(int udp_port,
     ur->sockfd = -1;
     ur->video_discont_pending = TRUE;
     ur->audio_discont_pending = TRUE;
+    reset_rtp_timeline(ur, FALSE);
+    reset_rtp_timeline(ur, TRUE);
     g_mutex_init(&ur->lock);
     ur->video_appsrc = GST_APP_SRC(gst_object_ref(video_appsrc));
     ur->audio_appsrc = NULL;
@@ -895,8 +981,10 @@ void udp_receiver_set_audio_appsrc(UdpReceiver *ur, GstAppSrc *audio_appsrc) {
     if (audio_appsrc != NULL) {
         ur->audio_appsrc = GST_APP_SRC(gst_object_ref(audio_appsrc));
         ur->audio_discont_pending = TRUE;
+        reset_rtp_timeline(ur, TRUE);
     } else {
         ur->audio_discont_pending = TRUE;
+        reset_rtp_timeline(ur, TRUE);
     }
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);
@@ -960,6 +1048,8 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
     reset_stats_locked(ur);
     ur->video_discont_pending = TRUE;
     ur->audio_discont_pending = TRUE;
+    reset_rtp_timeline(ur, FALSE);
+    reset_rtp_timeline(ur, TRUE);
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
     ur->last_packet_ns = 0;
