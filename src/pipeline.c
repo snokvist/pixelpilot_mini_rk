@@ -99,6 +99,37 @@ static void pipeline_mark_reinit_requested(PipelineState *ps) {
     g_mutex_unlock(&ps->lock);
 }
 
+static GstFlowReturn audio_record_new_sample(GstAppSink *appsink, gpointer user_data) {
+    PipelineState *ps = (PipelineState *)user_data;
+    if (ps == NULL || appsink == NULL) {
+        return GST_FLOW_OK;
+    }
+
+    GstSample *sample = gst_app_sink_pull_sample(appsink);
+    if (sample == NULL) {
+        return GST_FLOW_OK;
+    }
+
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    if (buffer != NULL) {
+        GstMapInfo map;
+        if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+            if (map.size > 0) {
+                g_mutex_lock(&ps->recorder_lock);
+                VideoRecorder *recorder = ps->recorder;
+                if (recorder != NULL) {
+                    video_recorder_handle_audio(recorder, sample, map.data, map.size);
+                }
+                g_mutex_unlock(&ps->recorder_lock);
+            }
+            gst_buffer_unmap(buffer, &map);
+        }
+    }
+
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
+}
+
 static void idr_requester_reinit_callback(IdrRequester *req, gpointer user_data) {
     (void)req;
     PipelineState *ps = (PipelineState *)user_data;
@@ -496,11 +527,20 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     GstElement *audio_appsrc = NULL;
     GstElement *audio_queue_start = NULL;
     GstElement *audio_depay = NULL;
+    GstElement *audio_tee = NULL;
+    GstElement *audio_queue_play = NULL;
     GstElement *audio_decoder = NULL;
     GstElement *audio_convert = NULL;
     GstElement *audio_resample = NULL;
     GstElement *audio_queue_sink = NULL;
     GstElement *audio_sink = NULL;
+    GstElement *audio_record_queue = NULL;
+    GstElement *audio_record_decoder = NULL;
+    GstElement *audio_record_convert = NULL;
+    GstElement *audio_record_resample = NULL;
+    GstElement *audio_record_encoder = NULL;
+    GstElement *audio_record_parse = NULL;
+    GstElement *audio_record_sink = NULL;
     GstCaps *audio_caps = NULL;
 
     release_selector_pad(ps->input_selector, &ps->selector_udp_pad);
@@ -601,20 +641,38 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         audio_appsrc = gst_element_factory_make("appsrc", "udp_audio_appsrc");
         audio_queue_start = gst_element_factory_make("queue", "audio_queue_start");
         audio_depay = gst_element_factory_make("rtpopusdepay", "audio_depay");
+        audio_tee = gst_element_factory_make("tee", "audio_tee");
+        audio_queue_play = gst_element_factory_make("queue", "audio_queue_play");
         audio_decoder = gst_element_factory_make("opusdec", "audio_decoder");
         audio_convert = gst_element_factory_make("audioconvert", "audio_convert");
         audio_resample = gst_element_factory_make("audioresample", "audio_resample");
         audio_queue_sink = gst_element_factory_make("queue", "audio_queue_sink");
         audio_sink = gst_element_factory_make("alsasink", "audio_sink");
+        audio_record_queue = gst_element_factory_make("queue", "audio_record_queue");
+        audio_record_decoder = gst_element_factory_make("opusdec", "audio_record_decoder");
+        audio_record_convert = gst_element_factory_make("audioconvert", "audio_record_convert");
+        audio_record_resample = gst_element_factory_make("audioresample", "audio_record_resample");
+        audio_record_encoder = gst_element_factory_make("voaacenc", "audio_record_encoder");
+        audio_record_parse = gst_element_factory_make("aacparse", "audio_record_parse");
+        audio_record_sink = gst_element_factory_make("appsink", "audio_record_sink");
 
         CHECK_ELEM(audio_appsrc, "appsrc");
         CHECK_ELEM(audio_queue_start, "queue");
         CHECK_ELEM(audio_depay, "rtpopusdepay");
+        CHECK_ELEM(audio_tee, "tee");
+        CHECK_ELEM(audio_queue_play, "queue");
         CHECK_ELEM(audio_decoder, "opusdec");
         CHECK_ELEM(audio_convert, "audioconvert");
         CHECK_ELEM(audio_resample, "audioresample");
         CHECK_ELEM(audio_queue_sink, "queue");
         CHECK_ELEM(audio_sink, "alsasink");
+        CHECK_ELEM(audio_record_queue, "queue");
+        CHECK_ELEM(audio_record_decoder, "opusdec");
+        CHECK_ELEM(audio_record_convert, "audioconvert");
+        CHECK_ELEM(audio_record_resample, "audioresample");
+        CHECK_ELEM(audio_record_encoder, "voaacenc");
+        CHECK_ELEM(audio_record_parse, "aacparse");
+        CHECK_ELEM(audio_record_sink, "appsink");
 
         g_object_set(audio_appsrc, "is-live", TRUE, "format", GST_FORMAT_TIME, "stream-type",
                      GST_APP_STREAM_TYPE_STREAM, "do-timestamp", TRUE, NULL);
@@ -634,13 +692,34 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
 
         g_object_set(audio_queue_start, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0, NULL);
         g_object_set(audio_queue_sink, "leaky", 2, NULL);
+        g_object_set(audio_queue_play, "leaky", 2, NULL);
+        g_object_set(audio_record_queue, "leaky", 2, NULL);
         g_object_set(audio_sink, "device", cfg->aud_dev, "sync", FALSE, "async", FALSE, NULL);
+        gst_app_sink_set_max_buffers(GST_APP_SINK(audio_record_sink), 8);
+        gst_app_sink_set_drop(GST_APP_SINK(audio_record_sink), TRUE);
+        g_object_set(audio_record_sink, "emit-signals", TRUE, "sync", FALSE, "async", FALSE, NULL);
+        g_signal_connect(audio_record_sink, "new-sample", G_CALLBACK(audio_record_new_sample), ps);
 
-        gst_bin_add_many(GST_BIN(pipeline), audio_appsrc, audio_queue_start, audio_depay, audio_decoder,
-                         audio_convert, audio_resample, audio_queue_sink, audio_sink, NULL);
-        if (!gst_element_link_many(audio_appsrc, audio_queue_start, audio_depay, audio_decoder, audio_convert,
-                                   audio_resample, audio_queue_sink, audio_sink, NULL)) {
-            LOGE("Failed to link audio branch for UDP receiver passthrough");
+        gst_bin_add_many(GST_BIN(pipeline), audio_appsrc, audio_queue_start, audio_depay, audio_tee, audio_queue_play,
+                         audio_decoder, audio_convert, audio_resample, audio_queue_sink, audio_sink, audio_record_queue,
+                         audio_record_decoder, audio_record_convert, audio_record_resample, audio_record_encoder,
+                         audio_record_parse, audio_record_sink, NULL);
+        if (!gst_element_link_many(audio_appsrc, audio_queue_start, audio_depay, audio_tee, NULL)) {
+            LOGE("Failed to link audio depayloader to tee for UDP receiver passthrough");
+            goto fail;
+        }
+        if (!gst_element_link_many(audio_queue_play, audio_decoder, audio_convert, audio_resample, audio_queue_sink,
+                                   audio_sink, NULL)) {
+            LOGE("Failed to link audio playback branch for UDP receiver passthrough");
+            goto fail;
+        }
+        if (!gst_element_link_many(audio_record_queue, audio_record_decoder, audio_record_convert, audio_record_resample,
+                                   audio_record_encoder, audio_record_parse, audio_record_sink, NULL)) {
+            LOGE("Failed to link audio recording branch for UDP receiver passthrough");
+            goto fail;
+        }
+        if (!gst_element_link(audio_tee, audio_queue_play) || !gst_element_link(audio_tee, audio_record_queue)) {
+            LOGE("Failed to link tee to audio branches for UDP receiver passthrough");
             goto fail;
         }
 
@@ -671,6 +750,27 @@ fail:
     if (receiver != NULL) {
         udp_receiver_destroy(receiver);
     }
+    if (audio_record_sink != NULL && GST_OBJECT_PARENT(audio_record_sink) == NULL) {
+        gst_object_unref(audio_record_sink);
+    }
+    if (audio_record_parse != NULL && GST_OBJECT_PARENT(audio_record_parse) == NULL) {
+        gst_object_unref(audio_record_parse);
+    }
+    if (audio_record_encoder != NULL && GST_OBJECT_PARENT(audio_record_encoder) == NULL) {
+        gst_object_unref(audio_record_encoder);
+    }
+    if (audio_record_resample != NULL && GST_OBJECT_PARENT(audio_record_resample) == NULL) {
+        gst_object_unref(audio_record_resample);
+    }
+    if (audio_record_convert != NULL && GST_OBJECT_PARENT(audio_record_convert) == NULL) {
+        gst_object_unref(audio_record_convert);
+    }
+    if (audio_record_decoder != NULL && GST_OBJECT_PARENT(audio_record_decoder) == NULL) {
+        gst_object_unref(audio_record_decoder);
+    }
+    if (audio_record_queue != NULL && GST_OBJECT_PARENT(audio_record_queue) == NULL) {
+        gst_object_unref(audio_record_queue);
+    }
     if (audio_sink != NULL && GST_OBJECT_PARENT(audio_sink) == NULL) {
         gst_object_unref(audio_sink);
     }
@@ -685,6 +785,12 @@ fail:
     }
     if (audio_decoder != NULL && GST_OBJECT_PARENT(audio_decoder) == NULL) {
         gst_object_unref(audio_decoder);
+    }
+    if (audio_queue_play != NULL && GST_OBJECT_PARENT(audio_queue_play) == NULL) {
+        gst_object_unref(audio_queue_play);
+    }
+    if (audio_tee != NULL && GST_OBJECT_PARENT(audio_tee) == NULL) {
+        gst_object_unref(audio_tee);
     }
     if (audio_depay != NULL && GST_OBJECT_PARENT(audio_depay) == NULL) {
         gst_object_unref(audio_depay);

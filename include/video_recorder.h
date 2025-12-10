@@ -18,6 +18,7 @@ typedef struct {
 
 VideoRecorder *video_recorder_new(const RecordCfg *cfg);
 void video_recorder_handle_sample(VideoRecorder *recorder, GstSample *sample, const guint8 *data, size_t size);
+void video_recorder_handle_audio(VideoRecorder *recorder, GstSample *sample, const guint8 *data, size_t size);
 void video_recorder_flush(VideoRecorder *recorder);
 void video_recorder_free(VideoRecorder *recorder);
 void video_recorder_get_stats(const VideoRecorder *recorder, VideoRecorderStats *stats);

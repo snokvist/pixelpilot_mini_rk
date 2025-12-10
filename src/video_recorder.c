@@ -11,7 +11,7 @@
 #include <string.h>
 
 #define MINIMP4_IMPLEMENTATION
-#define MP4E_MAX_TRACKS 1
+#define MP4E_MAX_TRACKS 2
 #if defined(__GNUC__) && !defined(__clang_analyzer__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -50,6 +50,11 @@ struct VideoRecorder {
     guint64 bytes_written;
     guint64 total_duration_90k;
     guint64 start_time_ns;
+    gboolean audio_initialized;
+    guint audio_timescale;
+    guint audio_default_duration;
+    int audio_track_id;
+    guint64 audio_total_duration_ns;
     GMutex stats_lock;
 };
 
@@ -157,6 +162,20 @@ static void pending_reset(struct PendingSample *pending) {
     memset(pending, 0, sizeof(*pending));
 }
 
+static guint64 gst_duration_to_timescale(GstClockTime duration, guint timescale) {
+    if (!GST_CLOCK_TIME_IS_VALID(duration) || duration == 0 || timescale == 0) {
+        return 0;
+    }
+    return gst_util_uint64_scale(duration, timescale, GST_SECOND);
+}
+
+static guint64 gst_duration_from_timescale(guint64 value, guint timescale) {
+    if (value == 0 || timescale == 0) {
+        return 0;
+    }
+    return gst_util_uint64_scale(value, GST_SECOND, timescale);
+}
+
 static gboolean ensure_writer_initialized(VideoRecorder *rec, GstSample *sample) {
     if (rec->writer_initialized || rec->mux == NULL) {
         return rec->writer_initialized;
@@ -208,6 +227,73 @@ static gboolean ensure_writer_initialized(VideoRecorder *rec, GstSample *sample)
     rec->writer_initialized = TRUE;
     rec->width = width;
     rec->height = height;
+    return TRUE;
+}
+
+static gboolean ensure_audio_track_initialized(VideoRecorder *rec, GstSample *sample) {
+    if (rec == NULL || rec->failed || rec->mux == NULL) {
+        return FALSE;
+    }
+
+    if (rec->audio_initialized) {
+        return TRUE;
+    }
+
+    guint rate = rec->audio_timescale;
+    guint channels = 2;
+    GstBuffer *codec_data = NULL;
+
+    if (sample != NULL) {
+        GstCaps *caps = gst_sample_get_caps(sample);
+        if (caps != NULL) {
+            GstStructure *s = gst_caps_get_structure(caps, 0);
+            if (s != NULL) {
+                gint tmp = 0;
+                if (gst_structure_get_int(s, "rate", &tmp) && tmp > 0) {
+                    rate = (guint)tmp;
+                }
+                if (gst_structure_get_int(s, "channels", &tmp) && tmp > 0) {
+                    channels = (guint)tmp;
+                }
+                codec_data = gst_structure_get_value(s, "codec_data") != NULL
+                                 ? gst_value_get_buffer(gst_structure_get_value(s, "codec_data"))
+                                 : NULL;
+            }
+        }
+    }
+
+    MP4E_track_t tr;
+    memset(&tr, 0, sizeof(tr));
+    tr.track_media_kind = e_audio;
+    tr.language[0] = 'u';
+    tr.language[1] = 'n';
+    tr.language[2] = 'd';
+    tr.language[3] = 0;
+    tr.object_type_indication = MP4_OBJECT_TYPE_AUDIO_ISO_IEC_14496_3;
+    tr.time_scale = rate > 0 ? rate : 48000;
+    tr.default_duration = rec->audio_default_duration;
+    tr.u.a.channelcount = channels;
+
+    int track_id = MP4E_add_track(rec->mux, &tr);
+    if (track_id < 0) {
+        LOGE("minimp4: failed to add AAC track");
+        rec->failed = TRUE;
+        return FALSE;
+    }
+    rec->audio_track_id = track_id;
+    rec->audio_timescale = tr.time_scale;
+
+    if (codec_data != NULL) {
+        GstMapInfo map;
+        if (gst_buffer_map(codec_data, &map, GST_MAP_READ)) {
+            if (MP4E_set_dsi(rec->mux, rec->audio_track_id, map.data, (int)map.size) != MP4E_STATUS_OK) {
+                LOGW("minimp4: failed to set AAC codec_data (%zu bytes)", map.size);
+            }
+            gst_buffer_unmap(codec_data, &map);
+        }
+    }
+
+    rec->audio_initialized = TRUE;
     return TRUE;
 }
 
@@ -313,6 +399,11 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
     rec->bytes_written = 0;
     rec->total_duration_90k = 0;
     rec->start_time_ns = (guint64)g_get_monotonic_time() * 1000u;
+    rec->audio_initialized = FALSE;
+    rec->audio_timescale = 48000;
+    rec->audio_default_duration = 1024;
+    rec->audio_track_id = -1;
+    rec->audio_total_duration_ns = 0;
 
     rec->mode = cfg->mode;
     rec->sequential_mode_flag = 1;
@@ -399,6 +490,46 @@ void video_recorder_handle_sample(VideoRecorder *rec, GstSample *sample, const g
     rec->pending.valid = TRUE;
 }
 
+void video_recorder_handle_audio(VideoRecorder *rec, GstSample *sample, const guint8 *data, size_t size) {
+    if (rec == NULL || !rec->enabled || rec->failed || data == NULL || size == 0) {
+        return;
+    }
+
+    if (!ensure_audio_track_initialized(rec, sample)) {
+        return;
+    }
+
+    if (size > (size_t)INT_MAX) {
+        LOGW("record: dropping oversized audio buffer (%zu bytes)", size);
+        return;
+    }
+
+    GstClockTime duration = GST_CLOCK_TIME_NONE;
+    GstBuffer *buffer = sample != NULL ? gst_sample_get_buffer(sample) : NULL;
+    if (buffer != NULL) {
+        duration = GST_BUFFER_DURATION(buffer);
+    }
+
+    guint64 duration_ts = gst_duration_to_timescale(duration, rec->audio_timescale);
+    if (duration_ts == 0) {
+        duration_ts = rec->audio_default_duration;
+    }
+
+    int err = MP4E_put_sample(rec->mux, rec->audio_track_id, data, (int)size, (int)duration_ts, MP4E_SAMPLE_DEFAULT);
+    if (err != MP4E_STATUS_OK) {
+        LOGE("minimp4: failed to write AAC sample (err=%d)", err);
+        rec->failed = TRUE;
+        return;
+    }
+
+    guint64 duration_ns = gst_duration_from_timescale(duration_ts, rec->audio_timescale);
+    if (duration_ns > 0) {
+        g_mutex_lock(&rec->stats_lock);
+        rec->audio_total_duration_ns += duration_ns;
+        g_mutex_unlock(&rec->stats_lock);
+    }
+}
+
 void video_recorder_flush(VideoRecorder *rec) {
     if (rec == NULL || !rec->enabled || rec->failed) {
         pending_reset(&rec->pending);
@@ -461,7 +592,8 @@ void video_recorder_get_stats(const VideoRecorder *rec, VideoRecorderStats *stat
     g_mutex_lock((GMutex *)&rec->stats_lock);
     stats->active = rec->enabled && !rec->failed && rec->fp != NULL && rec->mux != NULL;
     stats->bytes_written = rec->bytes_written;
-    stats->media_duration_ns = gst_util_uint64_scale(rec->total_duration_90k, GST_SECOND, 90000);
+    guint64 video_duration_ns = gst_util_uint64_scale(rec->total_duration_90k, GST_SECOND, 90000);
+    stats->media_duration_ns = video_duration_ns > rec->audio_total_duration_ns ? video_duration_ns : rec->audio_total_duration_ns;
     if (rec->start_time_ns != 0) {
         guint64 now_ns = (guint64)g_get_monotonic_time() * 1000u;
         if (now_ns > rec->start_time_ns) {
