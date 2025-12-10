@@ -13,11 +13,7 @@ sudo apt-get install \
     libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 ```
 
-For the GPU-accelerated CTM path, install the EGL/GBM headers that match your Mali userspace (for example `libegl1-mesa-dev`, `libgles2-mesa-dev`, and `libgbm-dev` on Debian/Ubuntu when testing with the Mesa stack).
-
-PixelPilot Mini RK can apply the optional color transformation matrix (CTM) entirely in hardware when both `librga` and the Mali EGL stack are available. If `pkg-config --exists librga` succeeds the build defines `HAVE_LIBRGA` so NV12 frames can be converted by Rockchip's RGA accelerator without touching the CPU. When `pkg-config` also locates `egl`, `glesv2`, and `gbm`, the Makefile enables `HAVE_GBM_GLES2`; at runtime the decoder imports the decoder's DMA-BUFs into an EGL context, applies the CTM through a fragment shader, and hands the intermediate buffer back to RGA for the final NV12 conversion. This path keeps the decode → color transform → display pipeline zero-copy. Most distributions do not ship `librga-dev` or the Mali headers, so pull them from the Rockchip BSP or the standalone [librga](https://github.com/rockchip-linux/rga) and [mali userspace](https://github.com/rockchip-linux/libmali) releases when building on bare Debian/Ubuntu hosts.
-
-Boards that install libmali without pkg-config files (common on RK3566 images) can still enable the GPU backend by pointing the build at the libraries directly. Either export `MALI_EGL_LIBS`/`MALI_EGL_CFLAGS` with the appropriate `-L`/`-I` flags or rely on the built-in search that looks for `/usr/lib/aarch64-linux-gnu/libmali.so`, `/usr/lib64/libmali.so`, `/usr/lib/libmali.so`, and `/usr/local/lib/libmali.so`. When one of those paths exists the Makefile automatically links against `-lEGL -lGLESv2 -lgbm` with the detected `-L` directory so the GPU path is compiled in without additional host setup.
+The optional CTM support now relies solely on DRM color matrices.
 
 The Rockchip MPP headers and libraries are also distributed outside the standard repositories. Fetch them from the [rockchip-mpp](https://github.com/rockchip-linux/mpp) project and install them into a prefix on your build host (for example `/usr/local`). Expose the headers to the compiler either through `pkg-config` (`rockchip-mpp.pc`) or by ensuring they reside in `/usr/include/rockchip` as expected by the default Makefile fallbacks.
 
@@ -42,29 +38,16 @@ The uninstall target disables the services, removes the installed files (includi
 ### Live CTM overrides over the external OSD feed
 
 When `[osd.external].enable = true` the helper listens for JSON payloads on the configured UDP port and mirrors the most recent
-message into the on-screen display pipeline. The same channel can now steer the GPU color transform in real time without touching
-the persistent INI file. Send a datagram that includes a top-level `ctm` object with any combination of the supported keys:
-
-* `matrix` – nine coefficients that form the 3×3 RGB matrix (row-major order).
-* `sharpness` – GPU luma sharpening strength.
-* `gamma` – gamma power (>0) applied after the matrix.
-* `gamma_lift` / `gamma_gain` – pre-gamma lift and gain controls.
-* `gamma_r_mult` / `gamma_g_mult` / `gamma_b_mult` or `gamma_mult` – per-channel multipliers before gamma.
-* `flip` – `true` rotates the GPU output by 180°, `false` keeps the default orientation.
+message into the on-screen display pipeline. The same channel can now steer the DRM CTM matrix in real time without touching the
+persistent INI file. Send a datagram that includes a top-level `ctm` object with a 3×3 `matrix`.
 
 Updates apply immediately to the running decoder but are not written back to disk; restarting the process restores the INI values.
-The payload may contain a subset of the keys to update only the fields you care about. Example messages:
+Example payloads:
 
 ```json
 {
   "ctm": {
-    "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1],
-    "sharpness": 20,
-    "gamma": 1.0,
-    "gamma_lift": 0.0,
-    "gamma_gain": 1.0,
-    "gamma_mult": [1.0, 1.0, 1.0],
-    "flip": false
+    "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1]
   }
 }
 ```
@@ -72,30 +55,10 @@ The payload may contain a subset of the keys to update only the fields you care 
 ```json
 {
   "ctm": {
-    "gamma_gain": 1.15,
-    "gamma_lift": -0.02
+    "matrix": [0.9, 0, 0, 0, 1.05, 0, 0, 0, 1]
   }
 }
 ```
-
-### CTM performance telemetry
-
-The GPU CTM path now timestamps its hot spots so you can monitor how much CPU time each frame spends waiting on the fragment
-shader and the follow-up RGA conversion. Every successful GPU pass records the most recent sample together with running averages
-and peaks. The metrics surface through the OSD token namespace under `video.ctm.*` and therefore integrate with the existing
-layout system. The most commonly useful counters are:
-
-* `video.ctm.gpu.issue_ms` – CPU time spent issuing GL work before the GPU fence is inserted.
-* `video.ctm.gpu.wait_ms` / `video.ctm.gpu.total_ms` – time spent waiting for the GPU to finish the CTM shader.
-* `video.ctm.convert.last_ms` – CPU time consumed by the RGBA→NV12 conversion executed after the shader.
-* `video.ctm.frame.last_ms` – total wall-clock time for the CTM stage (shader + conversion).
-* `video.ctm.*.avg_ms` / `video.ctm.*.max_ms` – rolling averages and high-water marks for the same phases.
-* `video.ctm.frame.count` – number of frames that have flowed through the GPU backend since the last reset.
-
-Update `config/osd-external-test.ini` or your own layout to plot or display any of these fields directly (for example,
-`metric = video.ctm.gpu.wait_ms`). The refreshed sample configuration already maps the CTM timings onto the external-value plots
-and augments the text widget with per-frame statistics so you can watch the numbers climb when enabling gamma tweaks or pushing
-the decoder to higher refresh rates.
 
 ## Configuration via INI
 
@@ -126,15 +89,8 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].video-plane-id` | Numeric plane ID used for the decoded video plane. |
 | `[drm].use-udev` | `true` to enable the hotplug listener that reapplies modes when connectors change. |
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
-| `[video.ctm].enable` | Enable the 3×3 color transform matrix path before posting decoded frames. |
-| `[video.ctm].backend` | Choose the CTM backend: `auto` (default) or `gpu` (EGL + librga). |
+| `[video.ctm].enable` | Enable the 3×3 color transform matrix path before posting decoded frames (applies via DRM CTM when available). |
 | `[video.ctm].matrix` | Nine comma-separated coefficients that form the 3×3 RGB color transform matrix (row-major). |
-| `[video.ctm].sharpness` | GPU luma sharpening strength. `0` disables the kernel; higher values increase high-frequency contrast. |
-| `[video.ctm].gamma` | GPU gamma power (>0) applied after the matrix. Values above `1.0` brighten mids; below `1.0` darken them. |
-| `[video.ctm].gamma-lift` | Black level offset added before gamma (positive raises shadows, negative deepens them). |
-| `[video.ctm].gamma-gain` | Scalar highlight gain applied before gamma, useful for overall exposure compensation. |
-| `[video.ctm].gamma-r-mult` / `.gamma-g-mult` / `.gamma-b-mult` | Per-channel multipliers for warm/cool balance before gamma (default `1.0`). |
-| `[video.ctm].flip` | `true` rotates the GPU path output by 180° (mirroring both axes); `false` keeps the natural orientation. |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |

@@ -196,18 +196,9 @@ void cfg_defaults(AppCfg *c) {
     strcpy(c->idr.http_path, "/request/idr");
 
     c->video_ctm.enable = 0;
-    c->video_ctm.backend = VIDEO_CTM_BACKEND_AUTO;
     for (int i = 0; i < 9; ++i) {
         c->video_ctm.matrix[i] = (i % 4 == 0) ? 1.0 : 0.0;
     }
-    c->video_ctm.sharpness = 0.35;
-    c->video_ctm.gamma_value = 1.0;
-    c->video_ctm.gamma_lift = 0.0;
-    c->video_ctm.gamma_gain = 1.0;
-    c->video_ctm.gamma_r_mult = 1.0;
-    c->video_ctm.gamma_g_mult = 1.0;
-    c->video_ctm.gamma_b_mult = 1.0;
-    c->video_ctm.flip = 0;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {

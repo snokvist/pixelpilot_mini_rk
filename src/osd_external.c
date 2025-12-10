@@ -135,22 +135,6 @@ typedef struct {
     int has_matrix;
     size_t matrix_count;
     double matrix[9];
-    int has_sharpness;
-    double sharpness;
-    int has_gamma_value;
-    double gamma_value;
-    int has_gamma_lift;
-    double gamma_lift;
-    int has_gamma_gain;
-    double gamma_gain;
-    int has_gamma_r_mult;
-    double gamma_r_mult;
-    int has_gamma_g_mult;
-    double gamma_g_mult;
-    int has_gamma_b_mult;
-    double gamma_b_mult;
-    int has_flip;
-    int flip;
 } OsdExternalCtmMessage;
 
 typedef struct {
@@ -465,109 +449,6 @@ static const char *parse_ctm_object(const char *p, OsdExternalMessage *msg) {
                 }
             }
             p = skip_ws(after);
-        } else if (strcmp(key, "sharpness") == 0) {
-            char *end = NULL;
-            double v = strtod(p, &end);
-            if (end == p) {
-                return NULL;
-            }
-            msg->ctm.has_any = 1;
-            msg->ctm.has_sharpness = 1;
-            msg->ctm.sharpness = v;
-            p = skip_ws(end);
-        } else if (strcmp(key, "gamma") == 0) {
-            char *end = NULL;
-            double v = strtod(p, &end);
-            if (end == p) {
-                return NULL;
-            }
-            msg->ctm.has_any = 1;
-            msg->ctm.has_gamma_value = 1;
-            msg->ctm.gamma_value = v;
-            p = skip_ws(end);
-        } else if (strcmp(key, "gamma_lift") == 0 || strcmp(key, "gamma-lift") == 0) {
-            char *end = NULL;
-            double v = strtod(p, &end);
-            if (end == p) {
-                return NULL;
-            }
-            msg->ctm.has_any = 1;
-            msg->ctm.has_gamma_lift = 1;
-            msg->ctm.gamma_lift = v;
-            p = skip_ws(end);
-        } else if (strcmp(key, "gamma_gain") == 0 || strcmp(key, "gamma-gain") == 0) {
-            char *end = NULL;
-            double v = strtod(p, &end);
-            if (end == p) {
-                return NULL;
-            }
-            msg->ctm.has_any = 1;
-            msg->ctm.has_gamma_gain = 1;
-            msg->ctm.gamma_gain = v;
-            p = skip_ws(end);
-        } else if (strcmp(key, "gamma_r_mult") == 0 || strcmp(key, "gamma-r-mult") == 0) {
-            char *end = NULL;
-            double v = strtod(p, &end);
-            if (end == p) {
-                return NULL;
-            }
-            msg->ctm.has_any = 1;
-            msg->ctm.has_gamma_r_mult = 1;
-            msg->ctm.gamma_r_mult = v;
-            p = skip_ws(end);
-        } else if (strcmp(key, "gamma_g_mult") == 0 || strcmp(key, "gamma-g-mult") == 0) {
-            char *end = NULL;
-            double v = strtod(p, &end);
-            if (end == p) {
-                return NULL;
-            }
-            msg->ctm.has_any = 1;
-            msg->ctm.has_gamma_g_mult = 1;
-            msg->ctm.gamma_g_mult = v;
-            p = skip_ws(end);
-        } else if (strcmp(key, "gamma_b_mult") == 0 || strcmp(key, "gamma-b-mult") == 0) {
-            char *end = NULL;
-            double v = strtod(p, &end);
-            if (end == p) {
-                return NULL;
-            }
-            msg->ctm.has_any = 1;
-            msg->ctm.has_gamma_b_mult = 1;
-            msg->ctm.gamma_b_mult = v;
-            p = skip_ws(end);
-        } else if (strcmp(key, "gamma_mult") == 0 || strcmp(key, "gamma-mult") == 0) {
-            double values[3] = {0};
-            size_t count = 0;
-            const char *after = parse_double_array(p, values, 3, &count);
-            if (!after) {
-                return NULL;
-            }
-            if (count > 0) {
-                msg->ctm.has_any = 1;
-                if (count > 0) {
-                    msg->ctm.has_gamma_r_mult = 1;
-                    msg->ctm.gamma_r_mult = values[0];
-                }
-                if (count > 1) {
-                    msg->ctm.has_gamma_g_mult = 1;
-                    msg->ctm.gamma_g_mult = values[1];
-                }
-                if (count > 2) {
-                    msg->ctm.has_gamma_b_mult = 1;
-                    msg->ctm.gamma_b_mult = values[2];
-                }
-            }
-            p = skip_ws(after);
-        } else if (strcmp(key, "flip") == 0) {
-            int value = 0;
-            const char *after = parse_bool_literal(p, &value);
-            if (!after) {
-                return NULL;
-            }
-            msg->ctm.has_any = 1;
-            msg->ctm.has_flip = 1;
-            msg->ctm.flip = value;
-            p = skip_ws(after);
         } else {
             const char *after = skip_json_value(p);
             if (!after) {
@@ -806,38 +687,6 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
             for (int i = 0; i < 9; ++i) {
                 update.matrix[i] = msg->ctm.matrix[i];
             }
-        }
-        if (msg->ctm.has_sharpness) {
-            update.fields |= VIDEO_CTM_UPDATE_SHARPNESS;
-            update.sharpness = msg->ctm.sharpness;
-        }
-        if (msg->ctm.has_gamma_value) {
-            update.fields |= VIDEO_CTM_UPDATE_GAMMA;
-            update.gamma_value = msg->ctm.gamma_value;
-        }
-        if (msg->ctm.has_gamma_lift) {
-            update.fields |= VIDEO_CTM_UPDATE_GAMMA_LIFT;
-            update.gamma_lift = msg->ctm.gamma_lift;
-        }
-        if (msg->ctm.has_gamma_gain) {
-            update.fields |= VIDEO_CTM_UPDATE_GAMMA_GAIN;
-            update.gamma_gain = msg->ctm.gamma_gain;
-        }
-        if (msg->ctm.has_gamma_r_mult) {
-            update.fields |= VIDEO_CTM_UPDATE_GAMMA_R_MULT;
-            update.gamma_r_mult = msg->ctm.gamma_r_mult;
-        }
-        if (msg->ctm.has_gamma_g_mult) {
-            update.fields |= VIDEO_CTM_UPDATE_GAMMA_G_MULT;
-            update.gamma_g_mult = msg->ctm.gamma_g_mult;
-        }
-        if (msg->ctm.has_gamma_b_mult) {
-            update.fields |= VIDEO_CTM_UPDATE_GAMMA_B_MULT;
-            update.gamma_b_mult = msg->ctm.gamma_b_mult;
-        }
-        if (msg->ctm.has_flip) {
-            update.fields |= VIDEO_CTM_UPDATE_FLIP;
-            update.flip = msg->ctm.flip ? 1 : 0;
         }
         if (update.fields != 0) {
             uint32_t serial = bridge->snapshot.ctm.serial;

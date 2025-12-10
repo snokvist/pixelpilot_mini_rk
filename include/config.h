@@ -49,23 +49,9 @@ typedef struct {
     RecordMode mode;
 } RecordCfg;
 
-typedef enum {
-    VIDEO_CTM_BACKEND_AUTO = 0,
-    VIDEO_CTM_BACKEND_GPU,
-} VideoCtmBackend;
-
 typedef struct {
     int enable;
-    VideoCtmBackend backend;
     double matrix[9];
-    double sharpness;
-    double gamma_value;
-    double gamma_lift;
-    double gamma_gain;
-    double gamma_r_mult;
-    double gamma_g_mult;
-    double gamma_b_mult;
-    int flip;
 } VideoCtmCfg;
 
 typedef struct {
