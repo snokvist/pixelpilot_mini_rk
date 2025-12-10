@@ -58,6 +58,7 @@ struct VideoRecorder {
     GstClockTime audio_prev_pts;
     GstClockTime audio_prev_duration;
     guint64 audio_last_duration_ts;
+    gboolean audio_gated;
     GMutex stats_lock;
 };
 
@@ -177,6 +178,34 @@ static guint64 gst_duration_from_timescale(guint64 value, guint timescale) {
         return 0;
     }
     return gst_util_uint64_scale(value, GST_SECOND, timescale);
+}
+
+static void reset_audio_timing(VideoRecorder *rec) {
+    if (rec == NULL) {
+        return;
+    }
+
+    rec->audio_prev_pts = GST_CLOCK_TIME_NONE;
+    rec->audio_prev_duration = GST_CLOCK_TIME_NONE;
+    rec->audio_last_duration_ts = 0;
+}
+
+static void gate_audio_until_video(VideoRecorder *rec) {
+    if (rec == NULL) {
+        return;
+    }
+
+    rec->audio_gated = TRUE;
+    reset_audio_timing(rec);
+}
+
+static void allow_audio_after_video(VideoRecorder *rec) {
+    if (rec == NULL) {
+        return;
+    }
+
+    rec->audio_gated = FALSE;
+    reset_audio_timing(rec);
 }
 
 static gboolean ensure_writer_initialized(VideoRecorder *rec, GstSample *sample) {
@@ -381,11 +410,13 @@ static void emit_pending(VideoRecorder *rec, guint32 duration_90k) {
             LOGI("record: waiting for VPS/SPS/PPS+IDR before writing MP4; dropping frame");
             rec->awaiting_sync_warning = TRUE;
         }
+        gate_audio_until_video(rec);
     } else if (err != MP4E_STATUS_OK) {
         LOGE("minimp4: failed to write access unit (err=%d)", err);
         rec->failed = TRUE;
     } else {
         rec->awaiting_sync_warning = FALSE;
+        allow_audio_after_video(rec);
         g_mutex_lock(&rec->stats_lock);
         rec->total_duration_90k += duration_90k;
         g_mutex_unlock(&rec->stats_lock);
@@ -439,6 +470,7 @@ VideoRecorder *video_recorder_new(const RecordCfg *cfg) {
     rec->audio_prev_pts = GST_CLOCK_TIME_NONE;
     rec->audio_prev_duration = GST_CLOCK_TIME_NONE;
     rec->audio_last_duration_ts = 0;
+    rec->audio_gated = TRUE;
 
     rec->mode = cfg->mode;
     rec->sequential_mode_flag = 1;
@@ -502,27 +534,39 @@ void video_recorder_handle_sample(VideoRecorder *rec, GstSample *sample, const g
     }
     memcpy(copy, data, size);
 
-    GstClockTime pts = GST_CLOCK_TIME_NONE;
-    GstClockTime duration = GST_CLOCK_TIME_NONE;
     GstBuffer *buffer = sample != NULL ? gst_sample_get_buffer(sample) : NULL;
     if (buffer != NULL) {
-        pts = GST_BUFFER_PTS(buffer);
+        if (GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DISCONT) ||
+            GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_RESYNC)) {
+            gate_audio_until_video(rec);
+        }
+
+        GstClockTime pts = GST_BUFFER_PTS(buffer);
+        GstClockTime duration = GST_BUFFER_DURATION(buffer);
         if (!GST_CLOCK_TIME_IS_VALID(pts)) {
             pts = GST_BUFFER_DTS(buffer);
         }
-        duration = GST_BUFFER_DURATION(buffer);
-    }
+        if (!GST_CLOCK_TIME_IS_VALID(duration)) {
+            duration = GST_BUFFER_DURATION(buffer);
+        }
 
-    if (rec->pending.valid) {
-        guint32 dur90k = compute_duration_90k(rec, rec->pending.pts, rec->pending.duration, pts);
-        emit_pending(rec, dur90k);
-    }
+        if (rec->pending.valid) {
+            guint32 dur90k = compute_duration_90k(rec, rec->pending.pts, rec->pending.duration, pts);
+            emit_pending(rec, dur90k);
+        }
 
-    rec->pending.data = copy;
-    rec->pending.size = size;
-    rec->pending.pts = pts;
-    rec->pending.duration = duration;
-    rec->pending.valid = TRUE;
+        rec->pending.data = copy;
+        rec->pending.size = size;
+        rec->pending.pts = pts;
+        rec->pending.duration = duration;
+        rec->pending.valid = TRUE;
+    } else {
+        rec->pending.data = copy;
+        rec->pending.size = size;
+        rec->pending.pts = GST_CLOCK_TIME_NONE;
+        rec->pending.duration = GST_CLOCK_TIME_NONE;
+        rec->pending.valid = TRUE;
+    }
 }
 
 void video_recorder_handle_audio(VideoRecorder *rec, GstSample *sample, const guint8 *data, size_t size) {
@@ -531,6 +575,11 @@ void video_recorder_handle_audio(VideoRecorder *rec, GstSample *sample, const gu
     }
 
     if (!ensure_audio_track_initialized(rec, sample)) {
+        return;
+    }
+
+    if (rec->audio_gated) {
+        reset_audio_timing(rec);
         return;
     }
 
