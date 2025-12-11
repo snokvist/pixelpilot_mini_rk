@@ -351,29 +351,6 @@ static gboolean video_decoder_select_plane(int fd, uint32_t crtc_id, uint32_t re
     return found;
 }
 
-static gboolean video_decoder_fourcc_is_rgb(uint32_t fourcc) {
-    return (fourcc == DRM_FORMAT_XRGB8888 || fourcc == DRM_FORMAT_ARGB8888 ||
-            fourcc == DRM_FORMAT_ABGR8888 || fourcc == DRM_FORMAT_XBGR8888);
-}
-
-static void video_decoder_fourcc_to_string(uint32_t fourcc, char out[5]) {
-    if (out == NULL) {
-        return;
-    }
-    if (fourcc == 0) {
-        memcpy(out, "----", 5);
-        return;
-    }
-    for (int i = 0; i < 4; ++i) {
-        char c = (char)((fourcc >> (8 * i)) & 0xFF);
-        if ((unsigned char)c < 32 || (unsigned char)c > 126) {
-            c = '?';
-        }
-        out[i] = c;
-    }
-    out[4] = '\0';
-}
-
 /*
  * RK356x VOP planes sampling NV12 surfaces expect crop widths/heights that
  * align to chroma blocks and even source offsets. Align crops to 4 pixels in
@@ -1349,12 +1326,6 @@ static gpointer frame_thread_func(gpointer data) {
                 continue;
             }
 
-            RK_U32 frame_w = mpp_frame_get_width(frame);
-            RK_U32 frame_h = mpp_frame_get_height(frame);
-            RK_U32 frame_stride_w = mpp_frame_get_hor_stride(frame);
-            RK_U32 frame_stride_h = mpp_frame_get_ver_stride(frame);
-            MppFrameFormat frame_fmt = mpp_frame_get_fmt(frame);
-
             MppBuffer buffer = mpp_frame_get_buffer(frame);
             if (buffer != NULL) {
                 MppBufferInfo info;
@@ -1363,8 +1334,6 @@ static gpointer frame_thread_func(gpointer data) {
                     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
                         if (vd->frame_map[i].prime_fd == info.fd) {
                             uint32_t fb_to_post = vd->frame_map[i].fb_id;
-                            RK_U32 effective_w = frame_w != 0 ? frame_w : vd->src_w;
-                            RK_U32 effective_h = frame_h != 0 ? frame_h : vd->src_h;
                             g_mutex_lock(&vd->lock);
                             vd->pending_fb = fb_to_post;
                             vd->pending_pts = mpp_frame_get_pts(frame);

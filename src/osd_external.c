@@ -263,25 +263,6 @@ static int is_value_terminator(int c) {
     return c == ',' || c == '}' || c == ']' || c == '\0' || isspace((unsigned char)c);
 }
 
-static const char *parse_bool_literal(const char *p, int *out) {
-    if (!p) {
-        return NULL;
-    }
-    if (strncmp(p, "true", 4) == 0 && is_value_terminator((unsigned char)p[4])) {
-        if (out) {
-            *out = 1;
-        }
-        return p + 4;
-    }
-    if (strncmp(p, "false", 5) == 0 && is_value_terminator((unsigned char)p[5])) {
-        if (out) {
-            *out = 0;
-        }
-        return p + 5;
-    }
-    return NULL;
-}
-
 static const char *parse_double_array(const char *p, double *out, size_t max_count, size_t *count_out) {
     if (!p || *p != '[') {
         return NULL;
