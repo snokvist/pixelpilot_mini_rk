@@ -91,7 +91,7 @@ else
 LDFLAGS += -lrockchip_mpp
 endif
 
-LDFLAGS += -lpthread -lm
+LDFLAGS += -lpthread -lm -ldl
 
 TARGET := pixelpilot_mini_rk
 
