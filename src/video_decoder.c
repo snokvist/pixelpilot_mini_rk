@@ -351,29 +351,6 @@ static gboolean video_decoder_select_plane(int fd, uint32_t crtc_id, uint32_t re
     return found;
 }
 
-static gboolean video_decoder_fourcc_is_rgb(uint32_t fourcc) {
-    return (fourcc == DRM_FORMAT_XRGB8888 || fourcc == DRM_FORMAT_ARGB8888 ||
-            fourcc == DRM_FORMAT_ABGR8888 || fourcc == DRM_FORMAT_XBGR8888);
-}
-
-static void video_decoder_fourcc_to_string(uint32_t fourcc, char out[5]) {
-    if (out == NULL) {
-        return;
-    }
-    if (fourcc == 0) {
-        memcpy(out, "----", 5);
-        return;
-    }
-    for (int i = 0; i < 4; ++i) {
-        char c = (char)((fourcc >> (8 * i)) & 0xFF);
-        if ((unsigned char)c < 32 || (unsigned char)c > 126) {
-            c = '?';
-        }
-        out[i] = c;
-    }
-    out[4] = '\0';
-}
-
 /*
  * RK356x VOP planes sampling NV12 surfaces expect crop widths/heights that
  * align to chroma blocks and even source offsets. Align crops to 4 pixels in
@@ -387,11 +364,6 @@ struct FrameSlot {
     int prime_fd;
     uint32_t fb_id;
     uint32_t handle;
-    int ctm_prime_fd;
-    uint32_t ctm_fb_id;
-    uint32_t ctm_handle;
-    uint32_t ctm_pitch;
-    uint32_t ctm_fourcc;
 };
 
 struct VideoDecoder {
@@ -450,24 +422,7 @@ struct VideoDecoder {
     uint32_t frame_fourcc;
     RK_U32 frame_hor_stride;
     RK_U32 frame_ver_stride;
-    uint32_t ctm_fourcc;
-    uint32_t ctm_pitch;
 };
-
-static void video_decoder_log_ctm_target(const VideoDecoder *vd, const char *context) {
-    if (vd == NULL || !vd->ctm.enabled) {
-        return;
-    }
-    uint32_t dst_fourcc = vd->ctm_fourcc != 0 ? vd->ctm_fourcc : DRM_FORMAT_NV12;
-    gboolean dst_is_rgb = video_decoder_fourcc_is_rgb(dst_fourcc);
-    char dst_str[5];
-    video_decoder_fourcc_to_string(dst_fourcc, dst_str);
-    if (context == NULL) {
-        context = "configured";
-    }
-    LOGI("Video decoder: CTM %s to use %s target (fourcc=%s, pitch=%u)", context,
-         dst_is_rgb ? "RGB" : "NV12", dst_str, vd->ctm_pitch);
-}
 
 VideoDecoder *video_decoder_new(void) {
     return g_new0(VideoDecoder, 1);
@@ -966,11 +921,6 @@ static void reset_frame_map(VideoDecoder *vd) {
         vd->frame_map[i].prime_fd = -1;
         vd->frame_map[i].fb_id = 0;
         vd->frame_map[i].handle = 0;
-        vd->frame_map[i].ctm_prime_fd = -1;
-        vd->frame_map[i].ctm_fb_id = 0;
-        vd->frame_map[i].ctm_handle = 0;
-        vd->frame_map[i].ctm_pitch = 0;
-        vd->frame_map[i].ctm_fourcc = 0;
     }
 }
 
@@ -993,21 +943,6 @@ static void release_frame_group(VideoDecoder *vd) {
             ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
             vd->frame_map[i].handle = 0;
         }
-        if (vd->frame_map[i].ctm_fb_id) {
-            drmModeRmFB(vd->drm_fd, vd->frame_map[i].ctm_fb_id);
-            vd->frame_map[i].ctm_fb_id = 0;
-        }
-        if (vd->frame_map[i].ctm_prime_fd >= 0) {
-            close(vd->frame_map[i].ctm_prime_fd);
-            vd->frame_map[i].ctm_prime_fd = -1;
-        }
-        if (vd->frame_map[i].ctm_handle) {
-            struct drm_mode_destroy_dumb dmd_ctm = {.handle = vd->frame_map[i].ctm_handle};
-            ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_ctm);
-            vd->frame_map[i].ctm_handle = 0;
-        }
-        vd->frame_map[i].ctm_pitch = 0;
-        vd->frame_map[i].ctm_fourcc = 0;
     }
     mpp_buffer_group_clear(vd->frm_grp);
     mpp_buffer_group_put(vd->frm_grp);
@@ -1017,8 +952,6 @@ static void release_frame_group(VideoDecoder *vd) {
     vd->frame_fourcc = 0;
     vd->frame_hor_stride = 0;
     vd->frame_ver_stride = 0;
-    vd->ctm_fourcc = 0;
-    vd->ctm_pitch = 0;
 }
 
 static void video_decoder_disable_plane(VideoDecoder *vd) {
@@ -1260,9 +1193,6 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
 
     reset_frame_map(vd);
 
-    uint32_t transform_fourcc = 0;
-    uint32_t transform_pitch = 0;
-
     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
         struct drm_mode_create_dumb dmcd;
         memset(&dmcd, 0, sizeof(dmcd));
@@ -1325,78 +1255,16 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
             continue;
         }
 
-        if (vd->ctm.enabled && fmt == MPP_FMT_YUV420SP) {
-            struct drm_mode_create_dumb ctm_dmcd;
-            memset(&ctm_dmcd, 0, sizeof(ctm_dmcd));
-            ctm_dmcd.bpp = 32;
-            ctm_dmcd.width = width;
-            ctm_dmcd.height = height;
-
-            do {
-                ret = ioctl(vd->drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &ctm_dmcd);
-            } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
-            if (ret != 0) {
-                LOGW("Video CTM: failed to allocate dumb buffer: %s", g_strerror(errno));
-                continue;
-            }
-            vd->frame_map[i].ctm_handle = ctm_dmcd.handle;
-
-            struct drm_prime_handle ctm_prime;
-            memset(&ctm_prime, 0, sizeof(ctm_prime));
-            ctm_prime.handle = ctm_dmcd.handle;
-            ctm_prime.fd = -1;
-            do {
-                ret = ioctl(vd->drm_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ctm_prime);
-            } while (ret == -1 && (errno == EINTR || errno == EAGAIN));
-            if (ret != 0) {
-                LOGW("Video CTM: PRIME_HANDLE_TO_FD failed: %s", g_strerror(errno));
-                struct drm_mode_destroy_dumb dmd_fail = {.handle = ctm_dmcd.handle};
-                ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_fail);
-                vd->frame_map[i].ctm_handle = 0;
-                continue;
-            }
-            vd->frame_map[i].ctm_prime_fd = ctm_prime.fd;
-            vd->frame_map[i].ctm_pitch = ctm_dmcd.pitch;
-            vd->frame_map[i].ctm_fourcc = DRM_FORMAT_XRGB8888;
-
-            uint32_t ctm_handles[4] = {0};
-            uint32_t ctm_pitches[4] = {0};
-            uint32_t ctm_offsets[4] = {0};
-            ctm_handles[0] = vd->frame_map[i].ctm_handle;
-            ctm_pitches[0] = ctm_dmcd.pitch;
-            ctm_offsets[0] = 0;
-
-            ret = drmModeAddFB2(vd->drm_fd, width, height, vd->frame_map[i].ctm_fourcc, ctm_handles,
-                                ctm_pitches, ctm_offsets, &vd->frame_map[i].ctm_fb_id, 0);
-            if (ret != 0) {
-                LOGW("Video CTM: drmModeAddFB2 for transform buffer failed: %s", g_strerror(errno));
-                close(vd->frame_map[i].ctm_prime_fd);
-                vd->frame_map[i].ctm_prime_fd = -1;
-                struct drm_mode_destroy_dumb dmd_fail = {.handle = vd->frame_map[i].ctm_handle};
-                ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd_fail);
-                vd->frame_map[i].ctm_handle = 0;
-                vd->frame_map[i].ctm_pitch = 0;
-                vd->frame_map[i].ctm_fourcc = 0;
-                continue;
-            }
-            transform_fourcc = vd->frame_map[i].ctm_fourcc;
-            transform_pitch = ctm_dmcd.pitch;
-        }
     }
 
     vd->frame_fourcc = DRM_FORMAT_NV12;
     vd->frame_hor_stride = hor_stride;
     vd->frame_ver_stride = ver_stride;
     if (vd->ctm.enabled && fmt == MPP_FMT_YUV420SP) {
-        vd->ctm_fourcc = transform_fourcc != 0 ? transform_fourcc : DRM_FORMAT_NV12;
-        vd->ctm_pitch = transform_pitch;
-        if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, vd->frame_fourcc,
-                              vd->ctm_pitch, vd->ctm_fourcc) == 0) {
-            video_decoder_log_ctm_target(vd, "configured");
+        if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, vd->frame_fourcc, 0, DRM_FORMAT_NV12) !=
+            0) {
+            vd->ctm.enabled = FALSE;
         }
-    } else {
-        vd->ctm_fourcc = 0;
-        vd->ctm_pitch = 0;
     }
 
     vd->mpi->control(vd->ctx, MPP_DEC_SET_EXT_BUF_GROUP, vd->frm_grp);
@@ -1458,12 +1326,6 @@ static gpointer frame_thread_func(gpointer data) {
                 continue;
             }
 
-            RK_U32 frame_w = mpp_frame_get_width(frame);
-            RK_U32 frame_h = mpp_frame_get_height(frame);
-            RK_U32 frame_stride_w = mpp_frame_get_hor_stride(frame);
-            RK_U32 frame_stride_h = mpp_frame_get_ver_stride(frame);
-            MppFrameFormat frame_fmt = mpp_frame_get_fmt(frame);
-
             MppBuffer buffer = mpp_frame_get_buffer(frame);
             if (buffer != NULL) {
                 MppBufferInfo info;
@@ -1472,25 +1334,6 @@ static gpointer frame_thread_func(gpointer data) {
                     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
                         if (vd->frame_map[i].prime_fd == info.fd) {
                             uint32_t fb_to_post = vd->frame_map[i].fb_id;
-                            RK_U32 effective_w = frame_w != 0 ? frame_w : vd->src_w;
-                            RK_U32 effective_h = frame_h != 0 ? frame_h : vd->src_h;
-                            if (vd->ctm.enabled && vd->frame_map[i].ctm_fb_id != 0 &&
-                                vd->frame_map[i].ctm_prime_fd >= 0 && frame_fmt == MPP_FMT_YUV420SP &&
-                                effective_w != 0 && effective_h != 0) {
-                                uint32_t fourcc = vd->frame_fourcc != 0 ? vd->frame_fourcc : DRM_FORMAT_NV12;
-                                RK_U32 hor_stride = vd->frame_hor_stride != 0 ? vd->frame_hor_stride : frame_stride_w;
-                                RK_U32 ver_stride = vd->frame_ver_stride != 0 ? vd->frame_ver_stride : frame_stride_h;
-                                uint32_t dst_pitch = vd->frame_map[i].ctm_pitch;
-                                uint32_t dst_fourcc = vd->frame_map[i].ctm_fourcc;
-                                if (dst_fourcc == 0) {
-                                    dst_fourcc = vd->ctm_fourcc;
-                                }
-                                if (video_ctm_process(&vd->ctm, vd->frame_map[i].prime_fd,
-                                                      vd->frame_map[i].ctm_prime_fd, effective_w, effective_h,
-                                                      hor_stride, ver_stride, fourcc, dst_pitch, dst_fourcc) == 0) {
-                                    fb_to_post = vd->frame_map[i].ctm_fb_id;
-                                }
-                            }
                             g_mutex_lock(&vd->lock);
                             vd->pending_fb = fb_to_post;
                             vd->pending_pts = mpp_frame_get_pts(frame);
@@ -1582,11 +1425,8 @@ void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *upda
         return;
     }
 
-    if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc, vd->ctm_pitch,
-                          vd->ctm_fourcc) != 0) {
+    if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc, 0, DRM_FORMAT_NV12) != 0) {
         LOGW("Video decoder: failed to reapply CTM after live update");
-    } else {
-        video_decoder_log_ctm_target(vd, "updated");
     }
 }
 
@@ -1618,8 +1458,6 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->frame_fourcc = 0;
     vd->frame_hor_stride = 0;
     vd->frame_ver_stride = 0;
-    vd->ctm_fourcc = 0;
-    vd->ctm_pitch = 0;
     vd->packet_buf_size = 0;
     vd->packet_buf = NULL;
 

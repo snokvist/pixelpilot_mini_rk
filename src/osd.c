@@ -844,76 +844,12 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
     char normalized[128];
     const char *metric = osd_metric_normalize(key, normalized, sizeof(normalized));
 
-    if (metric && strncmp(metric, "video.ctm.", 10) == 0) {
+    if (metric && strcmp(metric, "video.ctm.frame.count") == 0) {
         if (!ctx->have_ctm_metrics) {
             return 0;
         }
-        const VideoCtmMetrics *m = &ctx->ctm_metrics;
-        if (strcmp(metric, "video.ctm.gpu.issue_ms") == 0) {
-            *out_value = m->last_gpu_issue_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.gpu.wait_ms") == 0) {
-            *out_value = m->last_gpu_wait_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.gpu.total_ms") == 0) {
-            *out_value = m->last_gpu_total_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.gpu.issue.avg_ms") == 0) {
-            *out_value = m->avg_gpu_issue_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.gpu.wait.avg_ms") == 0) {
-            *out_value = m->avg_gpu_wait_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.gpu.total.avg_ms") == 0) {
-            *out_value = m->avg_gpu_total_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.gpu.issue.max_ms") == 0) {
-            *out_value = m->max_gpu_issue_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.gpu.wait.max_ms") == 0) {
-            *out_value = m->max_gpu_wait_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.gpu.total.max_ms") == 0) {
-            *out_value = m->max_gpu_total_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.convert.last_ms") == 0) {
-            *out_value = m->last_convert_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.convert.avg_ms") == 0) {
-            *out_value = m->avg_convert_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.convert.max_ms") == 0) {
-            *out_value = m->max_convert_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.frame.last_ms") == 0) {
-            *out_value = m->last_frame_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.frame.avg_ms") == 0) {
-            *out_value = m->avg_frame_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.frame.max_ms") == 0) {
-            *out_value = m->max_frame_ms;
-            return 1;
-        }
-        if (strcmp(metric, "video.ctm.frame.count") == 0) {
-            *out_value = (double)m->frame_count;
-            return 1;
-        }
-        return 0;
+        *out_value = (double)ctx->ctm_metrics.frame_count;
+        return 1;
     }
 
     if (!ctx->have_stats && metric && strncmp(metric, "udp.", 4) == 0) {

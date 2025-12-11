@@ -35,21 +35,6 @@ static int parse_double_list(const char *value, double *out, size_t count) {
     return idx == count ? 0 : -1;
 }
 
-static int parse_video_ctm_backend(const char *value, VideoCtmBackend *backend) {
-    if (value == NULL || backend == NULL) {
-        return -1;
-    }
-    if (strcasecmp(value, "auto") == 0) {
-        *backend = VIDEO_CTM_BACKEND_AUTO;
-        return 0;
-    }
-    if (strcasecmp(value, "gpu") == 0 || strcasecmp(value, "mali") == 0) {
-        *backend = VIDEO_CTM_BACKEND_GPU;
-        return 0;
-    }
-    return -1;
-}
-
 static void ini_copy_string(char *dst, size_t dst_sz, const char *src) {
     if (dst == NULL || dst_sz == 0) {
         return;
@@ -1091,25 +1076,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->video_ctm.enable = v;
             return 0;
         }
-        if (strcasecmp(key, "backend") == 0 || strcasecmp(key, "mode") == 0 ||
-            strcasecmp(key, "hw-backend") == 0) {
-            VideoCtmBackend backend = VIDEO_CTM_BACKEND_AUTO;
-            if (parse_video_ctm_backend(value, &backend) != 0) {
-                LOGE("config: video.ctm backend must be one of auto,gpu");
-                return -1;
-            }
-            cfg->video_ctm.backend = backend;
-            return 0;
-        }
-        if (strcasecmp(key, "flip") == 0 || strcasecmp(key, "flip-image") == 0 ||
-            strcasecmp(key, "flip-image-180") == 0) {
-            int v = 0;
-            if (parse_bool(value, &v) != 0) {
-                return -1;
-            }
-            cfg->video_ctm.flip = v;
-            return 0;
-        }
         if (strcasecmp(key, "ctm-matrix") == 0 || strcasecmp(key, "matrix") == 0) {
             double coeffs[9];
             if (parse_double_list(value, coeffs, 9) != 0) {
@@ -1119,74 +1085,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             for (int i = 0; i < 9; ++i) {
                 cfg->video_ctm.matrix[i] = coeffs[i];
             }
-            return 0;
-        }
-        if (strcasecmp(key, "sharpness") == 0 || strcasecmp(key, "sharpen-strength") == 0) {
-            double v = 0.0;
-            if (parse_double(value, &v) != 0) {
-                LOGE("config: video.ctm sharpness expects a floating point value");
-                return -1;
-            }
-            cfg->video_ctm.sharpness = v;
-            return 0;
-        }
-        if (strcasecmp(key, "gamma") == 0 || strcasecmp(key, "gamma-value") == 0) {
-            double v = 0.0;
-            if (parse_double(value, &v) != 0) {
-                LOGE("config: video.ctm gamma expects a floating point value");
-                return -1;
-            }
-            cfg->video_ctm.gamma_value = v;
-            return 0;
-        }
-        if (strcasecmp(key, "gamma-lift") == 0 || strcasecmp(key, "gamma_lift") == 0 ||
-            strcasecmp(key, "lift") == 0) {
-            double v = 0.0;
-            if (parse_double(value, &v) != 0) {
-                LOGE("config: video.ctm lift expects a floating point value");
-                return -1;
-            }
-            cfg->video_ctm.gamma_lift = v;
-            return 0;
-        }
-        if (strcasecmp(key, "gamma-gain") == 0 || strcasecmp(key, "gamma_gain") == 0 ||
-            strcasecmp(key, "gain") == 0) {
-            double v = 0.0;
-            if (parse_double(value, &v) != 0) {
-                LOGE("config: video.ctm gain expects a floating point value");
-                return -1;
-            }
-            cfg->video_ctm.gamma_gain = v;
-            return 0;
-        }
-        if (strcasecmp(key, "gamma-r-mult") == 0 || strcasecmp(key, "gamma_r_mult") == 0 ||
-            strcasecmp(key, "r-mult") == 0 || strcasecmp(key, "r_mult") == 0) {
-            double v = 0.0;
-            if (parse_double(value, &v) != 0) {
-                LOGE("config: video.ctm r-mult expects a floating point value");
-                return -1;
-            }
-            cfg->video_ctm.gamma_r_mult = v;
-            return 0;
-        }
-        if (strcasecmp(key, "gamma-g-mult") == 0 || strcasecmp(key, "gamma_g_mult") == 0 ||
-            strcasecmp(key, "g-mult") == 0 || strcasecmp(key, "g_mult") == 0) {
-            double v = 0.0;
-            if (parse_double(value, &v) != 0) {
-                LOGE("config: video.ctm g-mult expects a floating point value");
-                return -1;
-            }
-            cfg->video_ctm.gamma_g_mult = v;
-            return 0;
-        }
-        if (strcasecmp(key, "gamma-b-mult") == 0 || strcasecmp(key, "gamma_b_mult") == 0 ||
-            strcasecmp(key, "b-mult") == 0 || strcasecmp(key, "b_mult") == 0) {
-            double v = 0.0;
-            if (parse_double(value, &v) != 0) {
-                LOGE("config: video.ctm b-mult expects a floating point value");
-                return -1;
-            }
-            cfg->video_ctm.gamma_b_mult = v;
             return 0;
         }
         if (strncasecmp(key, "matrix-row", 10) == 0 && strlen(key) == 11 && isdigit((unsigned char)key[10])) {
