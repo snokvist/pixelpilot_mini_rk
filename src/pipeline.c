@@ -456,6 +456,35 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
     }
 }
 
+void pipeline_get_video_chain_handles(const PipelineState *ps,
+                                      GstElement **depay_out,
+                                      GstElement **parser_out,
+                                      GstElement **capsfilter_out) {
+    if (depay_out != NULL) {
+        *depay_out = NULL;
+    }
+    if (parser_out != NULL) {
+        *parser_out = NULL;
+    }
+    if (capsfilter_out != NULL) {
+        *capsfilter_out = NULL;
+    }
+
+    if (ps == NULL) {
+        return;
+    }
+
+    if (depay_out != NULL && ps->video_depay != NULL) {
+        *depay_out = gst_object_ref(ps->video_depay);
+    }
+    if (parser_out != NULL && ps->video_parser != NULL) {
+        *parser_out = gst_object_ref(ps->video_parser);
+    }
+    if (capsfilter_out != NULL && ps->video_capsfilter != NULL) {
+        *capsfilter_out = gst_object_ref(ps->video_capsfilter);
+    }
+}
+
 static GstCaps *build_appsrc_caps(const AppCfg *cfg, gboolean video_only) {
     if (video_only && cfg != NULL) {
         return gst_caps_new_simple("application/x-rtp", "media", G_TYPE_STRING, "video", "payload", G_TYPE_INT,
@@ -741,6 +770,9 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
 
     ps->pipeline = pipeline;
     ps->video_sink = appsink;
+    ps->video_depay = depay;
+    ps->video_parser = parser;
+    ps->video_capsfilter = capsfilter;
     ps->udp_receiver = receiver;
     ps->input_selector = selector;
     return TRUE;
@@ -830,6 +862,9 @@ fail:
     if (pipeline != NULL) {
         gst_object_unref(pipeline);
     }
+    ps->video_depay = NULL;
+    ps->video_parser = NULL;
+    ps->video_capsfilter = NULL;
     ps->pipeline = NULL;
     ps->video_sink = NULL;
     ps->udp_receiver = NULL;
@@ -861,7 +896,7 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         "udpsrc name=udp_source port=%d caps=\"%s\" ! "
         "sstarh265depay name=video_depay payload-type=%d ! "
         "sstarh265parse name=video_parser ! "
-        "video/x-h265, stream-format=\"byte-stream\" ! "
+        "capsfilter name=video_capsfilter caps=\"video/x-h265, stream-format=(string)byte-stream\" ! "
         "appsink drop=true name=out_appsink",
         cfg->udp_port, caps_desc, cfg->vid_pt);
     g_free(caps_desc);
@@ -946,6 +981,10 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
             return FALSE;
         }
     }
+
+    ps->video_depay = gst_bin_get_by_name(GST_BIN(pipeline), "video_depay");
+    ps->video_parser = gst_bin_get_by_name(GST_BIN(pipeline), "video_parser");
+    ps->video_capsfilter = gst_bin_get_by_name(GST_BIN(pipeline), "video_capsfilter");
 
     ps->pipeline = pipeline;
     ps->video_sink = appsink;
@@ -1135,6 +1174,18 @@ static void cleanup_pipeline(PipelineState *ps) {
     if (ps->udp_receiver != NULL) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
+    }
+    if (ps->video_capsfilter != NULL) {
+        gst_object_unref(ps->video_capsfilter);
+        ps->video_capsfilter = NULL;
+    }
+    if (ps->video_parser != NULL) {
+        gst_object_unref(ps->video_parser);
+        ps->video_parser = NULL;
+    }
+    if (ps->video_depay != NULL) {
+        gst_object_unref(ps->video_depay);
+        ps->video_depay = NULL;
     }
     if (ps->idr_requester != NULL) {
         idr_requester_free(ps->idr_requester);

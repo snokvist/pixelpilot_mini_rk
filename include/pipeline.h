@@ -21,6 +21,9 @@ typedef struct {
     PipelineStateEnum state;
     GstElement *pipeline;
     GstElement *video_sink;
+    GstElement *video_depay;
+    GstElement *video_parser;
+    GstElement *video_capsfilter;
     GstElement *input_selector;
     UdpReceiver *udp_receiver;
     IdrRequester *idr_requester;
@@ -79,5 +82,9 @@ int pipeline_get_ctm_metrics(const PipelineState *ps, VideoCtmMetrics *metrics);
 gboolean pipeline_consume_reinit_request(PipelineState *ps);
 void pipeline_apply_zoom_command(PipelineState *ps, gboolean enabled, const VideoDecoderZoomRequest *request);
 void pipeline_apply_ctm_update(PipelineState *ps, const VideoCtmUpdate *update);
+void pipeline_get_video_chain_handles(const PipelineState *ps,
+                                      GstElement **depay_out,
+                                      GstElement **parser_out,
+                                      GstElement **capsfilter_out);
 
 #endif // PIPELINE_H
