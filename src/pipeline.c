@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 
 #include "pipeline.h"
+#include "h265_depay.h"
+#include "h265_parse.h"
 #include "logging.h"
 #include "splashlib.h"
 #include "video_recorder.h"
@@ -444,7 +446,42 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
     }
     if (g_once_init_enter(&inited)) {
         gst_init(NULL, NULL);
+        if (!sstar_h265_depay_register()) {
+            LOGW("Failed to register sstarh265depay; falling back to system plugin if available");
+        }
+        if (!sstar_h265_parse_register()) {
+            LOGW("Failed to register sstarh265parse; falling back to system plugin if available");
+        }
         g_once_init_leave(&inited, 1);
+    }
+}
+
+void pipeline_get_video_chain_handles(const PipelineState *ps,
+                                      GstElement **depay_out,
+                                      GstElement **parser_out,
+                                      GstElement **capsfilter_out) {
+    if (depay_out != NULL) {
+        *depay_out = NULL;
+    }
+    if (parser_out != NULL) {
+        *parser_out = NULL;
+    }
+    if (capsfilter_out != NULL) {
+        *capsfilter_out = NULL;
+    }
+
+    if (ps == NULL) {
+        return;
+    }
+
+    if (depay_out != NULL && ps->video_depay != NULL) {
+        *depay_out = gst_object_ref(ps->video_depay);
+    }
+    if (parser_out != NULL && ps->video_parser != NULL) {
+        *parser_out = gst_object_ref(ps->video_parser);
+    }
+    if (capsfilter_out != NULL && ps->video_capsfilter != NULL) {
+        *capsfilter_out = gst_object_ref(ps->video_capsfilter);
     }
 }
 
@@ -510,8 +547,6 @@ fail:
     return NULL;
 }
 
-static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick);
-
 static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *cfg, int audio_disabled) {
     GstElement *pipeline = NULL;
     GstElement *appsrc = NULL;
@@ -557,14 +592,14 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         goto fail;
     }
 
-    depay = gst_element_factory_make("rtph265depay", "video_depay");
-    CHECK_ELEM(depay, "rtph265depay");
+    depay = gst_element_factory_make("sstarh265depay", "video_depay");
+    CHECK_ELEM(depay, "sstarh265depay");
     udp_queue = gst_element_factory_make("queue", "udp_queue");
     CHECK_ELEM(udp_queue, "queue");
     selector = gst_element_factory_make("input-selector", "video_selector");
     CHECK_ELEM(selector, "input-selector");
-    parser = gst_element_factory_make("h265parse", "video_parser");
-    CHECK_ELEM(parser, "h265parse");
+    parser = gst_element_factory_make("sstarh265parse", "video_parser");
+    CHECK_ELEM(parser, "sstarh265parse");
     capsfilter = gst_element_factory_make("capsfilter", "video_capsfilter");
     CHECK_ELEM(capsfilter, "capsfilter");
     appsink = gst_element_factory_make("appsink", "out_appsink");
@@ -575,12 +610,8 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     gst_app_sink_set_drop(GST_APP_SINK(appsink), TRUE);
     g_object_set(appsink, "sync", FALSE, NULL);
 
-    g_object_set(parser, "config-interval", -1, "disable-passthrough", TRUE, NULL);
-    if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
-        LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
-    }
-    if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
-        LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
+    if (cfg != NULL) {
+        g_object_set(depay, "payload-type", cfg->vid_pt, NULL);
     }
 
     raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
@@ -739,6 +770,9 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
 
     ps->pipeline = pipeline;
     ps->video_sink = appsink;
+    ps->video_depay = depay;
+    ps->video_parser = parser;
+    ps->video_capsfilter = capsfilter;
     ps->udp_receiver = receiver;
     ps->input_selector = selector;
     return TRUE;
@@ -828,6 +862,9 @@ fail:
     if (pipeline != NULL) {
         gst_object_unref(pipeline);
     }
+    ps->video_depay = NULL;
+    ps->video_parser = NULL;
+    ps->video_capsfilter = NULL;
     ps->pipeline = NULL;
     ps->video_sink = NULL;
     ps->udp_receiver = NULL;
@@ -857,11 +894,11 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
 
     gchar *desc = g_strdup_printf(
         "udpsrc name=udp_source port=%d caps=\"%s\" ! "
-        "rtph265depay name=video_depay ! "
-        "h265parse name=video_parser config-interval=-1 ! "
-        "video/x-h265, stream-format=\"byte-stream\" ! "
+        "sstarh265depay name=video_depay payload-type=%d ! "
+        "sstarh265parse name=video_parser ! "
+        "capsfilter name=video_capsfilter caps=\"video/x-h265, stream-format=(string)byte-stream\" ! "
         "appsink drop=true name=out_appsink",
-        cfg->udp_port, caps_desc);
+        cfg->udp_port, caps_desc, cfg->vid_pt);
     g_free(caps_desc);
 
     if (desc == NULL) {
@@ -905,19 +942,6 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         LOGW("Failed to allocate caps for udpsrc appsink");
     }
 
-    GstElement *parser = gst_bin_get_by_name(GST_BIN(pipeline), "video_parser");
-    if (parser != NULL) {
-        if (!set_enum_property_by_nick(G_OBJECT(parser), "stream-format", "byte-stream")) {
-            LOGW("Failed to force h265parse stream-format=byte-stream; downstream decoder may misbehave");
-        }
-        if (!set_enum_property_by_nick(G_OBJECT(parser), "alignment", "au")) {
-            LOGW("Failed to force h265parse alignment=au; downstream decoder may misbehave");
-        }
-        gst_object_unref(parser);
-    } else {
-        LOGW("udpsrc pipeline missing h265parse element; byte-stream enforcement skipped");
-    }
-
     if (cfg->udpsrc_pt97_filter) {
         GstElement *udpsrc = gst_bin_get_by_name(GST_BIN(pipeline), "udp_source");
         if (udpsrc == NULL) {
@@ -958,148 +982,15 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         }
     }
 
+    ps->video_depay = gst_bin_get_by_name(GST_BIN(pipeline), "video_depay");
+    ps->video_parser = gst_bin_get_by_name(GST_BIN(pipeline), "video_parser");
+    ps->video_capsfilter = gst_bin_get_by_name(GST_BIN(pipeline), "video_capsfilter");
+
     ps->pipeline = pipeline;
     ps->video_sink = appsink;
 
     gst_object_unref(appsink);
     return TRUE;
-}
-
-static gchar *canonicalize_enum_token(const char *input) {
-    if (input == NULL) {
-        return NULL;
-    }
-
-    gsize len = strlen(input);
-    gchar *canonical = g_malloc(len + 1);
-    if (canonical == NULL) {
-        return NULL;
-    }
-
-    gchar *dst = canonical;
-    for (const gchar *src = input; *src != '\0'; ++src) {
-        if (*src == '-' || *src == '_' || *src == ' ') {
-            continue;
-        }
-        *dst++ = g_ascii_toupper(*src);
-    }
-    *dst = '\0';
-    return canonical;
-}
-
-static gboolean enum_matches_string(const char *candidate, const char *target) {
-    if (candidate == NULL || target == NULL) {
-        return FALSE;
-    }
-
-    if (g_ascii_strcasecmp(candidate, target) == 0) {
-        return TRUE;
-    }
-
-    g_autofree gchar *canon_candidate = canonicalize_enum_token(candidate);
-    g_autofree gchar *canon_target = canonicalize_enum_token(target);
-    if (canon_candidate == NULL || canon_target == NULL) {
-        return FALSE;
-    }
-
-    if (g_strcmp0(canon_candidate, canon_target) == 0) {
-        return TRUE;
-    }
-
-    return g_str_has_suffix(canon_candidate, canon_target);
-}
-
-static GParamSpec *find_property_with_aliases(GObjectClass *klass, const char *property) {
-    if (klass == NULL || property == NULL) {
-        return NULL;
-    }
-
-    GParamSpec *pspec = g_object_class_find_property(klass, property);
-    if (pspec != NULL) {
-        return pspec;
-    }
-
-    g_autofree gchar *alternate = g_strdup(property);
-    if (alternate != NULL) {
-        for (gchar *p = alternate; *p != '\0'; ++p) {
-            if (*p == '-') {
-                *p = '_';
-            } else if (*p == '_') {
-                *p = '-';
-            }
-        }
-
-        pspec = g_object_class_find_property(klass, alternate);
-        if (pspec != NULL) {
-            return pspec;
-        }
-    }
-
-    guint n_props = 0;
-    GParamSpec **props = g_object_class_list_properties(klass, &n_props);
-    if (props == NULL) {
-        return NULL;
-    }
-
-    for (guint i = 0; i < n_props; ++i) {
-        const char *name = props[i]->name;
-        const char *nick = g_param_spec_get_nick(props[i]);
-        if ((name != NULL && (enum_matches_string(name, property) || enum_matches_string(property, name))) ||
-            (nick != NULL && (enum_matches_string(nick, property) || enum_matches_string(property, nick)))) {
-            pspec = props[i];
-            break;
-        }
-    }
-
-    g_free(props);
-    return pspec;
-}
-
-static gboolean set_enum_property_by_nick(GObject *object, const char *property, const char *nick) {
-    if (object == NULL || property == NULL || nick == NULL) {
-        return FALSE;
-    }
-
-    GObjectClass *klass = G_OBJECT_GET_CLASS(object);
-    if (klass == NULL) {
-        return FALSE;
-    }
-
-    GParamSpec *pspec = find_property_with_aliases(klass, property);
-    if (pspec == NULL) {
-        return FALSE;
-    }
-
-    const char *canon_property = pspec->name != NULL ? pspec->name : property;
-
-    if (!G_IS_PARAM_SPEC_ENUM(pspec)) {
-        gst_util_set_object_arg(object, canon_property, nick);
-        return TRUE;
-    }
-
-    GEnumClass *enum_class = G_ENUM_CLASS(g_type_class_ref(pspec->value_type));
-    if (enum_class == NULL) {
-        return FALSE;
-    }
-
-    gboolean success = FALSE;
-    for (gint i = 0; i < enum_class->n_values; ++i) {
-        const GEnumValue *value = &enum_class->values[i];
-        if ((value->value_name != NULL && enum_matches_string(value->value_name, nick)) ||
-            (value->value_nick != NULL && enum_matches_string(value->value_nick, nick))) {
-            g_object_set(object, canon_property, value->value, NULL);
-            success = TRUE;
-            break;
-        }
-    }
-
-    if (!success) {
-        gst_util_set_object_arg(object, canon_property, nick);
-        success = TRUE;
-    }
-
-    g_type_class_unref(enum_class);
-    return success;
 }
 
 static gpointer appsink_thread_func(gpointer data) {
@@ -1283,6 +1174,18 @@ static void cleanup_pipeline(PipelineState *ps) {
     if (ps->udp_receiver != NULL) {
         udp_receiver_destroy(ps->udp_receiver);
         ps->udp_receiver = NULL;
+    }
+    if (ps->video_capsfilter != NULL) {
+        gst_object_unref(ps->video_capsfilter);
+        ps->video_capsfilter = NULL;
+    }
+    if (ps->video_parser != NULL) {
+        gst_object_unref(ps->video_parser);
+        ps->video_parser = NULL;
+    }
+    if (ps->video_depay != NULL) {
+        gst_object_unref(ps->video_depay);
+        ps->video_depay = NULL;
     }
     if (ps->idr_requester != NULL) {
         idr_requester_free(ps->idr_requester);
