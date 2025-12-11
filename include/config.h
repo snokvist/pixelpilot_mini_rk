@@ -82,6 +82,12 @@ typedef struct {
     int udpsrc_pt97_filter;
     CustomSinkMode custom_sink;
     char aud_dev[128];
+    int audio_queue_start_buffers;
+    int audio_queue_play_buffers;
+    int audio_queue_sink_buffers;
+    int audio_record_queue_buffers;
+    unsigned int audio_sink_buffer_time_us;
+    unsigned int audio_sink_latency_time_us;
 
     int no_audio;
     int audio_optional;

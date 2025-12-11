@@ -146,6 +146,12 @@ void cfg_defaults(AppCfg *c) {
     c->udpsrc_pt97_filter = 1;
     c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
+    c->audio_queue_start_buffers = 2;
+    c->audio_queue_play_buffers = 2;
+    c->audio_queue_sink_buffers = 2;
+    c->audio_record_queue_buffers = 16;
+    c->audio_sink_buffer_time_us = 12000;
+    c->audio_sink_latency_time_us = 6000;
 
     c->no_audio = 0;
     c->audio_optional = 1;
