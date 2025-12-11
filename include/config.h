@@ -66,6 +66,9 @@ typedef struct {
     int http_port;
     unsigned int http_timeout_ms;
     char http_path[128];
+    int endpoint_force;
+    char endpoint_host[64];
+    int endpoint_port;
     int stats_trigger;
     unsigned int loss_window_ms;
     unsigned int loss_threshold;
@@ -131,5 +134,6 @@ int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out);
 const char *cfg_custom_sink_mode_name(CustomSinkMode mode);
 int cfg_parse_record_mode(const char *value, RecordMode *mode_out);
 const char *cfg_record_mode_name(RecordMode mode);
+int cfg_parse_host_and_port(const char *value, char *host_out, size_t host_len, int *port_out);
 
 #endif // CONFIG_H

@@ -4,6 +4,7 @@
 #include "logging.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,7 @@ static void usage(const char *prog) {
             "  --idr-port N                 (HTTP port for IDR requests; default: 80)\n"
             "  --idr-path PATH              (HTTP path for IDR trigger; default: /request/idr)\n"
             "  --idr-timeout-ms N           (per-request timeout; default: 200)\n"
+            "  --idr-endpoint HOST[:PORT]   (force a fixed IDR HTTP target; bypass auto source)\n"
             "  --idr-stats-trigger          (enable stats-driven IDR triggers; default on)\n"
             "  --idr-no-stats-trigger       (disable stats-driven IDR triggers)\n"
             "  --idr-loss-window-ms N       (window for counting loss events; default: 200)\n"
@@ -200,6 +202,9 @@ void cfg_defaults(AppCfg *c) {
     c->idr.http_port = 80;
     c->idr.http_timeout_ms = 200;
     strcpy(c->idr.http_path, "/request/idr");
+    c->idr.endpoint_force = 0;
+    c->idr.endpoint_host[0] = '\0';
+    c->idr.endpoint_port = 0;
     c->idr.stats_trigger = 1;
     c->idr.loss_window_ms = 200;
     c->idr.loss_threshold = 1;
@@ -272,6 +277,60 @@ int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
     cfg->cpu_affinity_count = count;
     memset(cfg->cpu_affinity_order, 0, sizeof(cfg->cpu_affinity_order));
     memcpy(cfg->cpu_affinity_order, order, count * sizeof(int));
+    return 0;
+}
+
+int cfg_parse_host_and_port(const char *value, char *host_out, size_t host_len, int *port_out) {
+    if (value == NULL || host_out == NULL || host_len == 0) {
+        return -1;
+    }
+
+    while (isspace((unsigned char)*value)) {
+        ++value;
+    }
+
+    if (*value == '\0') {
+        return -1;
+    }
+
+    const char *port_sep = strrchr(value, ':');
+    const char *host_end = port_sep != NULL ? port_sep : value + strlen(value);
+    while (host_end > value && isspace((unsigned char)*(host_end - 1))) {
+        --host_end;
+    }
+
+    size_t host_copy_len = (size_t)(host_end - value);
+    if (host_copy_len == 0 || host_copy_len >= host_len) {
+        return -1;
+    }
+
+    memcpy(host_out, value, host_copy_len);
+    host_out[host_copy_len] = '\0';
+
+    if (port_out != NULL) {
+        *port_out = 0;
+    }
+
+    if (port_sep != NULL) {
+        const char *port_str = port_sep + 1;
+        if (*port_str == '\0') {
+            return -1;
+        }
+
+        char *endptr = NULL;
+        errno = 0;
+        long port = strtol(port_str, &endptr, 10);
+        while (endptr != NULL && isspace((unsigned char)*endptr)) {
+            ++endptr;
+        }
+        if (errno != 0 || port <= 0 || port > 65535 || (endptr != NULL && *endptr != '\0')) {
+            return -1;
+        }
+        if (port_out != NULL) {
+            *port_out = (int)port;
+        }
+    }
+
     return 0;
 }
 
@@ -453,6 +512,19 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg->idr.http_timeout_ms = (unsigned int)timeout;
+        } else if (!strcmp(argv[i], "--idr-endpoint") && i + 1 < argc) {
+            char host[sizeof(cfg->idr.endpoint_host)];
+            int port = 0;
+            if (cfg_parse_host_and_port(argv[++i], host, sizeof(host), &port) != 0) {
+                LOGE("--idr-endpoint expects HOST or HOST:PORT");
+                return -1;
+            }
+            cfg->idr.endpoint_force = 1;
+            cli_copy_string(cfg->idr.endpoint_host, sizeof(cfg->idr.endpoint_host), host);
+            cfg->idr.endpoint_port = port;
+            if (port > 0) {
+                cfg->idr.http_port = port;
+            }
         } else if (!strcmp(argv[i], "--idr-stats-trigger")) {
             cfg->idr.stats_trigger = 1;
         } else if (!strcmp(argv[i], "--idr-no-stats-trigger")) {

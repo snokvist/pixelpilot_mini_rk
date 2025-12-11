@@ -1234,6 +1234,21 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->idr.enable = v;
             return 0;
         }
+        if (strcasecmp(key, "endpoint") == 0) {
+            char host[sizeof(cfg->idr.endpoint_host)];
+            int port = 0;
+            if (cfg_parse_host_and_port(value, host, sizeof(host), &port) != 0) {
+                LOGE("config: IDR endpoint '%s' must be HOST or HOST:PORT", value);
+                return -1;
+            }
+            cfg->idr.endpoint_force = 1;
+            ini_copy_string(cfg->idr.endpoint_host, sizeof(cfg->idr.endpoint_host), host);
+            cfg->idr.endpoint_port = port;
+            if (port > 0) {
+                cfg->idr.http_port = port;
+            }
+            return 0;
+        }
         if (strcasecmp(key, "port") == 0) {
             int port = atoi(value);
             if (port <= 0 || port > 65535) {

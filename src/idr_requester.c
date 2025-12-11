@@ -34,6 +34,7 @@ struct IdrRequester {
 
     gboolean enabled;
     gboolean have_source;
+    gboolean fixed_endpoint;
     struct in_addr source_addr;
     char source_host[IDR_HOST_MAX];
 
@@ -231,6 +232,7 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
 
     req->enabled = (cfg == NULL) ? TRUE : (cfg->enable != 0);
     req->have_source = FALSE;
+    req->fixed_endpoint = FALSE;
     req->source_addr.s_addr = 0;
     req->source_host[0] = '\0';
 
@@ -243,10 +245,26 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
         if (cfg->http_timeout_ms > 0) {
             timeout = cfg->http_timeout_ms;
         }
+        if (cfg->endpoint_port > 0 && cfg->endpoint_port <= 65535) {
+            port = (guint16)cfg->endpoint_port;
+        }
     }
     req->http_port = port;
     req->http_timeout_ms = timeout;
     sanitize_path(cfg != NULL ? cfg->http_path : NULL, req->http_path, sizeof(req->http_path));
+
+    if (cfg != NULL && cfg->endpoint_force && cfg->endpoint_host[0] != '\0') {
+        struct in_addr addr;
+        if (inet_pton(AF_INET, cfg->endpoint_host, &addr) == 1) {
+            req->source_addr = addr;
+            g_strlcpy(req->source_host, cfg->endpoint_host, sizeof(req->source_host));
+            req->have_source = TRUE;
+            req->fixed_endpoint = TRUE;
+            LOGI("IDR requester: using fixed endpoint %s:%u", req->source_host, (unsigned int)req->http_port);
+        } else {
+            LOGE("IDR requester: invalid endpoint IP '%s'; falling back to auto-detected source", cfg->endpoint_host);
+        }
+    }
 
     req->last_warning_ms = 0;
     req->last_request_ms = 0;
@@ -306,6 +324,10 @@ void idr_requester_set_enabled(IdrRequester *req, gboolean enabled) {
 
 void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, socklen_t len) {
     if (req == NULL || addr == NULL || len < (socklen_t)sizeof(struct sockaddr_in)) {
+        return;
+    }
+
+    if (req->fixed_endpoint) {
         return;
     }
 
