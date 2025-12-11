@@ -1521,7 +1521,8 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         }
     }
 
-    mpp_set_log_level(MPP_LOG_ERROR);
+    // Suppress noisy parser error spam from the Rockchip HEVC decoder; keep only fatal logs.
+    mpp_set_log_level(MPP_LOG_FATAL);
 
     if (mpp_create(&vd->ctx, &vd->mpi) != MPP_OK) {
         LOGE("Video decoder: mpp_create failed");
