@@ -66,6 +66,11 @@ typedef struct {
     int http_port;
     unsigned int http_timeout_ms;
     char http_path[128];
+    int stats_trigger;
+    unsigned int loss_window_ms;
+    unsigned int loss_threshold;
+    double jitter_threshold_ms;
+    unsigned int jitter_cooldown_ms;
 } IdrCfg;
 
 typedef struct {

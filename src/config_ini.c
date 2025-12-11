@@ -1255,6 +1255,48 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->idr.http_timeout_ms = (unsigned int)timeout;
             return 0;
         }
+        if (strcasecmp(key, "stats-trigger") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->idr.stats_trigger = v;
+            return 0;
+        }
+        if (strcasecmp(key, "loss-window-ms") == 0) {
+            int v = atoi(value);
+            if (v < 0) {
+                v = 0;
+            }
+            cfg->idr.loss_window_ms = (unsigned int)v;
+            return 0;
+        }
+        if (strcasecmp(key, "loss-threshold") == 0) {
+            int v = atoi(value);
+            if (v <= 0) {
+                LOGE("config: IDR loss-threshold '%s' must be positive", value);
+                return -1;
+            }
+            cfg->idr.loss_threshold = (unsigned int)v;
+            return 0;
+        }
+        if (strcasecmp(key, "jitter-threshold-ms") == 0) {
+            double v = atof(value);
+            if (v <= 0.0) {
+                LOGE("config: IDR jitter-threshold-ms '%s' must be positive", value);
+                return -1;
+            }
+            cfg->idr.jitter_threshold_ms = v;
+            return 0;
+        }
+        if (strcasecmp(key, "jitter-cooldown-ms") == 0) {
+            int v = atoi(value);
+            if (v < 0) {
+                v = 0;
+            }
+            cfg->idr.jitter_cooldown_ms = (unsigned int)v;
+            return 0;
+        }
         return -1;
     }
     if (strcasecmp(section, "gst") == 0) {

@@ -46,6 +46,12 @@ static void usage(const char *prog) {
             "  --idr-port N                 (HTTP port for IDR requests; default: 80)\n"
             "  --idr-path PATH              (HTTP path for IDR trigger; default: /request/idr)\n"
             "  --idr-timeout-ms N           (per-request timeout; default: 200)\n"
+            "  --idr-stats-trigger          (enable stats-driven IDR triggers; default on)\n"
+            "  --idr-no-stats-trigger       (disable stats-driven IDR triggers)\n"
+            "  --idr-loss-window-ms N       (window for counting loss events; default: 200)\n"
+            "  --idr-loss-threshold N       (loss events inside window before triggering; default: 1)\n"
+            "  --idr-jitter-threshold-ms N  (instant/avg jitter threshold before triggering; default: 25)\n"
+            "  --idr-jitter-cooldown-ms N   (minimum spacing between jitter triggers; default: 750)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -194,6 +200,11 @@ void cfg_defaults(AppCfg *c) {
     c->idr.http_port = 80;
     c->idr.http_timeout_ms = 200;
     strcpy(c->idr.http_path, "/request/idr");
+    c->idr.stats_trigger = 1;
+    c->idr.loss_window_ms = 200;
+    c->idr.loss_threshold = 1;
+    c->idr.jitter_threshold_ms = 25.0;
+    c->idr.jitter_cooldown_ms = 750;
 
     c->video_ctm.enable = 0;
     for (int i = 0; i < 9; ++i) {
@@ -442,6 +453,38 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg->idr.http_timeout_ms = (unsigned int)timeout;
+        } else if (!strcmp(argv[i], "--idr-stats-trigger")) {
+            cfg->idr.stats_trigger = 1;
+        } else if (!strcmp(argv[i], "--idr-no-stats-trigger")) {
+            cfg->idr.stats_trigger = 0;
+        } else if (!strcmp(argv[i], "--idr-loss-window-ms") && i + 1 < argc) {
+            int win = atoi(argv[++i]);
+            if (win < 0) {
+                LOGE("--idr-loss-window-ms requires a non-negative value");
+                return -1;
+            }
+            cfg->idr.loss_window_ms = (unsigned int)win;
+        } else if (!strcmp(argv[i], "--idr-loss-threshold") && i + 1 < argc) {
+            int threshold = atoi(argv[++i]);
+            if (threshold <= 0) {
+                LOGE("--idr-loss-threshold requires a positive value");
+                return -1;
+            }
+            cfg->idr.loss_threshold = (unsigned int)threshold;
+        } else if (!strcmp(argv[i], "--idr-jitter-threshold-ms") && i + 1 < argc) {
+            double jitter = atof(argv[++i]);
+            if (jitter <= 0.0) {
+                LOGE("--idr-jitter-threshold-ms requires a positive value");
+                return -1;
+            }
+            cfg->idr.jitter_threshold_ms = jitter;
+        } else if (!strcmp(argv[i], "--idr-jitter-cooldown-ms") && i + 1 < argc) {
+            int cooldown = atoi(argv[++i]);
+            if (cooldown < 0) {
+                LOGE("--idr-jitter-cooldown-ms requires a non-negative value");
+                return -1;
+            }
+            cfg->idr.jitter_cooldown_ms = (unsigned int)cooldown;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {

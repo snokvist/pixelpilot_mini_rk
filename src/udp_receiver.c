@@ -50,6 +50,7 @@
 #define UDP_RECEIVER_MAX_PACKET 4096
 #define UDP_RECEIVER_BATCH 8
 #define UDP_AUDIO_SEQ_MAX_ADVANCE 8192
+#define NS_PER_MS 1000000ULL
 
 typedef struct {
     guint16 sequence;
@@ -100,6 +101,7 @@ struct UdpReceiver {
     guint32 frame_timestamp;
     guint64 frame_bytes;
     gboolean frame_missing;
+    guint64 frame_last_arrival_ns;
 
     gboolean transit_initialized;
     double last_transit;
@@ -120,6 +122,10 @@ struct UdpReceiver {
     guint64 last_packet_ns;
 
     IdrRequester *idr;
+
+    guint64 idr_loss_window_start_ns;
+    guint idr_loss_events;
+    guint64 idr_jitter_last_ns;
 };
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
@@ -365,12 +371,16 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->frame_timestamp = 0;
     ur->frame_bytes = 0;
     ur->frame_missing = FALSE;
+    ur->frame_last_arrival_ns = 0;
     ur->transit_initialized = FALSE;
     ur->last_transit = 0.0;
     ur->bitrate_window_start_ns = 0;
     ur->bitrate_window_bytes = 0;
     ur->video_ssrc = 0;
     ur->have_video_ssrc = FALSE;
+    ur->idr_loss_window_start_ns = 0;
+    ur->idr_loss_events = 0;
+    ur->idr_jitter_last_ns = 0;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
 }
@@ -408,7 +418,79 @@ static void update_bitrate(struct UdpReceiver *ur, guint64 arrival_ns, guint32 b
     }
 }
 
-static void finalize_frame(struct UdpReceiver *ur) {
+static inline double jitter_to_ms(double jitter) {
+    return jitter / 90.0;
+}
+
+static gboolean idr_stats_triggers_enabled(const UdpReceiver *ur) {
+    if (ur == NULL || ur->idr == NULL || ur->cfg == NULL) {
+        return FALSE;
+    }
+    if (!ur->stats_enabled) {
+        return FALSE;
+    }
+    if (!ur->cfg->idr.enable || !ur->cfg->idr.stats_trigger) {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void maybe_trigger_idr_loss(struct UdpReceiver *ur, guint64 arrival_ns) {
+    if (!idr_stats_triggers_enabled(ur)) {
+        return;
+    }
+
+    guint threshold = (ur->cfg->idr.loss_threshold == 0) ? 1u : ur->cfg->idr.loss_threshold;
+    guint64 window_ns = (guint64)ur->cfg->idr.loss_window_ms * NS_PER_MS;
+    if (ur->idr_loss_window_start_ns == 0 || arrival_ns < ur->idr_loss_window_start_ns ||
+        (window_ns > 0 && arrival_ns - ur->idr_loss_window_start_ns > window_ns)) {
+        ur->idr_loss_window_start_ns = arrival_ns;
+        ur->idr_loss_events = 0;
+    }
+
+    ur->idr_loss_events++;
+    if (ur->idr_loss_events >= threshold) {
+        LOGW("UDP receiver: %u loss events within %u ms; requesting IDR",
+             ur->idr_loss_events,
+             ur->cfg->idr.loss_window_ms);
+        ur->idr_loss_events = 0;
+        ur->idr_loss_window_start_ns = arrival_ns;
+        idr_requester_handle_warning(ur->idr);
+    }
+}
+
+static void maybe_trigger_idr_jitter(struct UdpReceiver *ur, guint64 arrival_ns) {
+    if (!idr_stats_triggers_enabled(ur)) {
+        return;
+    }
+
+    double threshold = ur->cfg->idr.jitter_threshold_ms;
+    if (threshold <= 0.0) {
+        return;
+    }
+
+    double jitter_ms = jitter_to_ms(ur->stats.jitter);
+    double jitter_avg_ms = jitter_to_ms(ur->stats.jitter_avg);
+    if (jitter_ms < threshold && jitter_avg_ms < threshold) {
+        return;
+    }
+
+    guint64 cooldown_ns = (guint64)ur->cfg->idr.jitter_cooldown_ms * NS_PER_MS;
+    if (cooldown_ns > 0 && ur->idr_jitter_last_ns != 0 && arrival_ns > ur->idr_jitter_last_ns) {
+        if (arrival_ns - ur->idr_jitter_last_ns < cooldown_ns) {
+            return;
+        }
+    }
+
+    ur->idr_jitter_last_ns = arrival_ns;
+    LOGW("UDP receiver: jitter spike (inst=%.2f ms avg=%.2f ms >= %.2f ms); requesting IDR",
+         jitter_ms,
+         jitter_avg_ms,
+         threshold);
+    idr_requester_handle_warning(ur->idr);
+}
+
+static void finalize_frame(struct UdpReceiver *ur, guint64 arrival_ns) {
     if (!ur->frame_active) {
         return;
     }
@@ -421,7 +503,9 @@ static void finalize_frame(struct UdpReceiver *ur) {
     }
     if (ur->frame_missing) {
         ur->stats.incomplete_frames++;
+        maybe_trigger_idr_loss(ur, arrival_ns);
     }
+    maybe_trigger_idr_jitter(ur, arrival_ns);
     ur->frame_active = FALSE;
     ur->frame_bytes = 0;
     ur->frame_missing = FALSE;
@@ -467,6 +551,9 @@ static void process_rtp(struct UdpReceiver *ur,
         ur->frame_bytes = 0;
         ur->frame_missing = FALSE;
         ur->transit_initialized = FALSE;
+        ur->idr_loss_window_start_ns = 0;
+        ur->idr_loss_events = 0;
+        ur->idr_jitter_last_ns = 0;
     }
 
     ur->stats.total_packets++;
@@ -483,9 +570,12 @@ static void process_rtp(struct UdpReceiver *ur,
     sample.size = (guint32)len;
     sample.arrival_ns = arrival_ns;
 
+    guint64 previous_arrival_ns = ur->frame_last_arrival_ns;
+    ur->frame_last_arrival_ns = arrival_ns;
+
     if (!ur->frame_active || ur->frame_timestamp != parsed->timestamp) {
         if (ur->frame_active) {
-            finalize_frame(ur);
+            finalize_frame(ur, previous_arrival_ns);
         }
         ur->frame_active = TRUE;
         ur->frame_timestamp = parsed->timestamp;
@@ -542,7 +632,7 @@ static void process_rtp(struct UdpReceiver *ur,
 
     if (parsed->marker) {
         sample.flags |= UDP_SAMPLE_FLAG_FRAME_END;
-        finalize_frame(ur);
+        finalize_frame(ur, arrival_ns);
     }
 
     update_bitrate(ur, arrival_ns, (guint32)len);
