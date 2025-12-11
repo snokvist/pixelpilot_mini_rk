@@ -1282,6 +1282,21 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->idr.enable = v;
             return 0;
         }
+        if (strcasecmp(key, "endpoint") == 0) {
+            char host[sizeof(cfg->idr.endpoint_host)];
+            int port = 0;
+            if (cfg_parse_host_and_port(value, host, sizeof(host), &port) != 0) {
+                LOGE("config: IDR endpoint '%s' must be HOST or HOST:PORT", value);
+                return -1;
+            }
+            cfg->idr.endpoint_force = 1;
+            ini_copy_string(cfg->idr.endpoint_host, sizeof(cfg->idr.endpoint_host), host);
+            cfg->idr.endpoint_port = port;
+            if (port > 0) {
+                cfg->idr.http_port = port;
+            }
+            return 0;
+        }
         if (strcasecmp(key, "port") == 0) {
             int port = atoi(value);
             if (port <= 0 || port > 65535) {
@@ -1301,6 +1316,48 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
                 timeout = 1;
             }
             cfg->idr.http_timeout_ms = (unsigned int)timeout;
+            return 0;
+        }
+        if (strcasecmp(key, "stats-trigger") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->idr.stats_trigger = v;
+            return 0;
+        }
+        if (strcasecmp(key, "loss-window-ms") == 0) {
+            int v = atoi(value);
+            if (v < 0) {
+                v = 0;
+            }
+            cfg->idr.loss_window_ms = (unsigned int)v;
+            return 0;
+        }
+        if (strcasecmp(key, "loss-threshold") == 0) {
+            int v = atoi(value);
+            if (v <= 0) {
+                LOGE("config: IDR loss-threshold '%s' must be positive", value);
+                return -1;
+            }
+            cfg->idr.loss_threshold = (unsigned int)v;
+            return 0;
+        }
+        if (strcasecmp(key, "jitter-threshold-ms") == 0) {
+            double v = atof(value);
+            if (v <= 0.0) {
+                LOGE("config: IDR jitter-threshold-ms '%s' must be positive", value);
+                return -1;
+            }
+            cfg->idr.jitter_threshold_ms = v;
+            return 0;
+        }
+        if (strcasecmp(key, "jitter-cooldown-ms") == 0) {
+            int v = atoi(value);
+            if (v < 0) {
+                v = 0;
+            }
+            cfg->idr.jitter_cooldown_ms = (unsigned int)v;
             return 0;
         }
         return -1;

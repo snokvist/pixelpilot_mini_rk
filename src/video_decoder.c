@@ -17,6 +17,7 @@
 #include <gst/gst.h>
 #include <rockchip/rk_mpi.h>
 #include <rockchip/mpp_err.h>
+#include <rockchip/mpp_log.h>
 
 #if defined(PIXELPILOT_DISABLE_NEON)
 #define PIXELPILOT_NEON_AVAILABLE 0
@@ -1519,6 +1520,9 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
             have_ctm = TRUE;
         }
     }
+
+    // Suppress noisy parser error spam from the Rockchip HEVC decoder; keep only fatal logs.
+    mpp_set_log_level(MPP_LOG_FATAL);
 
     if (mpp_create(&vd->ctx, &vd->mpi) != MPP_OK) {
         LOGE("Video decoder: mpp_create failed");

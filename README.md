@@ -13,8 +13,6 @@ sudo apt-get install \
     libglib2.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
 ```
 
-The optional CTM support now relies solely on DRM color matrices.
-
 The Rockchip MPP headers and libraries are also distributed outside the standard repositories. Fetch them from the [rockchip-mpp](https://github.com/rockchip-linux/mpp) project and install them into a prefix on your build host (for example `/usr/local`). Expose the headers to the compiler either through `pkg-config` (`rockchip-mpp.pc`) or by ensuring they reside in `/usr/include/rockchip` as expected by the default Makefile fallbacks.
 
 ## Systemd service integration
@@ -34,31 +32,6 @@ sudo make uninstall
 ```
 
 The uninstall target disables the services, removes the installed files (including the default INI and spinner asset), and reloads the systemd daemon to pick up the changes.
-
-### Live CTM overrides over the external OSD feed
-
-When `[osd.external].enable = true` the helper listens for JSON payloads on the configured UDP port and mirrors the most recent
-message into the on-screen display pipeline. The same channel can now steer the DRM CTM matrix in real time without touching the
-persistent INI file. Send a datagram that includes a top-level `ctm` object with a 3×3 `matrix`.
-
-Updates apply immediately to the running decoder but are not written back to disk; restarting the process restores the INI values.
-Example payloads:
-
-```json
-{
-  "ctm": {
-    "matrix": [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  }
-}
-```
-
-```json
-{
-  "ctm": {
-    "matrix": [0.9, 0, 0, 0, 1.05, 0, 0, 0, 1]
-  }
-}
-```
 
 ## Configuration via INI
 
@@ -89,8 +62,6 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].video-plane-id` | Numeric plane ID used for the decoded video plane. |
 | `[drm].use-udev` | `true` to enable the hotplug listener that reapplies modes when connectors change. |
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
-| `[video.ctm].enable` | Enable the 3×3 color transform matrix path before posting decoded frames (applies via DRM CTM when available). |
-| `[video.ctm].matrix` | Nine comma-separated coefficients that form the 3×3 RGB color transform matrix (row-major). |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
