@@ -722,15 +722,16 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
         audio_caps = NULL;
 
         g_object_set(audio_queue_start, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0,
-                     "max-size-buffers", 2, NULL);
+                     "max-size-buffers", cfg->audio_queue_start_buffers, NULL);
         g_object_set(audio_queue_play, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0,
-                     "max-size-buffers", 2, NULL);
+                     "max-size-buffers", cfg->audio_queue_play_buffers, NULL);
         g_object_set(audio_queue_sink, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0,
-                     "max-size-buffers", 2, NULL);
+                     "max-size-buffers", cfg->audio_queue_sink_buffers, NULL);
         g_object_set(audio_record_queue, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0,
-                     "max-size-buffers", 16, NULL);
-        g_object_set(audio_sink, "device", cfg->aud_dev, "sync", FALSE, "async", FALSE, "buffer-time", (guint64)12000,
-                     "latency-time", (guint64)6000, NULL);
+                     "max-size-buffers", cfg->audio_record_queue_buffers, NULL);
+        g_object_set(audio_sink, "device", cfg->aud_dev, "sync", FALSE, "async", FALSE,
+                     "buffer-time", (guint64)cfg->audio_sink_buffer_time_us, "latency-time",
+                     (guint64)cfg->audio_sink_latency_time_us, NULL);
         gst_app_sink_set_max_buffers(GST_APP_SINK(audio_record_sink), 8);
         gst_app_sink_set_drop(GST_APP_SINK(audio_record_sink), TRUE);
         g_object_set(audio_record_sink, "emit-signals", TRUE, "sync", FALSE, "async", FALSE, NULL);

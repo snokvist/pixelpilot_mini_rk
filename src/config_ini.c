@@ -1048,6 +1048,54 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             ini_copy_string(cfg->aud_dev, sizeof(cfg->aud_dev), value);
             return 0;
         }
+        if (strcasecmp(key, "queue-start-buffers") == 0) {
+            cfg->audio_queue_start_buffers = atoi(value);
+            if (cfg->audio_queue_start_buffers <= 0) {
+                LOGE("config: audio.queue-start-buffers '%s' must be positive", value);
+                cfg->audio_queue_start_buffers = 1;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "queue-play-buffers") == 0) {
+            cfg->audio_queue_play_buffers = atoi(value);
+            if (cfg->audio_queue_play_buffers <= 0) {
+                LOGE("config: audio.queue-play-buffers '%s' must be positive", value);
+                cfg->audio_queue_play_buffers = 1;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "queue-sink-buffers") == 0) {
+            cfg->audio_queue_sink_buffers = atoi(value);
+            if (cfg->audio_queue_sink_buffers <= 0) {
+                LOGE("config: audio.queue-sink-buffers '%s' must be positive", value);
+                cfg->audio_queue_sink_buffers = 1;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "record-queue-buffers") == 0) {
+            cfg->audio_record_queue_buffers = atoi(value);
+            if (cfg->audio_record_queue_buffers <= 0) {
+                LOGE("config: audio.record-queue-buffers '%s' must be positive", value);
+                cfg->audio_record_queue_buffers = 1;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "sink-buffer-time-us") == 0) {
+            cfg->audio_sink_buffer_time_us = (unsigned int)strtoul(value, NULL, 10);
+            if (cfg->audio_sink_buffer_time_us == 0) {
+                LOGE("config: audio.sink-buffer-time-us '%s' must be positive", value);
+                cfg->audio_sink_buffer_time_us = 1;
+            }
+            return 0;
+        }
+        if (strcasecmp(key, "sink-latency-time-us") == 0) {
+            cfg->audio_sink_latency_time_us = (unsigned int)strtoul(value, NULL, 10);
+            if (cfg->audio_sink_latency_time_us == 0) {
+                LOGE("config: audio.sink-latency-time-us '%s' must be positive", value);
+                cfg->audio_sink_latency_time_us = 1;
+            }
+            return 0;
+        }
         if (strcasecmp(key, "disable") == 0) {
             int v = 0;
             if (parse_bool(value, &v) != 0) {
