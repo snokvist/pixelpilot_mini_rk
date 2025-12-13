@@ -91,6 +91,16 @@ static guint64 monotonic_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+/* Request an IDR frame when we are about to begin recording so files start
+ * with a keyframe. */
+static void pipeline_request_idr(PipelineState *ps) {
+    if (ps == NULL || ps->idr_requester == NULL) {
+        return;
+    }
+
+    idr_requester_handle_warning(ps->idr_requester);
+}
+
 static void pipeline_mark_reinit_requested(PipelineState *ps) {
     if (ps == NULL || !ps->initialized) {
         return;
@@ -1378,6 +1388,10 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     }
 
     ps->state = PIPELINE_RUNNING;
+
+    if (pipeline_is_recording(ps)) {
+        pipeline_request_idr(ps);
+    }
     return 0;
 
 fail:
@@ -1521,6 +1535,10 @@ int pipeline_enable_recording(PipelineState *ps, const RecordCfg *cfg) {
     }
     ps->recorder = rec;
     g_mutex_unlock(&ps->recorder_lock);
+
+    if (ps->state == PIPELINE_RUNNING) {
+        pipeline_request_idr(ps);
+    }
     return 0;
 }
 
