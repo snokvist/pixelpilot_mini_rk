@@ -91,6 +91,8 @@ static guint64 monotonic_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+/* Request an IDR frame when we are about to begin recording so files start
+ * with a keyframe. */
 static void pipeline_request_idr(PipelineState *ps) {
     if (ps == NULL || ps->idr_requester == NULL) {
         return;
