@@ -219,6 +219,14 @@ static long long ms_since(struct timespec newer, struct timespec older) {
     return (newer.tv_sec - older.tv_sec) * 1000LL + (newer.tv_nsec - older.tv_nsec) / 1000000LL;
 }
 
+static gboolean modeset_result_equals(const ModesetResult *a, const ModesetResult *b) {
+    if (a == NULL || b == NULL) {
+        return FALSE;
+    }
+    return a->connector_id == b->connector_id && a->crtc_id == b->crtc_id && a->mode_w == b->mode_w &&
+           a->mode_h == b->mode_h && a->mode_hz == b->mode_hz;
+}
+
 static int stats_consumers_active(const OSD *osd, const SseStreamer *sse) {
     int osd_active = (osd != NULL && osd_is_active(osd)) ? 1 : 0;
     int sse_active = sse_streamer_requires_stats(sse) ? 1 : 0;
@@ -462,7 +470,16 @@ int main(int argc, char **argv) {
                         }
                         connected = 0;
                     } else {
-                        if (atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
+                        ModesetResult probed = {0};
+                        gboolean probe_ok = (probe_maxhz_mode(fd, &cfg, &probed) == 0);
+                        gboolean needs_modeset = TRUE;
+                        if (probe_ok && modeset_result_equals(&ms, &probed)) {
+                            LOGI("Hotplug: display unchanged; skipping reinitialization");
+                            connected = 1;
+                            needs_modeset = FALSE;
+                        }
+
+                        if (needs_modeset && atomic_modeset_maxhz(fd, &cfg, cfg.osd_enable, &ms) == 0) {
                             connected = 1;
                             if (cfg.osd_enable) {
                                 pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, FALSE);
@@ -487,7 +504,7 @@ int main(int argc, char **argv) {
                             clock_gettime(CLOCK_MONOTONIC, &window_start);
                             restart_count = 0;
                             backoff_ms = 0;
-                        } else {
+                        } else if (needs_modeset) {
                             backoff_ms = backoff_ms == 0 ? 250 : (backoff_ms * 2);
                             if (backoff_ms > 2000) {
                                 backoff_ms = 2000;

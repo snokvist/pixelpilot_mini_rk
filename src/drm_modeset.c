@@ -6,6 +6,7 @@
 #include <math.h>
 #include <string.h>
 #include <unistd.h>
+#include <glib.h>
 
 #if defined(__has_include)
 #if __has_include(<libdrm/drm.h>)
@@ -88,23 +89,127 @@ static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
     return a->clock > b->clock;
 }
 
-int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResult *out) {
-    if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0) {
-        LOGW("Failed to enable UNIVERSAL_PLANES");
+typedef struct {
+    drmModeConnector *conn;
+    drmModeCrtc *crtc;
+    drmModeModeInfo mode;
+    int matched_request;
+} DrmConnectorSelection;
+
+static void release_selection(DrmConnectorSelection *sel) {
+    if (sel == NULL) {
+        return;
     }
-    if (drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
-        LOGW("Failed to enable ATOMIC");
+    if (sel->conn != NULL) {
+        drmModeFreeConnector(sel->conn);
+        sel->conn = NULL;
     }
+    if (sel->crtc != NULL) {
+        drmModeFreeCrtc(sel->crtc);
+        sel->crtc = NULL;
+    }
+    memset(&sel->mode, 0, sizeof(sel->mode));
+    sel->matched_request = 0;
+}
+
+typedef struct {
+    int w;
+    int h;
+    int hz;
+    int present;
+} RequestedMode;
+
+static RequestedMode requested_mode_from_cfg(const AppCfg *cfg) {
+    RequestedMode req = {0, 0, 0, 0};
+    if (cfg == NULL) {
+        return req;
+    }
+    if (cfg->mode_w > 0 && cfg->mode_h > 0) {
+        req.w = cfg->mode_w;
+        req.h = cfg->mode_h;
+        req.hz = (cfg->mode_hz > 0) ? cfg->mode_hz : 0;
+        req.present = 1;
+    }
+    return req;
+}
+
+static int mode_matches_request(const drmModeModeInfo *mode, const RequestedMode *req) {
+    if (mode == NULL || req == NULL || !req->present) {
+        return 0;
+    }
+    if ((int)mode->hdisplay != req->w || (int)mode->vdisplay != req->h) {
+        return 0;
+    }
+    if (req->hz > 0 && vrefresh(mode) != req->hz) {
+        return 0;
+    }
+    return 1;
+}
+
+static void format_requested_mode(const RequestedMode *req, char *buf, size_t buf_sz) {
+    if (buf == NULL || buf_sz == 0) {
+        return;
+    }
+    if (req == NULL || !req->present) {
+        g_strlcpy(buf, "auto", buf_sz);
+        return;
+    }
+    if (req->hz > 0) {
+        g_snprintf(buf, buf_sz, "%dx%d@%d", req->w, req->h, req->hz);
+    } else {
+        g_snprintf(buf, buf_sz, "%dx%d", req->w, req->h);
+    }
+}
+
+static drmModeModeInfo pick_mode_for_connector(const drmModeConnector *conn,
+                                               const RequestedMode *req,
+                                               int *matched_request) {
+    drmModeModeInfo best = conn->modes[0];
+    int selected_index = 0;
+    if (matched_request != NULL) {
+        *matched_request = 0;
+    }
+
+    if (req != NULL && req->present) {
+        int found = 0;
+        for (int m = 0; m < conn->count_modes; ++m) {
+            const drmModeModeInfo *cand = &conn->modes[m];
+            if (!mode_matches_request(cand, req)) {
+                continue;
+            }
+            if (!found || better_mode(cand, &conn->modes[selected_index])) {
+                selected_index = m;
+            }
+            found = 1;
+        }
+        if (found) {
+            if (matched_request != NULL) {
+                *matched_request = 1;
+            }
+            return conn->modes[selected_index];
+        }
+    }
+
+    for (int m = 1; m < conn->count_modes; ++m) {
+        if (better_mode(&conn->modes[m], &best)) {
+            best = conn->modes[m];
+        }
+    }
+    return best;
+}
+
+static int pick_best_connector(int fd, const AppCfg *cfg, DrmConnectorSelection *out) {
+    if (cfg == NULL || out == NULL) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    RequestedMode req = requested_mode_from_cfg(cfg);
 
     drmModeRes *res = drmModeGetResources(fd);
     if (!res) {
         LOGE("drmModeGetResources failed");
         return -1;
     }
-
-    drmModeConnector *conn = NULL;
-    drmModeCrtc *crtc = NULL;
-    drmModeModeInfo best = {0};
 
     for (int i = 0; i < res->count_connectors; ++i) {
         drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
@@ -117,18 +222,15 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
 
         if (c->connection == DRM_MODE_CONNECTED && c->count_modes > 0 &&
             (!cfg->connector_name[0] || strcmp(cfg->connector_name, cname) == 0)) {
-            best = c->modes[0];
-            for (int m = 1; m < c->count_modes; ++m) {
-                if (better_mode(&c->modes[m], &best)) {
-                    best = c->modes[m];
-                }
-            }
+            int matched = 0;
+            drmModeModeInfo best = pick_mode_for_connector(c, &req, &matched);
 
             drmModeEncoder *enc = NULL;
             if (c->encoder_id) {
                 enc = drmModeGetEncoder(fd, c->encoder_id);
             }
             int crtc_id = -1;
+            drmModeCrtc *crtc = NULL;
             if (enc && enc->crtc_id) {
                 crtc = drmModeGetCrtc(fd, enc->crtc_id);
                 if (crtc) {
@@ -158,18 +260,43 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
             }
 
             if (crtc_id >= 0 && crtc) {
-                conn = c;
-                break;
+                out->conn = c;
+                out->crtc = crtc;
+                out->mode = best;
+                out->matched_request = matched;
+                drmModeFreeResources(res);
+                return 0;
+            }
+            if (crtc) {
+                drmModeFreeCrtc(crtc);
             }
         }
         drmModeFreeConnector(c);
     }
 
-    if (!conn) {
-        LOGI("No CONNECTED connector with modes");
-        drmModeFreeResources(res);
-        return -2;
+    drmModeFreeResources(res);
+    LOGI("No CONNECTED connector with modes");
+    return -2;
+}
+
+int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResult *out) {
+    if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0) {
+        LOGW("Failed to enable UNIVERSAL_PLANES");
     }
+    if (drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
+        LOGW("Failed to enable ATOMIC");
+    }
+
+    RequestedMode req = requested_mode_from_cfg(cfg);
+    DrmConnectorSelection selection;
+    int pick = pick_best_connector(fd, cfg, &selection);
+    if (pick != 0) {
+        release_selection(&selection);
+        return pick;
+    }
+    drmModeConnector *conn = selection.conn;
+    drmModeCrtc *crtc = selection.crtc;
+    drmModeModeInfo best = selection.mode;
 
     char cname[32];
     snprintf(cname, sizeof(cname), "%s-%u", conn_type_str(conn->connector_type), conn->connector_type_id);
@@ -177,13 +304,16 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     int h = best.vdisplay;
     int hz = vrefresh(&best);
     LOGI("Chosen: %s id=%u  %dx%d@%d  CRTC=%d  plane=%d", cname, conn->connector_id, w, h, hz, crtc->crtc_id, cfg->plane_id);
+    if (req.present && !selection.matched_request) {
+        char req_buf[32];
+        format_requested_mode(&req, req_buf, sizeof(req_buf));
+        LOGW("Requested mode %s not found; using %dx%d@%d instead", req_buf, w, h, hz);
+    }
 
     uint32_t mode_blob = 0;
     if (drmModeCreatePropertyBlob(fd, &best, sizeof(best), &mode_blob) != 0) {
         LOGE("drmModeCreatePropertyBlob failed: %s", strerror(errno));
-        drmModeFreeConnector(conn);
-        drmModeFreeCrtc(crtc);
-        drmModeFreeResources(res);
+        release_selection(&selection);
         return -4;
     }
 
@@ -191,9 +321,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     if (!req) {
         LOGE("drmModeAtomicAlloc failed");
         drmModeDestroyPropertyBlob(fd, mode_blob);
-        drmModeFreeConnector(conn);
-        drmModeFreeCrtc(crtc);
-        drmModeFreeResources(res);
+        release_selection(&selection);
         return -5;
     }
 
@@ -254,9 +382,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         LOGE("drmModeAtomicCommit failed: %s", strerror(errno));
         drmModeAtomicFree(req);
         drmModeDestroyPropertyBlob(fd, mode_blob);
-        drmModeFreeConnector(conn);
-        drmModeFreeCrtc(crtc);
-        drmModeFreeResources(res);
+        release_selection(&selection);
         return -9;
     }
 
@@ -273,9 +399,27 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         out->mode_hz = hz;
     }
 
-    drmModeFreeConnector(conn);
-    drmModeFreeCrtc(crtc);
-    drmModeFreeResources(res);
+    release_selection(&selection);
+    return 0;
+}
+
+int probe_maxhz_mode(int fd, const AppCfg *cfg, ModesetResult *out) {
+    DrmConnectorSelection selection;
+    int ret = pick_best_connector(fd, cfg, &selection);
+    if (ret != 0) {
+        release_selection(&selection);
+        return ret;
+    }
+
+    if (out != NULL && selection.conn != NULL && selection.crtc != NULL) {
+        out->connector_id = selection.conn->connector_id;
+        out->crtc_id = selection.crtc->crtc_id;
+        out->mode_w = selection.mode.hdisplay;
+        out->mode_h = selection.mode.vdisplay;
+        out->mode_hz = vrefresh(&selection.mode);
+    }
+
+    release_selection(&selection);
     return 0;
 }
 
