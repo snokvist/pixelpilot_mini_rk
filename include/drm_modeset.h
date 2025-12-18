@@ -14,6 +14,7 @@ typedef struct {
 } ModesetResult;
 
 int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResult *out);
+int probe_maxhz_mode(int fd, const AppCfg *cfg, ModesetResult *out);
 int is_any_connected(int fd, const AppCfg *cfg);
 
 #endif // DRM_MODESET_H

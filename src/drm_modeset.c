@@ -88,23 +88,38 @@ static int better_mode(const drmModeModeInfo *a, const drmModeModeInfo *b) {
     return a->clock > b->clock;
 }
 
-int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResult *out) {
-    if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0) {
-        LOGW("Failed to enable UNIVERSAL_PLANES");
+typedef struct {
+    drmModeConnector *conn;
+    drmModeCrtc *crtc;
+    drmModeModeInfo mode;
+} DrmConnectorSelection;
+
+static void release_selection(DrmConnectorSelection *sel) {
+    if (sel == NULL) {
+        return;
     }
-    if (drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
-        LOGW("Failed to enable ATOMIC");
+    if (sel->conn != NULL) {
+        drmModeFreeConnector(sel->conn);
+        sel->conn = NULL;
     }
+    if (sel->crtc != NULL) {
+        drmModeFreeCrtc(sel->crtc);
+        sel->crtc = NULL;
+    }
+    memset(&sel->mode, 0, sizeof(sel->mode));
+}
+
+static int pick_best_connector(int fd, const AppCfg *cfg, DrmConnectorSelection *out) {
+    if (cfg == NULL || out == NULL) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
 
     drmModeRes *res = drmModeGetResources(fd);
     if (!res) {
         LOGE("drmModeGetResources failed");
         return -1;
     }
-
-    drmModeConnector *conn = NULL;
-    drmModeCrtc *crtc = NULL;
-    drmModeModeInfo best = {0};
 
     for (int i = 0; i < res->count_connectors; ++i) {
         drmModeConnector *c = drmModeGetConnector(fd, res->connectors[i]);
@@ -117,7 +132,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
 
         if (c->connection == DRM_MODE_CONNECTED && c->count_modes > 0 &&
             (!cfg->connector_name[0] || strcmp(cfg->connector_name, cname) == 0)) {
-            best = c->modes[0];
+            drmModeModeInfo best = c->modes[0];
             for (int m = 1; m < c->count_modes; ++m) {
                 if (better_mode(&c->modes[m], &best)) {
                     best = c->modes[m];
@@ -129,6 +144,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
                 enc = drmModeGetEncoder(fd, c->encoder_id);
             }
             int crtc_id = -1;
+            drmModeCrtc *crtc = NULL;
             if (enc && enc->crtc_id) {
                 crtc = drmModeGetCrtc(fd, enc->crtc_id);
                 if (crtc) {
@@ -158,18 +174,41 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
             }
 
             if (crtc_id >= 0 && crtc) {
-                conn = c;
-                break;
+                out->conn = c;
+                out->crtc = crtc;
+                out->mode = best;
+                drmModeFreeResources(res);
+                return 0;
+            }
+            if (crtc) {
+                drmModeFreeCrtc(crtc);
             }
         }
         drmModeFreeConnector(c);
     }
 
-    if (!conn) {
-        LOGI("No CONNECTED connector with modes");
-        drmModeFreeResources(res);
-        return -2;
+    drmModeFreeResources(res);
+    LOGI("No CONNECTED connector with modes");
+    return -2;
+}
+
+int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResult *out) {
+    if (drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1) != 0) {
+        LOGW("Failed to enable UNIVERSAL_PLANES");
     }
+    if (drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) != 0) {
+        LOGW("Failed to enable ATOMIC");
+    }
+
+    DrmConnectorSelection selection;
+    int pick = pick_best_connector(fd, cfg, &selection);
+    if (pick != 0) {
+        release_selection(&selection);
+        return pick;
+    }
+    drmModeConnector *conn = selection.conn;
+    drmModeCrtc *crtc = selection.crtc;
+    drmModeModeInfo best = selection.mode;
 
     char cname[32];
     snprintf(cname, sizeof(cname), "%s-%u", conn_type_str(conn->connector_type), conn->connector_type_id);
@@ -181,9 +220,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     uint32_t mode_blob = 0;
     if (drmModeCreatePropertyBlob(fd, &best, sizeof(best), &mode_blob) != 0) {
         LOGE("drmModeCreatePropertyBlob failed: %s", strerror(errno));
-        drmModeFreeConnector(conn);
-        drmModeFreeCrtc(crtc);
-        drmModeFreeResources(res);
+        release_selection(&selection);
         return -4;
     }
 
@@ -191,9 +228,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     if (!req) {
         LOGE("drmModeAtomicAlloc failed");
         drmModeDestroyPropertyBlob(fd, mode_blob);
-        drmModeFreeConnector(conn);
-        drmModeFreeCrtc(crtc);
-        drmModeFreeResources(res);
+        release_selection(&selection);
         return -5;
     }
 
@@ -254,9 +289,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         LOGE("drmModeAtomicCommit failed: %s", strerror(errno));
         drmModeAtomicFree(req);
         drmModeDestroyPropertyBlob(fd, mode_blob);
-        drmModeFreeConnector(conn);
-        drmModeFreeCrtc(crtc);
-        drmModeFreeResources(res);
+        release_selection(&selection);
         return -9;
     }
 
@@ -273,9 +306,27 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         out->mode_hz = hz;
     }
 
-    drmModeFreeConnector(conn);
-    drmModeFreeCrtc(crtc);
-    drmModeFreeResources(res);
+    release_selection(&selection);
+    return 0;
+}
+
+int probe_maxhz_mode(int fd, const AppCfg *cfg, ModesetResult *out) {
+    DrmConnectorSelection selection;
+    int ret = pick_best_connector(fd, cfg, &selection);
+    if (ret != 0) {
+        release_selection(&selection);
+        return ret;
+    }
+
+    if (out != NULL && selection.conn != NULL && selection.crtc != NULL) {
+        out->connector_id = selection.conn->connector_id;
+        out->crtc_id = selection.crtc->crtc_id;
+        out->mode_w = selection.mode.hdisplay;
+        out->mode_h = selection.mode.vdisplay;
+        out->mode_hz = vrefresh(&selection.mode);
+    }
+
+    release_selection(&selection);
     return 0;
 }
 
