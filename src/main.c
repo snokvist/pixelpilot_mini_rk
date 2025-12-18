@@ -469,11 +469,12 @@ int main(int argc, char **argv) {
                             osd_disable(fd, &osd);
                         }
                         connected = 0;
+                        memset(&ms, 0, sizeof(ms));
                     } else {
                         ModesetResult probed = {0};
                         gboolean probe_ok = (probe_maxhz_mode(fd, &cfg, &probed) == 0);
                         gboolean needs_modeset = TRUE;
-                        if (probe_ok && modeset_result_equals(&ms, &probed)) {
+                        if (probe_ok && modeset_result_equals(&ms, &probed) && ps.state == PIPELINE_RUNNING) {
                             LOGI("Hotplug: display unchanged; skipping reinitialization");
                             connected = 1;
                             needs_modeset = FALSE;
