@@ -287,7 +287,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         LOGW("Failed to enable ATOMIC");
     }
 
-    RequestedMode req = requested_mode_from_cfg(cfg);
+    RequestedMode mode_req = requested_mode_from_cfg(cfg);
     DrmConnectorSelection selection;
     int pick = pick_best_connector(fd, cfg, &selection);
     if (pick != 0) {
@@ -304,9 +304,9 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     int h = best.vdisplay;
     int hz = vrefresh(&best);
     LOGI("Chosen: %s id=%u  %dx%d@%d  CRTC=%d  plane=%d", cname, conn->connector_id, w, h, hz, crtc->crtc_id, cfg->plane_id);
-    if (req.present && !selection.matched_request) {
+    if (mode_req.present && !selection.matched_request) {
         char req_buf[32];
-        format_requested_mode(&req, req_buf, sizeof(req_buf));
+        format_requested_mode(&mode_req, req_buf, sizeof(req_buf));
         LOGW("Requested mode %s not found; using %dx%d@%d instead", req_buf, w, h, hz);
     }
 
@@ -317,8 +317,8 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
         return -4;
     }
 
-    drmModeAtomicReq *req = drmModeAtomicAlloc();
-    if (!req) {
+    drmModeAtomicReq *atomic_req = drmModeAtomicAlloc();
+    if (!atomic_req) {
         LOGE("drmModeAtomicAlloc failed");
         drmModeDestroyPropertyBlob(fd, mode_blob);
         release_selection(&selection);
@@ -328,12 +328,12 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     uint32_t crtc_active = 0, crtc_mode_id = 0;
     drm_get_prop_id(fd, crtc->crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", &crtc_active);
     drm_get_prop_id(fd, crtc->crtc_id, DRM_MODE_OBJECT_CRTC, "MODE_ID", &crtc_mode_id);
-    drmModeAtomicAddProperty(req, crtc->crtc_id, crtc_active, 1);
-    drmModeAtomicAddProperty(req, crtc->crtc_id, crtc_mode_id, mode_blob);
+    drmModeAtomicAddProperty(atomic_req, crtc->crtc_id, crtc_active, 1);
+    drmModeAtomicAddProperty(atomic_req, crtc->crtc_id, crtc_mode_id, mode_blob);
 
     uint32_t conn_crtc_id = 0;
     drm_get_prop_id(fd, conn->connector_id, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", &conn_crtc_id);
-    drmModeAtomicAddProperty(req, conn->connector_id, conn_crtc_id, crtc->crtc_id);
+    drmModeAtomicAddProperty(atomic_req, conn->connector_id, conn_crtc_id, crtc->crtc_id);
 
     uint32_t plane_fb_id = 0, plane_crtc_id = 0, plane_crtc_x = 0, plane_crtc_y = 0;
     uint32_t plane_crtc_w = 0, plane_crtc_h = 0, plane_src_x = 0, plane_src_y = 0;
@@ -357,30 +357,30 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
     // Disable the video plane until the decoder attaches a real framebuffer.
     // Some hardware (e.g. Rockchip VOP2 cluster planes) reject linear dummy
     // buffers, so keep the plane idle instead of binding a placeholder FB.
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_fb_id, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_id, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_x, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_y, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_w, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_crtc_h, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_x, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_y, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_w, 0);
-    drmModeAtomicAddProperty(req, cfg->plane_id, plane_src_h, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_fb_id, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_crtc_id, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_crtc_x, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_crtc_y, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_crtc_w, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_crtc_h, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_src_x, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_src_y, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_src_w, 0);
+    drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_src_h, 0);
 
     if (have_zpos) {
         uint64_t v_z = zmax;
         if (osd_enabled && zmax > zmin) {
             v_z = zmax - 1;
         }
-        drmModeAtomicAddProperty(req, cfg->plane_id, plane_zpos_id, v_z);
+        drmModeAtomicAddProperty(atomic_req, cfg->plane_id, plane_zpos_id, v_z);
     }
 
     int flags = DRM_MODE_ATOMIC_ALLOW_MODESET;
-    int ret = drmModeAtomicCommit(fd, req, flags, NULL);
+    int ret = drmModeAtomicCommit(fd, atomic_req, flags, NULL);
     if (ret != 0) {
         LOGE("drmModeAtomicCommit failed: %s", strerror(errno));
-        drmModeAtomicFree(req);
+        drmModeAtomicFree(atomic_req);
         drmModeDestroyPropertyBlob(fd, mode_blob);
         release_selection(&selection);
         return -9;
@@ -388,7 +388,7 @@ int atomic_modeset_maxhz(int fd, const AppCfg *cfg, int osd_enabled, ModesetResu
 
     LOGI("Atomic COMMIT: %dx%d@%d on %s via plane %d", w, h, hz, cname, cfg->plane_id);
 
-    drmModeAtomicFree(req);
+    drmModeAtomicFree(atomic_req);
     drmModeDestroyPropertyBlob(fd, mode_blob);
 
     if (out) {
