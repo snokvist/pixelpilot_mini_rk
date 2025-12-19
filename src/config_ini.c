@@ -973,6 +973,12 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         ini_copy_string(cfg->connector_name, sizeof(cfg->connector_name), value);
             return 0;
         }
+        if (strcasecmp(key, "mode") == 0) {
+            if (cfg_set_drm_mode_from_string(value, cfg) != 0) {
+                LOGW("config: invalid drm.mode '%s'; falling back to auto", value);
+            }
+            return 0;
+        }
         if (strcasecmp(key, "video-plane-id") == 0) {
             cfg->plane_id = atoi(value);
             return 0;

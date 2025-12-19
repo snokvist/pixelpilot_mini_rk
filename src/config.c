@@ -16,6 +16,7 @@ static void usage(const char *prog) {
             "Usage: %s [options]\n"
             "  --card /dev/dri/cardN        (default: /dev/dri/card0)\n"
             "  --connector NAME             (e.g. HDMI-A-1; default: first CONNECTED)\n"
+            "  --mode WxH[@Hz]              (force a specific display mode; default: auto)\n"
             "  --plane-id N                 (video plane; default: 76)\n"
             "  --no-udev                    (disable hotplug listener)\n"
             "  --config PATH                (load settings from ini file)\n"
@@ -140,11 +141,48 @@ const char *cfg_record_mode_name(RecordMode mode) {
     }
 }
 
+int cfg_set_drm_mode_from_string(const char *value, AppCfg *cfg) {
+    if (cfg == NULL) {
+        return -1;
+    }
+    if (value == NULL || *value == '\0' || strcasecmp(value, "auto") == 0) {
+        cfg->mode_w = 0;
+        cfg->mode_h = 0;
+        cfg->mode_hz = 0;
+        return 0;
+    }
+
+    int w = 0, h = 0, hz = 0;
+    int parsed = sscanf(value, "%dx%d@%d", &w, &h, &hz);
+    if (parsed < 2) {
+        LOGW("config: display mode '%s' is invalid; using auto", value);
+        cfg->mode_w = 0;
+        cfg->mode_h = 0;
+        cfg->mode_hz = 0;
+        return -1;
+    }
+    if (w <= 0 || h <= 0) {
+        LOGW("config: display mode '%s' has non-positive dimensions; using auto", value);
+        cfg->mode_w = 0;
+        cfg->mode_h = 0;
+        cfg->mode_hz = 0;
+        return -1;
+    }
+
+    cfg->mode_w = w;
+    cfg->mode_h = h;
+    cfg->mode_hz = (parsed == 3 && hz > 0) ? hz : 0;
+    return 0;
+}
+
 void cfg_defaults(AppCfg *c) {
     memset(c, 0, sizeof(*c));
     strcpy(c->card_path, "/dev/dri/card0");
     c->plane_id = 76;
     c->use_udev = 1;
+    c->mode_w = 0;
+    c->mode_h = 0;
+    c->mode_hz = 0;
     c->config_path[0] = '\0';
 
     c->udp_port = 5600;
@@ -383,6 +421,13 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cli_copy_string(cfg->card_path, sizeof(cfg->card_path), argv[++i]);
         } else if (!strcmp(argv[i], "--connector") && i + 1 < argc) {
             cli_copy_string(cfg->connector_name, sizeof(cfg->connector_name), argv[++i]);
+        } else if (!strcmp(argv[i], "--mode") && i + 1 < argc) {
+            if (cfg_set_drm_mode_from_string(argv[++i], cfg) != 0) {
+                LOGW("Ignoring invalid --mode; continuing with auto");
+            }
+        } else if (!strcmp(argv[i], "--mode")) {
+            LOGE("--mode requires an argument (WxH[@Hz])");
+            return -1;
         } else if (!strcmp(argv[i], "--plane-id") && i + 1 < argc) {
             cfg->plane_id = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--no-udev")) {

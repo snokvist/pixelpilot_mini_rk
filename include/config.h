@@ -82,6 +82,9 @@ typedef struct {
     char config_path[PATH_MAX];
     int plane_id;
     int use_udev;
+    int mode_w;
+    int mode_h;
+    int mode_hz;
 
     int udp_port;
     int vid_pt;
@@ -141,5 +144,6 @@ const char *cfg_custom_sink_mode_name(CustomSinkMode mode);
 int cfg_parse_record_mode(const char *value, RecordMode *mode_out);
 const char *cfg_record_mode_name(RecordMode mode);
 int cfg_parse_host_and_port(const char *value, char *host_out, size_t host_len, int *port_out);
+int cfg_set_drm_mode_from_string(const char *value, AppCfg *cfg);
 
 #endif // CONFIG_H

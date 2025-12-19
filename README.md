@@ -59,6 +59,7 @@ to the defaults listed in `src/config.c` when omitted.
 | --- | --- |
 | `[drm].card` | DRM card node to open (default `/dev/dri/card0`). |
 | `[drm].connector` | Preferred connector name (e.g. `HDMI-A-1`). Leave blank to auto-pick the first connected head. |
+| `[drm].mode` | Optional forced mode in `WIDTHxHEIGHT[@Hz]` form (e.g. `1920x1080@120`). Omit or set `auto` to use the preferred/best mode. |
 | `[drm].video-plane-id` | Numeric plane ID used for the decoded video plane. |
 | `[drm].use-udev` | `true` to enable the hotplug listener that reapplies modes when connectors change. |
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
