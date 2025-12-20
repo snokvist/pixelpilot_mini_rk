@@ -2894,6 +2894,16 @@ static int plane_get_basic_props(int fd, uint32_t plane_id, PlaneProps *pp) {
     return 0;
 }
 
+static uint64_t clamp_u64(uint64_t value, uint64_t min, uint64_t max) {
+    if (value < min) {
+        return min;
+    }
+    if (value > max) {
+        return max;
+    }
+    return value;
+}
+
 static int plane_accepts_linear_argb(int fd, uint32_t plane_id, uint32_t crtc_id) {
     PlaneProps pp;
     if (plane_get_basic_props(fd, plane_id, &pp) != 0) {
@@ -3302,6 +3312,45 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
 
     o->active = 1;
     return 0;
+}
+
+int osd_ensure_above_video(int fd, uint32_t video_plane_id, OSD *o) {
+    if (o == NULL || !o->enabled || !o->active || !o->have_zpos || o->plane_id == 0) {
+        return 0;
+    }
+    if (video_plane_id == 0 || video_plane_id == o->plane_id) {
+        return 0;
+    }
+
+    PlaneProps video_props;
+    if (plane_get_basic_props(fd, video_plane_id, &video_props) != 0 || !video_props.have_zpos) {
+        LOGW("OSD: video plane %u missing ZPOS; cannot enforce plane ordering", video_plane_id);
+        return -1;
+    }
+
+    /* Mirror the modeset ordering: keep OSD at its max zpos, nudge video below when possible. */
+    uint64_t osd_z = clamp_u64(o->zmax, o->zmin, o->zmax);
+    uint64_t video_z = video_props.zmin;
+    if (osd_z > video_props.zmin) {
+        video_z = clamp_u64(osd_z - 1, video_props.zmin, video_props.zmax);
+    }
+
+    if (osd_z <= video_z) {
+        LOGW("OSD: unable to ensure ordering (OSD z=%" PRIu64 ", video z=%" PRIu64 ")", osd_z, video_z);
+    }
+
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    if (!req) {
+        return -1;
+    }
+    drmModeAtomicAddProperty(req, o->plane_id, o->p_zpos, osd_z);
+    drmModeAtomicAddProperty(req, video_plane_id, video_props.p_zpos, video_z);
+    int ret = drmModeAtomicCommit(fd, req, 0, NULL);
+    drmModeAtomicFree(req);
+    if (ret != 0) {
+        LOGW("OSD: failed to update plane zpos ordering: %s", strerror(errno));
+    }
+    return ret;
 }
 
 void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
