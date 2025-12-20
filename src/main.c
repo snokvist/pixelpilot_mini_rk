@@ -282,6 +282,10 @@ static void pipeline_restart_now(AppCfg *cfg,
         return;
     }
 
+    if (osd != NULL && osd_is_enabled(osd)) {
+        osd_ensure_above_video(fd, (uint32_t)cfg->plane_id, osd);
+    }
+
     stats_cache_invalidate(stats_enabled_cached);
     pipeline_maybe_set_stats(cfg, ps, stats_enabled_cached, stats_consumers_active(osd, sse_streamer));
     if (window_start != NULL) {
@@ -384,6 +388,9 @@ int main(int argc, char **argv) {
                 LOGE("Failed to start pipeline");
                 pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
             } else {
+                if (osd_is_enabled(&osd)) {
+                    osd_ensure_above_video(fd, (uint32_t)cfg.plane_id, &osd);
+                }
                 pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
             }
             clock_gettime(CLOCK_MONOTONIC, &window_start);
@@ -500,6 +507,9 @@ int main(int argc, char **argv) {
                                 LOGE("Failed to start pipeline after hotplug");
                                 pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, FALSE);
                             } else {
+                                if (osd_is_enabled(&osd)) {
+                                    osd_ensure_above_video(fd, (uint32_t)cfg.plane_id, &osd);
+                                }
                                 pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, osd_is_active(&osd) ? TRUE : FALSE);
                             }
                             clock_gettime(CLOCK_MONOTONIC, &window_start);
