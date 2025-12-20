@@ -3315,7 +3315,7 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
 }
 
 int osd_ensure_above_video(int fd, uint32_t video_plane_id, OSD *o) {
-    if (o == NULL || !o->enabled || !o->have_zpos || o->plane_id == 0) {
+    if (o == NULL || !o->enabled || !o->active || !o->have_zpos || o->plane_id == 0) {
         return 0;
     }
     if (video_plane_id == 0 || video_plane_id == o->plane_id) {
@@ -3328,6 +3328,7 @@ int osd_ensure_above_video(int fd, uint32_t video_plane_id, OSD *o) {
         return -1;
     }
 
+    /* Mirror the modeset ordering: keep OSD at its max zpos, nudge video below when possible. */
     uint64_t osd_z = clamp_u64(o->zmax, o->zmin, o->zmax);
     uint64_t video_z = video_props.zmin;
     if (osd_z > video_props.zmin) {
