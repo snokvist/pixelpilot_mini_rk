@@ -27,6 +27,7 @@ typedef struct {
     double value[OSD_EXTERNAL_MAX_VALUES];
     uint64_t last_update_ns;
     uint64_t expiry_ns;
+    char zoom_command[OSD_EXTERNAL_TEXT_LEN];
     OsdExternalStatus status;
 } OsdExternalFeedSnapshot;
 

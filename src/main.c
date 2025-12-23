@@ -111,10 +111,9 @@ static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, Video
         memset(out_request, 0, sizeof(*out_request));
         return TRUE;
     }
-    if (g_ascii_strncasecmp(p, "zoom=", 5) != 0) {
-        return FALSE;
+    if (g_ascii_strncasecmp(p, "zoom=", 5) == 0) {
+        p += 5;
     }
-    p += 5;
     while (*p != '\0' && g_ascii_isspace(*p)) {
         ++p;
     }
@@ -604,7 +603,7 @@ int main(int argc, char **argv) {
             if (ms_since(now, last_osd) >= cfg.osd_refresh_ms) {
                 OsdExternalFeedSnapshot ext_snapshot;
                 osd_external_get_snapshot(&ext_bridge, &ext_snapshot);
-                const char *zoom_text = ext_snapshot.text[OSD_EXTERNAL_MAX_TEXT - 1];
+                const char *zoom_text = ext_snapshot.zoom_command;
                 if (g_strcmp0(zoom_text, last_zoom_command) != 0) {
                     gboolean zoom_enabled = FALSE;
                     VideoDecoderZoomRequest zoom_request = {0};

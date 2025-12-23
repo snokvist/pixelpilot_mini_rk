@@ -16,6 +16,7 @@ The payload is a JSON object. All fields are optional, but at least one should b
 {
   "text": ["string1", "string2", ...],
   "value": [1.23, 4.56, ...],
+  "zoom": "200,200,50,50",
   "ttl_ms": 1000
 }
 ```
@@ -26,6 +27,7 @@ The payload is a JSON object. All fields are optional, but at least one should b
 | :--- | :--- | :--- |
 | `text` | Array of Strings | Updates the text slots. Max 8 items. Strings are mapped to slots 0-7 by index. |
 | `value` | Array of Numbers | Updates the value slots. Max 8 items. Values are mapped to slots 0-7 by index. |
+| `zoom` | String | Sets the zoom level and center point. See "Zoom Control" below. |
 | `ttl_ms` | Integer | Time-to-live in milliseconds. If present, the updated slots will expire and clear after this duration. If omitted, updates are persistent until overwritten or cleared. |
 
 ## Slot Mapping
@@ -41,17 +43,17 @@ To reference these slots in your `osd.ini` configuration, use tokens like `{exte
 
 ## Zoom Control
 
-The last text slot (index 7) is reserved for Zoom commands.
+Zoom can be controlled by sending a string in the `zoom` field.
 
-*   **Command Format:** `zoom=SCALE_X,SCALE_Y,CENTER_X,CENTER_Y`
+*   **Command Format:** `SCALE_X,SCALE_Y,CENTER_X,CENTER_Y` (or `zoom=SCALE_X,SCALE_Y,CENTER_X,CENTER_Y` for backward compatibility)
     *   `SCALE_X`, `SCALE_Y`: Zoom percentage (e.g., 100 is 1x, 200 is 2x).
     *   `CENTER_X`, `CENTER_Y`: Center point percentage (0-100).
-*   **Disable Zoom:** `zoom=off`
+*   **Disable Zoom:** `off` (or `zoom=off`)
 
 **Example:**
 ```json
 {
-  "text": ["", "", "", "", "", "", "", "zoom=200,200,50,50"]
+  "zoom": "200,200,50,50"
 }
 ```
 This sets 2x zoom centered on the middle of the screen.
