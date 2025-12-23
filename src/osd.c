@@ -1344,13 +1344,35 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
 
     int width = elem_cfg->data.bar.width;
     int height = elem_cfg->data.bar.height;
-    if (width <= 0) {
-        width = 360;
+
+    int bar_width_configured = (elem_cfg->data.bar.bar_width_px > 0);
+    int bar_width = elem_cfg->data.bar.bar_width_px;
+    if (bar_width <= 0) {
+        bar_width = 8;
     }
+    bar_width *= scale;
+    if (bar_width < scale) {
+        bar_width = scale;
+    }
+
+    if (width <= 0) {
+        if (state->mode == OSD_BAR_MODE_INSTANT && bar_width_configured) {
+            int gap = bar_width / 2;
+            if (gap < scale) {
+                gap = scale;
+            }
+            int total_bars = state->series_count;
+            width = total_bars * bar_width + (total_bars - 1) * gap + 8 * scale;
+        } else {
+            width = 360 * scale;
+        }
+    } else {
+        width *= scale;
+    }
+
     if (height <= 0) {
         height = 80;
     }
-    width *= scale;
     height *= scale;
 
     int margin = o->margin_px;
@@ -1386,15 +1408,6 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
     osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
 
-    int bar_width_configured = (elem_cfg->data.bar.bar_width_px > 0);
-    int bar_width = elem_cfg->data.bar.bar_width_px;
-    if (bar_width <= 0) {
-        bar_width = 8;
-    }
-    bar_width *= scale;
-    if (bar_width < scale) {
-        bar_width = scale;
-    }
     if (bar_width > width) {
         bar_width = width;
     }
@@ -3260,7 +3273,12 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     if (o->h <= 0) {
         o->h = 360 * o->scale;
     }
-    o->margin_px = clampi(12 * o->scale, 8, o->h / 4);
+
+    if (cfg->osd_layout.margin >= 0) {
+        o->margin_px = cfg->osd_layout.margin * o->scale;
+    } else {
+        o->margin_px = clampi(24 * o->scale, 16, o->h / 4);
+    }
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");

@@ -38,6 +38,7 @@ void osd_layout_defaults(OsdLayout *layout) {
     }
     memset(layout, 0, sizeof(*layout));
 
+    layout->margin = -1;
     layout->element_count = 2;
 
     OsdElementConfig *text = &layout->elements[0];

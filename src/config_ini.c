@@ -146,7 +146,7 @@ static void builder_reset_line(OsdElementConfig *elem) {
 
 static void builder_reset_bar(OsdElementConfig *elem) {
     elem->type = OSD_WIDGET_BAR;
-    elem->data.bar.width = 360;
+    elem->data.bar.width = 0;
     elem->data.bar.height = 80;
     elem->data.bar.sample_stride_px = 12;
     elem->data.bar.bar_width_px = 8;
@@ -230,9 +230,6 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
                 elem->data.line.sample_stride_px = 4;
             }
         } else if (elem->type == OSD_WIDGET_BAR) {
-            if (elem->data.bar.width <= 0) {
-                elem->data.bar.width = 360;
-            }
             if (elem->data.bar.height <= 0) {
                 elem->data.bar.height = 80;
             }
@@ -507,6 +504,13 @@ static int parse_size(const char *value, int *w, int *h) {
 }
 
 static int parse_osd_section(OsdLayoutBuilder *builder, const char *key, const char *value) {
+    if (strcasecmp(key, "margin") == 0) {
+        builder->layout.margin = atoi(value);
+        if (builder->layout.margin < 0) {
+            builder->layout.margin = 0;
+        }
+        return 0;
+    }
     if (strcasecmp(key, "elements") == 0) {
         builder->order_count = 0;
         builder->order_overridden = 1;

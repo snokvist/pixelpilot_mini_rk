@@ -118,6 +118,7 @@ typedef struct {
 } OsdElementConfig;
 
 typedef struct {
+    int margin;
     int element_count;
     OsdElementConfig elements[OSD_MAX_ELEMENTS];
 } OsdLayout;
