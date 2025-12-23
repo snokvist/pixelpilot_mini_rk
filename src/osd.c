@@ -2059,12 +2059,11 @@ static void osd_line_draw_all(OSD *o, int idx, uint32_t color) {
     }
 }
 
-static void osd_bar_draw_background(OSD *o, int idx, double scale_max) {
+static void osd_bar_draw_frame(OSD *o, int idx) {
     OsdBarState *state = &o->elements[idx].data.bar;
     const OsdBarConfig *cfg = &o->layout.elements[idx].data.bar;
     uint32_t bg = cfg->bg ? cfg->bg : 0x40202020u;
     uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
-    uint32_t grid = axis;
     uint32_t border = axis;
 
     int base_x = state->x;
@@ -2079,27 +2078,48 @@ static void osd_bar_draw_background(OSD *o, int idx, double scale_max) {
     osd_fill_rect(o, base_x, base_y, plot_w, plot_h, bg);
     osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
     osd_store_rect(o, &state->plot_rect, base_x, base_y, plot_w, plot_h);
+}
+
+static void osd_bar_draw_overlays(OSD *o, int idx, double scale_max) {
+    OsdBarState *state = &o->elements[idx].data.bar;
+    const OsdBarConfig *cfg = &o->layout.elements[idx].data.bar;
+    uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
+    uint32_t grid = axis;
+
+    int base_x = state->x;
+    int base_y = state->y;
+    int plot_w = state->width;
+    int plot_h = state->height;
+
+    int scale = o->scale > 0 ? o->scale : 1;
+    int padding = 6 * scale;
+    int inner_x = base_x + padding;
+    int inner_y = base_y + padding;
+    int inner_w = plot_w - 2 * padding;
+    int inner_h = plot_h - 2 * padding;
+
+    if (inner_w <= 0 || inner_h <= 0) {
+        return;
+    }
 
     int grid_lines = 4;
     for (int i = 1; i < grid_lines; ++i) {
-        int gy = base_y + (plot_h * i) / grid_lines;
-        osd_draw_hline(o, base_x, gy, plot_w, grid);
+        int gy = inner_y + (inner_h * i) / grid_lines;
+        osd_draw_hline(o, inner_x, gy, inner_w, grid);
     }
 
-    int scale = o->scale > 0 ? o->scale : 1;
     int marker_count = 4;
     int marker_height = 5 * scale;
-    if (marker_height > plot_h) {
-        marker_height = plot_h;
+    if (marker_height > inner_h) {
+        marker_height = inner_h;
     }
     for (int i = 1; i <= marker_count; ++i) {
-        int gx = base_x + (plot_w * i) / (marker_count + 1);
-        osd_draw_vline(o, gx, base_y + plot_h - marker_height, marker_height, grid);
+        int gx = inner_x + (inner_w * i) / (marker_count + 1);
+        osd_draw_vline(o, gx, inner_y + inner_h - marker_height, marker_height, grid);
     }
 
-    int axis_thickness = o->scale > 0 ? o->scale : 1;
-    osd_draw_hline(o, base_x, base_y + plot_h - axis_thickness, plot_w, axis);
-    osd_draw_vline(o, base_x, base_y, plot_h, axis);
+    // Draw full inner border
+    osd_draw_rect(o, inner_x, inner_y, inner_w, inner_h, axis);
 
     osd_draw_scale_legend(o, base_x, base_y, plot_w, plot_h, scale_max, cfg->metric, cfg->label,
                           cfg->show_info_box, &state->header_rect);
@@ -2711,7 +2731,7 @@ static void osd_bar_draw(OSD *o, int idx) {
     double scale_max = state->scale_max;
     osd_bar_compute_scale(state, cfg, &scale_min, &scale_max);
 
-    osd_bar_draw_background(o, idx, scale_max);
+    osd_bar_draw_frame(o, idx);
 
     state->scale_min = scale_min;
     state->scale_max = scale_max;
@@ -2719,12 +2739,12 @@ static void osd_bar_draw(OSD *o, int idx) {
     state->clear_on_next_draw = 0;
     state->rescale_countdown = OSD_PLOT_RESCALE_DELAY;
 
-    if (state->size <= 0) {
-        return;
+    if (state->size > 0) {
+        uint32_t fg = cfg->fg ? cfg->fg : 0xFF4CAF50u;
+        osd_bar_draw_all(o, idx, fg);
     }
 
-    uint32_t fg = cfg->fg ? cfg->fg : 0xFF4CAF50u;
-    osd_bar_draw_all(o, idx, fg);
+    osd_bar_draw_overlays(o, idx, scale_max);
 }
 
 static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx) {
