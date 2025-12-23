@@ -1402,6 +1402,8 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
         bar_width = scale;
     }
 
+    int padding = 6 * scale;
+
     if (state->mode == OSD_BAR_MODE_INSTANT) {
         int count = state->series_count;
         if (count < 1) {
@@ -1410,8 +1412,6 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
         if (count > OSD_BAR_MAX_SERIES) {
             count = OSD_BAR_MAX_SERIES;
         }
-
-        int padding = 6 * scale;
 
         if (auto_width) {
             int gap = bar_width / 2;
@@ -1455,9 +1455,6 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
         state->step_px = step;
         state->bar_width = bar_width;
     } else {
-        if (bar_width > width) {
-            bar_width = width;
-        }
         int stride = elem_cfg->data.bar.sample_stride_px;
         if (stride <= 0) {
             stride = 12;
@@ -1470,12 +1467,15 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
             stride = bar_width;
         }
 
+        int available_width = width - 2 * padding;
+        if (available_width < 0) available_width = 0;
+
         int capacity = 0;
-        if (width > 0 && stride > 0) {
-            if (width <= bar_width) {
+        if (available_width > 0 && stride > 0) {
+            if (available_width <= bar_width) {
                 capacity = 1;
             } else {
-                capacity = ((width - bar_width) / stride) + 1;
+                capacity = ((available_width - bar_width) / stride) + 1;
             }
         }
         if (capacity < 1) {
@@ -1715,23 +1715,6 @@ static void osd_bar_compute_scale(const OsdBarState *state, const OsdBarConfig *
     *out_max = max_v;
 }
 
-static int osd_bar_value_to_y(const OsdBarState *state, double value) {
-    double min_v = state->scale_min;
-    double max_v = state->scale_max;
-    if (max_v <= min_v) {
-        max_v = min_v + 0.1;
-    }
-    double norm = (value - min_v) / (max_v - min_v);
-    if (norm < 0.0) {
-        norm = 0.0;
-    }
-    if (norm > 1.0) {
-        norm = 1.0;
-    }
-    int plot_h = state->height;
-    int base_y = state->y;
-    return base_y + plot_h - 1 - (int)(norm * (plot_h - 1) + 0.5);
-}
 
 static int osd_line_value_to_y(const OsdLineState *state, double value) {
     double min_v = state->scale_min;
@@ -2097,36 +2080,26 @@ static void osd_bar_draw_background(OSD *o, int idx, double scale_max) {
     osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
     osd_store_rect(o, &state->plot_rect, base_x, base_y, plot_w, plot_h);
 
-    int scale = o->scale > 0 ? o->scale : 1;
-    int padding = 6 * scale;
-    int inner_x = base_x + padding;
-    int inner_y = base_y + padding;
-    int inner_w = plot_w - 2 * padding;
-    int inner_h = plot_h - 2 * padding;
-
-    if (inner_w <= 0 || inner_h <= 0) {
-        return;
-    }
-
     int grid_lines = 4;
     for (int i = 1; i < grid_lines; ++i) {
-        int gy = inner_y + (inner_h * i) / grid_lines;
-        osd_draw_hline(o, inner_x, gy, inner_w, grid);
+        int gy = base_y + (plot_h * i) / grid_lines;
+        osd_draw_hline(o, base_x, gy, plot_w, grid);
     }
 
+    int scale = o->scale > 0 ? o->scale : 1;
     int marker_count = 4;
     int marker_height = 5 * scale;
-    if (marker_height > inner_h) {
-        marker_height = inner_h;
+    if (marker_height > plot_h) {
+        marker_height = plot_h;
     }
     for (int i = 1; i <= marker_count; ++i) {
-        int gx = inner_x + (inner_w * i) / (marker_count + 1);
-        osd_draw_vline(o, gx, inner_y + inner_h - marker_height, marker_height, grid);
+        int gx = base_x + (plot_w * i) / (marker_count + 1);
+        osd_draw_vline(o, gx, base_y + plot_h - marker_height, marker_height, grid);
     }
 
     int axis_thickness = o->scale > 0 ? o->scale : 1;
-    osd_draw_hline(o, inner_x, inner_y + inner_h - axis_thickness, inner_w, axis);
-    osd_draw_vline(o, inner_x, inner_y, inner_h, axis);
+    osd_draw_hline(o, base_x, base_y + plot_h - axis_thickness, plot_w, axis);
+    osd_draw_vline(o, base_x, base_y, plot_h, axis);
 
     osd_draw_scale_legend(o, base_x, base_y, plot_w, plot_h, scale_max, cfg->metric, cfg->label,
                           cfg->show_info_box, &state->header_rect);
@@ -2150,6 +2123,7 @@ static void osd_bar_draw_all(OSD *o, int idx, uint32_t color) {
     if (plot_w <= 0 || plot_h <= 0) {
         return;
     }
+
     int bar_width = state->bar_width;
     if (bar_width <= 0) {
         bar_width = 1;
@@ -2173,7 +2147,22 @@ static void osd_bar_draw_all(OSD *o, int idx, uint32_t color) {
         if (width <= 0) {
             continue;
         }
-        int top = osd_bar_value_to_y(state, value);
+
+        double min_v = state->scale_min;
+        double max_v = state->scale_max;
+        if (max_v <= min_v) {
+            max_v = min_v + 0.1;
+        }
+        double norm = (value - min_v) / (max_v - min_v);
+        if (norm < 0.0) {
+            norm = 0.0;
+        }
+        if (norm > 1.0) {
+            norm = 1.0;
+        }
+
+        int top = base_y + plot_h - 1 - (int)(norm * (plot_h - 1) + 0.5);
+
         if (top < base_y) {
             top = base_y;
         }
