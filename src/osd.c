@@ -150,14 +150,27 @@ static const uint8_t font8x8_basic[128][8] = {
     {0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 };
 
-static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale) {
-    if ((unsigned char)c >= 128) {
+static const uint8_t font8x8_symbols[3][8] = {
+    {0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C}, // 128: ●
+    {0x3C, 0x72, 0xF1, 0xF1, 0xF1, 0xF1, 0x72, 0x3C}, // 129: ◐
+    {0x3C, 0x42, 0x81, 0x81, 0x81, 0x81, 0x42, 0x3C}, // 130: ○
+};
+
+static void osd_draw_char(OSD *o, int x, int y, int c, uint32_t argb, int scale) {
+    const uint8_t *glyph = NULL;
+    if (c >= 0 && c < 128) {
+        if (c >= 'a' && c <= 'z') {
+            c = c - 'a' + 'A';
+        }
+        glyph = font8x8_basic[c];
+    } else if (c >= 128 && c <= 130) {
+        glyph = font8x8_symbols[c - 128];
+    }
+
+    if (!glyph) {
         return;
     }
-    if (c >= 'a' && c <= 'z') {
-        c = (char)(c - 'a' + 'A');
-    }
-    const uint8_t *glyph = font8x8_basic[(unsigned char)c];
+
     uint32_t *fb = osd_active_map(o);
     int pitch = osd_active_pitch_px(o);
     if (!fb || pitch <= 0) {
@@ -189,18 +202,50 @@ static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale
     }
 }
 
+static int osd_utf8_decode(const char **p) {
+    if (!p || !*p || !**p) return 0;
+    unsigned char c = (unsigned char)**p;
+    if (c < 0x80) {
+        (*p)++;
+        return c;
+    }
+    if ((c & 0xE0) == 0xC0) {
+        (*p) += 2;
+        return '?';
+    }
+    if ((c & 0xF0) == 0xE0) {
+        if (c == 0xE2 && (*p)[1] && (*p)[2]) {
+            unsigned char c2 = (unsigned char)(*p)[1];
+            unsigned char c3 = (unsigned char)(*p)[2];
+            if (c2 == 0x97) {
+                if (c3 == 0x8F) { (*p) += 3; return 128; }
+                if (c3 == 0x90) { (*p) += 3; return 129; }
+                if (c3 == 0x8B) { (*p) += 3; return 130; }
+            }
+        }
+        (*p) += 3;
+        return '?';
+    }
+    if ((c & 0xF8) == 0xF0) { (*p) += 4; return '?'; }
+    (*p)++;
+    return '?';
+}
+
 static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, int scale) {
     const int advance = (8 + 1) * scale;
     const int line_advance = (8 + 1) * scale;
     int pen_x = x;
     int pen_y = y;
-    for (const char *p = s; *p; ++p) {
+    const char *p = s;
+    while (*p) {
         if (*p == '\n') {
             pen_y += line_advance;
             pen_x = x;
+            p++;
             continue;
         }
-        osd_draw_char(o, pen_x, pen_y, *p, argb, scale);
+        int c = osd_utf8_decode(&p);
+        osd_draw_char(o, pen_x, pen_y, c, argb, scale);
         pen_x += advance;
     }
 }
@@ -2517,7 +2562,12 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
     int line_advance = (8 + 1) * scale;
     int max_line_width = 0;
     for (int i = 0; i < actual_lines; ++i) {
-        int len = (int)strlen(line_ptrs[i]);
+        int len = 0;
+        const char *p = line_ptrs[i];
+        while (*p) {
+            osd_utf8_decode(&p);
+            len++;
+        }
         int width = len * (8 + 1) * scale;
         if (width > max_line_width) {
             max_line_width = width;
