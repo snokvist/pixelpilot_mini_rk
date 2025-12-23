@@ -35,6 +35,7 @@ The OSD engine maintains 8 text slots and 8 value slots (indices 0-7).
 *   Sending `value` updates slots starting from index 0.
 *   Sending an empty array `[]` for `text` or `value` clears all respective slots.
 *   Sending an empty string `""` for a specific text slot clears that slot.
+*   Sending `null` for a specific slot skips the update for that slot, preserving its current value. This allows multiple senders to update different indices without interference.
 
 To reference these slots in your `osd.ini` configuration, use tokens like `{external.text0}`, `{external.value0}`, etc.
 
