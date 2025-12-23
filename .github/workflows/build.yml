@@ -1,0 +1,78 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native ARM64 runner (best for RK3566/Radxa Zero 3 aarch64 binaries)
+          - name: linux-arm64
+            runs_on: ubuntu-24.04-arm
+            kind: linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --------------------
+      # Linux build (arm64)
+      # --------------------
+      - name: Install deps (Linux)
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config cmake git \
+            libdrm-dev libudev-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libglib2.0-dev
+
+      - name: Build rockchip-mpp
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Clone and build rockchip-mpp as it is not available in standard repos
+          git clone --depth 1 https://github.com/rockchip-linux/mpp.git
+          cd mpp
+          cmake -DRKPLATFORM=ON -DHAVE_DRM=ON -DCMAKE_INSTALL_PREFIX=/usr/local .
+          make -j$(nproc)
+          sudo make install
+          sudo ldconfig
+          cd ..
+
+      - name: Build + stage install (Linux)
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # Ensure pkg-config finds the manually installed mpp
+          export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:${PKG_CONFIG_PATH:-}
+
+          make clean || true
+          make
+
+          # Create a relocatable install tree for the artifact
+          rm -rf staging
+          make DESTDIR="$PWD/staging" install
+
+          tar -C staging -czf "pixelpilot-mini-rk-${{ matrix.name }}.tar.gz" .
+
+      - name: Upload artifact (Linux)
+        if: matrix.kind == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelpilot-mini-rk-${{ matrix.name }}
+          path: pixelpilot-mini-rk-${{ matrix.name }}.tar.gz
