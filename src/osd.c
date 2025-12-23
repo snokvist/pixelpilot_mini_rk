@@ -1412,11 +1412,11 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     if (width > o->w - 2 * margin) {
         width = o->w - 2 * margin;
     }
-    if (width < scale * 60) {
-        width = scale * 60;
+    if (width < scale * 24) {
+        width = scale * 24;
     }
     if (width <= 0) {
-        width = scale * 60;
+        width = scale * 24;
     }
 
     if (height > o->h - 2 * margin) {
