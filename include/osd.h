@@ -80,6 +80,7 @@ typedef struct {
     int width;
     int height;
     int bar_width;
+    int side_padding;
     int x;
     int y;
     int mode;

@@ -1322,6 +1322,8 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     OsdBarState *state = &o->elements[idx].data.bar;
     memset(state, 0, sizeof(*state));
 
+    state->side_padding = 6 * scale;
+
     state->mode = elem_cfg->data.bar.mode;
     if (state->mode != OSD_BAR_MODE_INSTANT) {
         state->mode = OSD_BAR_MODE_HISTORY;
@@ -1362,7 +1364,7 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
                 gap = scale;
             }
             int total_bars = state->series_count;
-            width = total_bars * bar_width + (total_bars - 1) * gap + 8 * scale;
+            width = total_bars * bar_width + (total_bars - 1) * gap + 2 * state->side_padding;
         } else {
             width = 360 * scale;
         }
@@ -1412,6 +1414,11 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
         bar_width = width;
     }
 
+    int inner_width = width - 2 * state->side_padding;
+    if (inner_width < 0) {
+        inner_width = 0;
+    }
+
     if (state->mode == OSD_BAR_MODE_INSTANT) {
         int count = state->series_count;
         if (count < 1) {
@@ -1420,7 +1427,7 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
         if (count > OSD_BAR_MAX_SERIES) {
             count = OSD_BAR_MAX_SERIES;
         }
-        double step = (count > 0) ? ((double)width / (double)count) : (double)width;
+        double step = (count > 0) ? ((double)inner_width / (double)count) : (double)inner_width;
         if (step < 1.0) {
             step = 1.0;
         }
@@ -1456,11 +1463,11 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
         }
 
         int capacity = 0;
-        if (width > 0 && stride > 0) {
-            if (width <= bar_width) {
+        if (inner_width > 0 && stride > 0) {
+            if (inner_width <= bar_width) {
                 capacity = 1;
             } else {
-                capacity = ((width - bar_width) / stride) + 1;
+                capacity = ((inner_width - bar_width) / stride) + 1;
             }
         }
         if (capacity < 1) {
@@ -1973,9 +1980,9 @@ static void osd_line_draw_background(OSD *o, int idx, double scale_max) {
     uint32_t grid = axis;
     uint32_t border = axis;
 
-    int base_x = state->x;
+    int base_x = state->x + state->side_padding;
     int base_y = state->y;
-    int plot_w = state->width;
+    int plot_w = state->width - 2 * state->side_padding;
     int plot_h = state->height;
 
     OSDRect prev_plot = state->plot_rect;
@@ -2104,9 +2111,9 @@ static void osd_bar_draw_all(OSD *o, int idx, uint32_t color) {
         return;
     }
 
-    int base_x = state->x;
+    int base_x = state->x + state->side_padding;
     int base_y = state->y;
-    int plot_w = state->width;
+    int plot_w = state->width - 2 * state->side_padding;
     int plot_h = state->height;
     int bottom = base_y + plot_h;
     int bar_width = state->bar_width;
