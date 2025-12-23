@@ -150,14 +150,27 @@ static const uint8_t font8x8_basic[128][8] = {
     {0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 };
 
-static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale) {
-    if ((unsigned char)c >= 128) {
+static const uint8_t font8x8_symbols[3][8] = {
+    {0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C}, // 128: ●
+    {0x3C, 0x72, 0xF1, 0xF1, 0xF1, 0xF1, 0x72, 0x3C}, // 129: ◐
+    {0x3C, 0x42, 0x81, 0x81, 0x81, 0x81, 0x42, 0x3C}, // 130: ○
+};
+
+static void osd_draw_char(OSD *o, int x, int y, int c, uint32_t argb, int scale) {
+    const uint8_t *glyph = NULL;
+    if (c >= 0 && c < 128) {
+        if (c >= 'a' && c <= 'z') {
+            c = c - 'a' + 'A';
+        }
+        glyph = font8x8_basic[c];
+    } else if (c >= 128 && c <= 130) {
+        glyph = font8x8_symbols[c - 128];
+    }
+
+    if (!glyph) {
         return;
     }
-    if (c >= 'a' && c <= 'z') {
-        c = (char)(c - 'a' + 'A');
-    }
-    const uint8_t *glyph = font8x8_basic[(unsigned char)c];
+
     uint32_t *fb = osd_active_map(o);
     int pitch = osd_active_pitch_px(o);
     if (!fb || pitch <= 0) {
@@ -189,18 +202,50 @@ static void osd_draw_char(OSD *o, int x, int y, char c, uint32_t argb, int scale
     }
 }
 
+static int osd_utf8_decode(const char **p) {
+    if (!p || !*p || !**p) return 0;
+    unsigned char c = (unsigned char)**p;
+    if (c < 0x80) {
+        (*p)++;
+        return c;
+    }
+    if ((c & 0xE0) == 0xC0) {
+        (*p) += 2;
+        return '?';
+    }
+    if ((c & 0xF0) == 0xE0) {
+        if (c == 0xE2 && (*p)[1] && (*p)[2]) {
+            unsigned char c2 = (unsigned char)(*p)[1];
+            unsigned char c3 = (unsigned char)(*p)[2];
+            if (c2 == 0x97) {
+                if (c3 == 0x8F) { (*p) += 3; return 128; }
+                if (c3 == 0x90) { (*p) += 3; return 129; }
+                if (c3 == 0x8B) { (*p) += 3; return 130; }
+            }
+        }
+        (*p) += 3;
+        return '?';
+    }
+    if ((c & 0xF8) == 0xF0) { (*p) += 4; return '?'; }
+    (*p)++;
+    return '?';
+}
+
 static void osd_draw_text(OSD *o, int x, int y, const char *s, uint32_t argb, int scale) {
     const int advance = (8 + 1) * scale;
     const int line_advance = (8 + 1) * scale;
     int pen_x = x;
     int pen_y = y;
-    for (const char *p = s; *p; ++p) {
+    const char *p = s;
+    while (*p) {
         if (*p == '\n') {
             pen_y += line_advance;
             pen_x = x;
+            p++;
             continue;
         }
-        osd_draw_char(o, pen_x, pen_y, *p, argb, scale);
+        int c = osd_utf8_decode(&p);
+        osd_draw_char(o, pen_x, pen_y, c, argb, scale);
         pen_x += advance;
     }
 }
@@ -1344,8 +1389,14 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
 
     int width = elem_cfg->data.bar.width;
     int height = elem_cfg->data.bar.height;
+    int auto_width = 0;
+
     if (width <= 0) {
-        width = 360;
+        if (state->mode == OSD_BAR_MODE_INSTANT) {
+            auto_width = 1;
+        } else {
+            width = 360;
+        }
     }
     if (height <= 0) {
         height = 80;
@@ -1361,11 +1412,11 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     if (width > o->w - 2 * margin) {
         width = o->w - 2 * margin;
     }
-    if (width < scale * 60) {
-        width = scale * 60;
+    if (width < scale * 24) {
+        width = scale * 24;
     }
     if (width <= 0) {
-        width = scale * 60;
+        width = scale * 24;
     }
 
     if (height > o->h - 2 * margin) {
@@ -1395,9 +1446,8 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
     if (bar_width < scale) {
         bar_width = scale;
     }
-    if (bar_width > width) {
-        bar_width = width;
-    }
+
+    int padding = 6 * scale;
 
     if (state->mode == OSD_BAR_MODE_INSTANT) {
         int count = state->series_count;
@@ -1407,14 +1457,34 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
         if (count > OSD_BAR_MAX_SERIES) {
             count = OSD_BAR_MAX_SERIES;
         }
-        double step = (count > 0) ? ((double)width / (double)count) : (double)width;
+
+        if (auto_width) {
+            int gap = bar_width / 2;
+            if (gap < scale) {
+                gap = scale;
+            }
+            width = padding * 2 + count * bar_width + (count - 1) * gap;
+            state->width = width;
+            osd_compute_placement(o, width, height, &elem_cfg->placement, &state->x, &state->y);
+        }
+
+        if (bar_width > width) {
+            bar_width = width;
+        }
+
+        int available_width = width - 2 * padding;
+        if (available_width < 1) {
+            available_width = 1;
+        }
+
+        double step = (count > 0) ? ((double)available_width / (double)count) : (double)available_width;
         if (step < 1.0) {
             step = 1.0;
         }
-        if (!bar_width_configured) {
+        if (!auto_width && !bar_width_configured) {
             bar_width = (int)(step * 0.75);
         }
-        if (bar_width > (int)step) {
+        if (!auto_width && bar_width > (int)step) {
             bar_width = (int)step;
         }
         if (bar_width < scale) {
@@ -1442,12 +1512,15 @@ static void osd_bar_reset(OSD *o, const AppCfg *cfg, int idx) {
             stride = bar_width;
         }
 
+        int available_width = width - 2 * padding;
+        if (available_width < 0) available_width = 0;
+
         int capacity = 0;
-        if (width > 0 && stride > 0) {
-            if (width <= bar_width) {
+        if (available_width > 0 && stride > 0) {
+            if (available_width <= bar_width) {
                 capacity = 1;
             } else {
-                capacity = ((width - bar_width) / stride) + 1;
+                capacity = ((available_width - bar_width) / stride) + 1;
             }
         }
         if (capacity < 1) {
@@ -1687,23 +1760,6 @@ static void osd_bar_compute_scale(const OsdBarState *state, const OsdBarConfig *
     *out_max = max_v;
 }
 
-static int osd_bar_value_to_y(const OsdBarState *state, double value) {
-    double min_v = state->scale_min;
-    double max_v = state->scale_max;
-    if (max_v <= min_v) {
-        max_v = min_v + 0.1;
-    }
-    double norm = (value - min_v) / (max_v - min_v);
-    if (norm < 0.0) {
-        norm = 0.0;
-    }
-    if (norm > 1.0) {
-        norm = 1.0;
-    }
-    int plot_h = state->height;
-    int base_y = state->y;
-    return base_y + plot_h - 1 - (int)(norm * (plot_h - 1) + 0.5);
-}
 
 static int osd_line_value_to_y(const OsdLineState *state, double value) {
     double min_v = state->scale_min;
@@ -1973,26 +2029,36 @@ static void osd_line_draw_background(OSD *o, int idx, double scale_max) {
     osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
     osd_store_rect(o, &state->plot_rect, base_x, base_y, plot_w, plot_h);
 
-    int grid_lines = 4;
-    for (int i = 1; i < grid_lines; ++i) {
-        int gy = base_y + (plot_h * i) / grid_lines;
-        osd_draw_hline(o, base_x, gy, plot_w, grid);
+    int scale = o->scale > 0 ? o->scale : 1;
+    int padding = 6 * scale;
+    int inner_x = base_x + padding;
+    int inner_y = base_y + padding;
+    int inner_w = plot_w - 2 * padding;
+    int inner_h = plot_h - 2 * padding;
+
+    if (inner_w <= 0 || inner_h <= 0) {
+        return;
     }
 
-    int scale = o->scale > 0 ? o->scale : 1;
+    int grid_lines = 4;
+    for (int i = 1; i < grid_lines; ++i) {
+        int gy = inner_y + (inner_h * i) / grid_lines;
+        osd_draw_hline(o, inner_x, gy, inner_w, grid);
+    }
+
     int marker_count = 4;
     int marker_height = 5 * scale;
-    if (marker_height > plot_h) {
-        marker_height = plot_h;
+    if (marker_height > inner_h) {
+        marker_height = inner_h;
     }
     for (int i = 1; i <= marker_count; ++i) {
-        int gx = base_x + (plot_w * i) / (marker_count + 1);
-        osd_draw_vline(o, gx, base_y + plot_h - marker_height, marker_height, grid);
+        int gx = inner_x + (inner_w * i) / (marker_count + 1);
+        osd_draw_vline(o, gx, inner_y + inner_h - marker_height, marker_height, grid);
     }
 
     int axis_thickness = o->scale > 0 ? o->scale : 1;
-    osd_draw_hline(o, base_x, base_y + plot_h - axis_thickness, plot_w, axis);
-    osd_draw_vline(o, base_x, base_y, plot_h, axis);
+    osd_draw_hline(o, inner_x, inner_y + inner_h - axis_thickness, inner_w, axis);
+    osd_draw_vline(o, inner_x, inner_y, inner_h, axis);
 
     osd_draw_scale_legend(o, base_x, base_y, plot_w, plot_h, scale_max, cfg->metric, cfg->label,
                           cfg->show_info_box, &state->header_rect);
@@ -2038,12 +2104,11 @@ static void osd_line_draw_all(OSD *o, int idx, uint32_t color) {
     }
 }
 
-static void osd_bar_draw_background(OSD *o, int idx, double scale_max) {
+static void osd_bar_draw_frame(OSD *o, int idx) {
     OsdBarState *state = &o->elements[idx].data.bar;
     const OsdBarConfig *cfg = &o->layout.elements[idx].data.bar;
     uint32_t bg = cfg->bg ? cfg->bg : 0x40202020u;
     uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
-    uint32_t grid = axis;
     uint32_t border = axis;
 
     int base_x = state->x;
@@ -2058,27 +2123,48 @@ static void osd_bar_draw_background(OSD *o, int idx, double scale_max) {
     osd_fill_rect(o, base_x, base_y, plot_w, plot_h, bg);
     osd_draw_rect(o, base_x, base_y, plot_w, plot_h, border);
     osd_store_rect(o, &state->plot_rect, base_x, base_y, plot_w, plot_h);
+}
+
+static void osd_bar_draw_overlays(OSD *o, int idx, double scale_max) {
+    OsdBarState *state = &o->elements[idx].data.bar;
+    const OsdBarConfig *cfg = &o->layout.elements[idx].data.bar;
+    uint32_t axis = cfg->grid ? cfg->grid : 0x30909090u;
+    uint32_t grid = axis;
+
+    int base_x = state->x;
+    int base_y = state->y;
+    int plot_w = state->width;
+    int plot_h = state->height;
+
+    int scale = o->scale > 0 ? o->scale : 1;
+    int padding = 6 * scale;
+    int inner_x = base_x + padding;
+    int inner_y = base_y + padding;
+    int inner_w = plot_w - 2 * padding;
+    int inner_h = plot_h - 2 * padding;
+
+    if (inner_w <= 0 || inner_h <= 0) {
+        return;
+    }
 
     int grid_lines = 4;
     for (int i = 1; i < grid_lines; ++i) {
-        int gy = base_y + (plot_h * i) / grid_lines;
-        osd_draw_hline(o, base_x, gy, plot_w, grid);
+        int gy = inner_y + (inner_h * i) / grid_lines;
+        osd_draw_hline(o, inner_x, gy, inner_w, grid);
     }
 
-    int scale = o->scale > 0 ? o->scale : 1;
     int marker_count = 4;
     int marker_height = 5 * scale;
-    if (marker_height > plot_h) {
-        marker_height = plot_h;
+    if (marker_height > inner_h) {
+        marker_height = inner_h;
     }
     for (int i = 1; i <= marker_count; ++i) {
-        int gx = base_x + (plot_w * i) / (marker_count + 1);
-        osd_draw_vline(o, gx, base_y + plot_h - marker_height, marker_height, grid);
+        int gx = inner_x + (inner_w * i) / (marker_count + 1);
+        osd_draw_vline(o, gx, inner_y + inner_h - marker_height, marker_height, grid);
     }
 
-    int axis_thickness = o->scale > 0 ? o->scale : 1;
-    osd_draw_hline(o, base_x, base_y + plot_h - axis_thickness, plot_w, axis);
-    osd_draw_vline(o, base_x, base_y, plot_h, axis);
+    // Draw full inner border
+    osd_draw_rect(o, inner_x, inner_y, inner_w, inner_h, axis);
 
     osd_draw_scale_legend(o, base_x, base_y, plot_w, plot_h, scale_max, cfg->metric, cfg->label,
                           cfg->show_info_box, &state->header_rect);
@@ -2091,11 +2177,18 @@ static void osd_bar_draw_all(OSD *o, int idx, uint32_t color) {
         return;
     }
 
-    int base_x = state->x;
-    int base_y = state->y;
-    int plot_w = state->width;
-    int plot_h = state->height;
+    int scale = o->scale > 0 ? o->scale : 1;
+    int padding = 6 * scale;
+    int base_x = state->x + padding;
+    int base_y = state->y + padding;
+    int plot_w = state->width - 2 * padding;
+    int plot_h = state->height - 2 * padding;
     int bottom = base_y + plot_h;
+
+    if (plot_w <= 0 || plot_h <= 0) {
+        return;
+    }
+
     int bar_width = state->bar_width;
     if (bar_width <= 0) {
         bar_width = 1;
@@ -2119,7 +2212,22 @@ static void osd_bar_draw_all(OSD *o, int idx, uint32_t color) {
         if (width <= 0) {
             continue;
         }
-        int top = osd_bar_value_to_y(state, value);
+
+        double min_v = state->scale_min;
+        double max_v = state->scale_max;
+        if (max_v <= min_v) {
+            max_v = min_v + 0.1;
+        }
+        double norm = (value - min_v) / (max_v - min_v);
+        if (norm < 0.0) {
+            norm = 0.0;
+        }
+        if (norm > 1.0) {
+            norm = 1.0;
+        }
+
+        int top = base_y + plot_h - 1 - (int)(norm * (plot_h - 1) + 0.5);
+
         if (top < base_y) {
             top = base_y;
         }
@@ -2454,7 +2562,12 @@ static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx
     int line_advance = (8 + 1) * scale;
     int max_line_width = 0;
     for (int i = 0; i < actual_lines; ++i) {
-        int len = (int)strlen(line_ptrs[i]);
+        int len = 0;
+        const char *p = line_ptrs[i];
+        while (*p) {
+            osd_utf8_decode(&p);
+            len++;
+        }
         int width = len * (8 + 1) * scale;
         if (width > max_line_width) {
             max_line_width = width;
@@ -2668,7 +2781,7 @@ static void osd_bar_draw(OSD *o, int idx) {
     double scale_max = state->scale_max;
     osd_bar_compute_scale(state, cfg, &scale_min, &scale_max);
 
-    osd_bar_draw_background(o, idx, scale_max);
+    osd_bar_draw_frame(o, idx);
 
     state->scale_min = scale_min;
     state->scale_max = scale_max;
@@ -2676,12 +2789,12 @@ static void osd_bar_draw(OSD *o, int idx) {
     state->clear_on_next_draw = 0;
     state->rescale_countdown = OSD_PLOT_RESCALE_DELAY;
 
-    if (state->size <= 0) {
-        return;
+    if (state->size > 0) {
+        uint32_t fg = cfg->fg ? cfg->fg : 0xFF4CAF50u;
+        osd_bar_draw_all(o, idx, fg);
     }
 
-    uint32_t fg = cfg->fg ? cfg->fg : 0xFF4CAF50u;
-    osd_bar_draw_all(o, idx, fg);
+    osd_bar_draw_overlays(o, idx, scale_max);
 }
 
 static void osd_render_line_element(OSD *o, int idx, const OsdRenderContext *ctx) {
@@ -3260,7 +3373,12 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     if (o->h <= 0) {
         o->h = 360 * o->scale;
     }
-    o->margin_px = clampi(12 * o->scale, 8, o->h / 4);
+
+    if (cfg->osd_margin > 0) {
+        o->margin_px = cfg->osd_margin * o->scale;
+    } else {
+        o->margin_px = clampi(12 * o->scale, 8, o->h / 4);
+    }
 
     if (create_argb_fb(fd, o->w, o->h, 0x80000000u, &o->fb) != 0) {
         LOGW("OSD: create fb failed. Disabling OSD.");
