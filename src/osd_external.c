@@ -72,9 +72,9 @@ static void osd_external_reset_locked(OsdExternalBridge *bridge) {
     for (size_t i = 0; i < ARRAY_SIZE(bridge->snapshot.value); ++i) {
     bridge->snapshot.value[i] = 0.0;
     }
+    bridge->snapshot.zoom_command[0] = '\0';
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
-    memset(&bridge->snapshot.ctm, 0, sizeof(bridge->snapshot.ctm));
     bridge->expiry_ns = 0;
     memset(bridge->slots, 0, sizeof(bridge->slots));
 }
@@ -131,22 +131,18 @@ static int should_log_error(OsdExternalBridge *bridge, uint64_t now_ns) {
 }
 
 typedef struct {
-    int has_any;
-    int has_matrix;
-    size_t matrix_count;
-    double matrix[9];
-} OsdExternalCtmMessage;
-
-typedef struct {
     int has_text;
+    uint8_t text_mask;
     int text_count;
     char text[OSD_EXTERNAL_MAX_TEXT][OSD_EXTERNAL_TEXT_LEN];
     int has_value;
+    uint8_t value_mask;
     int value_count;
     double value[OSD_EXTERNAL_MAX_VALUES];
     int has_ttl;
     uint64_t ttl_ms;
-    OsdExternalCtmMessage ctm;
+    char zoom_command[OSD_EXTERNAL_TEXT_LEN];
+    int has_zoom;
 } OsdExternalMessage;
 
 static const char *skip_ws(const char *p) {
@@ -154,6 +150,10 @@ static const char *skip_ws(const char *p) {
         ++p;
     }
     return p;
+}
+
+static int is_value_terminator(int c) {
+    return c == ',' || c == '}' || c == ']' || c == '\0' || isspace((unsigned char)c);
 }
 
 static const char *parse_string(const char *p, char *out, size_t out_sz) {
@@ -193,19 +193,30 @@ static const char *parse_string_array(const char *p, OsdExternalMessage *msg) {
     }
     while (*p) {
         p = skip_ws(p);
-        if (*p != '"') {
-            return NULL;
+        if (strncmp(p, "null", 4) == 0 && is_value_terminator((unsigned char)p[4])) {
+            p += 4;
+            if (idx < OSD_EXTERNAL_MAX_TEXT) {
+                // mask bit remains 0
+                idx++;
+            }
+        } else {
+            if (*p != '"') {
+                return NULL;
+            }
+            char tmp[OSD_EXTERNAL_TEXT_LEN];
+            const char *next = parse_string(p, tmp, sizeof(tmp));
+            if (!next) {
+                return NULL;
+            }
+            if (idx < OSD_EXTERNAL_MAX_TEXT) {
+                snprintf(msg->text[idx], sizeof(msg->text[idx]), "%s", tmp);
+                msg->text_mask |= (1 << idx);
+                idx++;
+            }
+            p = next;
         }
-        char tmp[OSD_EXTERNAL_TEXT_LEN];
-        const char *next = parse_string(p, tmp, sizeof(tmp));
-        if (!next) {
-            return NULL;
-        }
-        if (idx < OSD_EXTERNAL_MAX_TEXT) {
-            snprintf(msg->text[idx], sizeof(msg->text[idx]), "%s", tmp);
-            idx++;
-        }
-        p = skip_ws(next);
+
+        p = skip_ws(p);
         if (*p == ',') {
             ++p;
             continue;
@@ -234,15 +245,27 @@ static const char *parse_number_array(const char *p, OsdExternalMessage *msg) {
         return p + 1;
     }
     while (*p) {
-        char *end = NULL;
-        double v = strtod(p, &end);
-        if (end == p) {
-            return NULL;
+        if (strncmp(p, "null", 4) == 0 && is_value_terminator((unsigned char)p[4])) {
+            p += 4;
+            if (idx < OSD_EXTERNAL_MAX_VALUES) {
+                // mask bit remains 0
+                idx++;
+            }
+        } else {
+            char *end = NULL;
+            double v = strtod(p, &end);
+            if (end == p) {
+                return NULL;
+            }
+            if (idx < OSD_EXTERNAL_MAX_VALUES) {
+                msg->value[idx] = v;
+                msg->value_mask |= (1 << idx);
+                idx++;
+            }
+            p = end;
         }
-        if (idx < OSD_EXTERNAL_MAX_VALUES) {
-            msg->value[idx++] = v;
-        }
-        p = skip_ws(end);
+
+        p = skip_ws(p);
         if (*p == ',') {
             ++p;
             continue;
@@ -256,52 +279,6 @@ static const char *parse_number_array(const char *p, OsdExternalMessage *msg) {
         return NULL;
     }
     msg->value_count = idx;
-    return p + 1;
-}
-
-static int is_value_terminator(int c) {
-    return c == ',' || c == '}' || c == ']' || c == '\0' || isspace((unsigned char)c);
-}
-
-static const char *parse_double_array(const char *p, double *out, size_t max_count, size_t *count_out) {
-    if (!p || *p != '[') {
-        return NULL;
-    }
-    ++p;
-    p = skip_ws(p);
-    size_t idx = 0;
-    if (*p == ']') {
-        if (count_out) {
-            *count_out = 0;
-        }
-        return p + 1;
-    }
-    while (*p) {
-        char *end = NULL;
-        double v = strtod(p, &end);
-        if (end == p) {
-            return NULL;
-        }
-        if (idx < max_count) {
-            out[idx] = v;
-        }
-        idx++;
-        p = skip_ws(end);
-        if (*p == ',') {
-            ++p;
-            continue;
-        }
-        if (*p == ']') {
-            break;
-        }
-        return NULL;
-    }
-    if (*p != ']') {
-        return NULL;
-    }
-    if (count_out) {
-        *count_out = idx;
-    }
     return p + 1;
 }
 
@@ -389,67 +366,6 @@ static const char *skip_json_value(const char *p) {
     return p;
 }
 
-static const char *parse_ctm_object(const char *p, OsdExternalMessage *msg) {
-    if (!p || *p != '{' || msg == NULL) {
-        return NULL;
-    }
-    ++p;
-    p = skip_ws(p);
-    while (*p) {
-        if (*p == '}') {
-            return p + 1;
-        }
-        if (*p != '"') {
-            return NULL;
-        }
-        char key[32];
-        const char *next = parse_string(p, key, sizeof(key));
-        if (!next) {
-            return NULL;
-        }
-        p = skip_ws(next);
-        if (*p != ':') {
-            return NULL;
-        }
-        ++p;
-        p = skip_ws(p);
-
-        if (strcmp(key, "matrix") == 0) {
-            double values[9] = {0};
-            size_t count = 0;
-            const char *after = parse_double_array(p, values, 9, &count);
-            if (!after) {
-                return NULL;
-            }
-            if (count == 9) {
-                msg->ctm.has_any = 1;
-                msg->ctm.has_matrix = 1;
-                msg->ctm.matrix_count = count;
-                for (size_t i = 0; i < count; ++i) {
-                    msg->ctm.matrix[i] = values[i];
-                }
-            }
-            p = skip_ws(after);
-        } else {
-            const char *after = skip_json_value(p);
-            if (!after) {
-                return NULL;
-            }
-            p = skip_ws(after);
-        }
-
-        if (*p == ',') {
-            ++p;
-            p = skip_ws(p);
-            continue;
-        }
-        if (*p == '}') {
-            return p + 1;
-        }
-        return NULL;
-    }
-    return NULL;
-}
 
 static int parse_message(const char *payload, OsdExternalMessage *msg) {
     if (!payload || !msg) {
@@ -504,11 +420,15 @@ static int parse_message(const char *payload, OsdExternalMessage *msg) {
             msg->has_ttl = 1;
             msg->ttl_ms = (uint64_t)ttl;
             p = end;
-        } else if (strcmp(key, "ctm") == 0) {
-            p = parse_ctm_object(p, msg);
-            if (!p) {
+        } else if (strcmp(key, "zoom") == 0) {
+            msg->has_zoom = 1;
+            char tmp[OSD_EXTERNAL_TEXT_LEN];
+            const char *next = parse_string(p, tmp, sizeof(tmp));
+            if (!next) {
                 return -1;
             }
+            snprintf(msg->zoom_command, sizeof(msg->zoom_command), "%s", tmp);
+            p = next;
         } else {
             // Skip unknown value (best effort: handle nested objects/arrays by counting braces)
             const char *after = skip_json_value(p);
@@ -584,45 +504,62 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
 
     for (size_t i = 0; i < count; ++i) {
         OsdExternalSlotState *slot = &bridge->slots[i];
-        const char *incoming_text = (i < (size_t)msg->text_count) ? msg->text[i] : "";
+        int text_update = (i < (size_t)msg->text_count) && (msg->text_mask & (1 << i));
+        const char *incoming_text = text_update ? msg->text[i] : "";
         int text_nonempty = incoming_text && incoming_text[0] != '\0';
-        int value_present = (i < (size_t)msg->value_count);
-        double incoming_value = (value_present && i < value_limit) ? msg->value[i] : 0.0;
+        int value_update = (i < (size_t)msg->value_count) && (msg->value_mask & (1 << i));
+        double incoming_value = (value_update && i < value_limit) ? msg->value[i] : 0.0;
 
-        if (text_nonempty) {
-            int ttl_guard = slot->text_active && slot->text_expiry_ns > now_ns && !has_ttl_field;
-            if (!ttl_guard) {
-                if (!slot->text_active || strncmp(bridge->snapshot.text[i], incoming_text, sizeof(bridge->snapshot.text[i])) != 0) {
-                    changed = 1;
-                }
-                snprintf(bridge->snapshot.text[i], sizeof(bridge->snapshot.text[i]), "%s", incoming_text);
-                slot->text_active = 1;
-                if (has_ttl_field) {
-                    if (ttl_ns > 0 && ttl_ns <= UINT64_MAX - now_ns) {
-                        slot->text_expiry_ns = now_ns + ttl_ns;
-                    } else if (ttl_ns > 0) {
-                        slot->text_expiry_ns = 0;
+        if (text_update) {
+            if (text_nonempty) {
+                int ttl_guard = slot->text_active && slot->text_expiry_ns > now_ns && !has_ttl_field;
+                if (!ttl_guard) {
+                    if (!slot->text_active || strncmp(bridge->snapshot.text[i], incoming_text, sizeof(bridge->snapshot.text[i])) != 0) {
+                        changed = 1;
+                    }
+                    snprintf(bridge->snapshot.text[i], sizeof(bridge->snapshot.text[i]), "%s", incoming_text);
+                    slot->text_active = 1;
+                    if (has_ttl_field) {
+                        if (ttl_ns > 0 && ttl_ns <= UINT64_MAX - now_ns) {
+                            slot->text_expiry_ns = now_ns + ttl_ns;
+                        } else if (ttl_ns > 0) {
+                            slot->text_expiry_ns = 0;
+                        } else {
+                            slot->text_expiry_ns = 0;
+                        }
                     } else {
                         slot->text_expiry_ns = 0;
                     }
-                } else {
-                    slot->text_expiry_ns = 0;
+                    if (!value_update || i >= value_limit) {
+                        if (slot->value_active) {
+                            changed = 1;
+                        }
+                        slot->value_active = 0;
+                        slot->value_expiry_ns = 0;
+                        if (i < value_limit) {
+                            bridge->snapshot.value[i] = 0.0;
+                        }
+                        slot->is_metric = 0;
+                    }
                 }
-                if (!value_present || i >= value_limit) {
-                    if (slot->value_active) {
-                        changed = 1;
-                    }
-                    slot->value_active = 0;
-                    slot->value_expiry_ns = 0;
-                    if (i < value_limit) {
-                        bridge->snapshot.value[i] = 0.0;
-                    }
+            } else {
+                // Explicit clear via ""
+                int was_active = slot->text_active;
+                slot->text_active = 0;
+                slot->text_expiry_ns = 0;
+                if (bridge->snapshot.text[i][0] != '\0') {
+                    bridge->snapshot.text[i][0] = '\0';
+                    changed = 1;
+                } else if (was_active) {
+                    changed = 1;
+                }
+                if (!slot->value_active) {
                     slot->is_metric = 0;
                 }
             }
         }
 
-        if (value_present && i < value_limit) {
+        if (value_update && i < value_limit) {
             int ttl_guard = slot->value_active && slot->value_expiry_ns > now_ns && !has_ttl_field;
             int locked_by_text = slot->text_active && slot->text_expiry_ns > now_ns && !slot->is_metric && !has_ttl_field;
             if (!ttl_guard && !locked_by_text) {
@@ -661,26 +598,9 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
         }
     }
 
-    if (msg->ctm.has_any) {
-        VideoCtmUpdate update = {0};
-        if (msg->ctm.has_matrix && msg->ctm.matrix_count == 9) {
-            update.fields |= VIDEO_CTM_UPDATE_MATRIX;
-            for (int i = 0; i < 9; ++i) {
-                update.matrix[i] = msg->ctm.matrix[i];
-            }
-        }
-        if (update.fields != 0) {
-            uint32_t serial = bridge->snapshot.ctm.serial;
-            if (serial == UINT32_MAX) {
-                serial = 0;
-            }
-            serial++;
-            if (serial == 0) {
-                serial = 1;
-            }
-            bridge->snapshot.ctm.update = update;
-            bridge->snapshot.ctm.serial = serial;
-            bridge->snapshot.last_update_ns = now_ns;
+    if (msg->has_zoom) {
+        if (strncmp(bridge->snapshot.zoom_command, msg->zoom_command, sizeof(bridge->snapshot.zoom_command)) != 0) {
+            snprintf(bridge->snapshot.zoom_command, sizeof(bridge->snapshot.zoom_command), "%s", msg->zoom_command);
             changed = 1;
         }
     }

@@ -111,10 +111,9 @@ static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, Video
         memset(out_request, 0, sizeof(*out_request));
         return TRUE;
     }
-    if (g_ascii_strncasecmp(p, "zoom=", 5) != 0) {
-        return FALSE;
+    if (g_ascii_strncasecmp(p, "zoom=", 5) == 0) {
+        p += 5;
     }
-    p += 5;
     while (*p != '\0' && g_ascii_isspace(*p)) {
         ++p;
     }
@@ -408,7 +407,6 @@ int main(int argc, char **argv) {
     struct timespec last_osd;
     clock_gettime(CLOCK_MONOTONIC, &last_osd);
     char last_zoom_command[OSD_EXTERNAL_TEXT_LEN] = "";
-    uint32_t last_ctm_serial = 0;
 
     while (!g_exit_flag) {
         pipeline_poll_child(&ps);
@@ -605,12 +603,7 @@ int main(int argc, char **argv) {
             if (ms_since(now, last_osd) >= cfg.osd_refresh_ms) {
                 OsdExternalFeedSnapshot ext_snapshot;
                 osd_external_get_snapshot(&ext_bridge, &ext_snapshot);
-                if (ext_snapshot.ctm.update.fields != 0 && ext_snapshot.ctm.serial != 0 &&
-                    ext_snapshot.ctm.serial != last_ctm_serial) {
-                    pipeline_apply_ctm_update(&ps, &ext_snapshot.ctm.update);
-                    last_ctm_serial = ext_snapshot.ctm.serial;
-                }
-                const char *zoom_text = ext_snapshot.text[OSD_EXTERNAL_MAX_TEXT - 1];
+                const char *zoom_text = ext_snapshot.zoom_command;
                 if (g_strcmp0(zoom_text, last_zoom_command) != 0) {
                     gboolean zoom_enabled = FALSE;
                     VideoDecoderZoomRequest zoom_request = {0};

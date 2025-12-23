@@ -4,8 +4,6 @@
 #include <pthread.h>
 #include <stdint.h>
 
-#include "video_ctm.h"
-
 #ifndef OSD_EXTERNAL_BIND_ADDR_LEN
 #define OSD_EXTERNAL_BIND_ADDR_LEN 64
 #endif
@@ -29,11 +27,8 @@ typedef struct {
     double value[OSD_EXTERNAL_MAX_VALUES];
     uint64_t last_update_ns;
     uint64_t expiry_ns;
+    char zoom_command[OSD_EXTERNAL_TEXT_LEN];
     OsdExternalStatus status;
-    struct {
-        VideoCtmUpdate update;
-        uint32_t serial;
-    } ctm;
 } OsdExternalFeedSnapshot;
 
 typedef struct {

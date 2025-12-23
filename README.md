@@ -97,6 +97,15 @@ to the defaults listed in `src/config.c` when omitted.
 | `[osd.element.NAME].line` | For text widgets, each `line =` entry appends a formatted row supporting `{token}` placeholders. |
 | `[osd.element.NAME].metric` | For line/bar widgets, selects the metric token (e.g. `udp.bitrate.latest_mbps`) sampled each refresh. |
 
+## External OSD Control
+
+The application supports an external OSD control feed that allows third-party tools to push text, numeric values, and zoom commands to the renderer over UDP.
+
+*   **Default Port:** 5005
+*   **Protocol:** JSON over UDP
+
+Enable it with `--osd-external` (or `[osd].external = true`). See [CONTRACT.md](CONTRACT.md) for the full protocol specification and payload examples.
+
 ## CPU affinity control
 
 Use `--cpu-list` to provide a comma-separated list of CPU IDs that the process and its busy worker threads should run on. The main process mask is restricted to the specified CPUs and the UDP receiver and GStreamer bus threads are pinned in a round-robin fashion to spread the work across cores.
