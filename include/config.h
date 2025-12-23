@@ -108,6 +108,7 @@ typedef struct {
     int osd_enable;
     int osd_plane_id;
     int osd_refresh_ms;
+    int osd_margin;
 
     int gst_log;
 

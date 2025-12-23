@@ -230,7 +230,7 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
                 elem->data.line.sample_stride_px = 4;
             }
         } else if (elem->type == OSD_WIDGET_BAR) {
-            if (elem->data.bar.width <= 0) {
+            if (elem->data.bar.width <= 0 && elem->data.bar.mode != OSD_BAR_MODE_INSTANT) {
                 elem->data.bar.width = 360;
             }
             if (elem->data.bar.height <= 0) {
@@ -1189,6 +1189,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         if (strcasecmp(key, "plane-id") == 0) {
             cfg->osd_plane_id = atoi(value);
+            return 0;
+        }
+        if (strcasecmp(key, "margin") == 0) {
+            cfg->osd_margin = atoi(value);
             return 0;
         }
         return -1;

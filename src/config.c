@@ -207,6 +207,7 @@ void cfg_defaults(AppCfg *c) {
     c->osd_enable = 0;
     c->osd_plane_id = 0;
     c->osd_refresh_ms = 500;
+    c->osd_margin = 0;
     c->osd_external.enable = 0;
     c->osd_external.enable_set = 0;
     strcpy(c->osd_external.bind_address, "0.0.0.0");
