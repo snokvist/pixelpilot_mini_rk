@@ -74,7 +74,6 @@ static void osd_external_reset_locked(OsdExternalBridge *bridge) {
     }
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
-    memset(&bridge->snapshot.ctm, 0, sizeof(bridge->snapshot.ctm));
     bridge->expiry_ns = 0;
     memset(bridge->slots, 0, sizeof(bridge->slots));
 }
@@ -131,13 +130,6 @@ static int should_log_error(OsdExternalBridge *bridge, uint64_t now_ns) {
 }
 
 typedef struct {
-    int has_any;
-    int has_matrix;
-    size_t matrix_count;
-    double matrix[9];
-} OsdExternalCtmMessage;
-
-typedef struct {
     int has_text;
     int text_count;
     char text[OSD_EXTERNAL_MAX_TEXT][OSD_EXTERNAL_TEXT_LEN];
@@ -146,7 +138,6 @@ typedef struct {
     double value[OSD_EXTERNAL_MAX_VALUES];
     int has_ttl;
     uint64_t ttl_ms;
-    OsdExternalCtmMessage ctm;
 } OsdExternalMessage;
 
 static const char *skip_ws(const char *p) {
@@ -389,67 +380,6 @@ static const char *skip_json_value(const char *p) {
     return p;
 }
 
-static const char *parse_ctm_object(const char *p, OsdExternalMessage *msg) {
-    if (!p || *p != '{' || msg == NULL) {
-        return NULL;
-    }
-    ++p;
-    p = skip_ws(p);
-    while (*p) {
-        if (*p == '}') {
-            return p + 1;
-        }
-        if (*p != '"') {
-            return NULL;
-        }
-        char key[32];
-        const char *next = parse_string(p, key, sizeof(key));
-        if (!next) {
-            return NULL;
-        }
-        p = skip_ws(next);
-        if (*p != ':') {
-            return NULL;
-        }
-        ++p;
-        p = skip_ws(p);
-
-        if (strcmp(key, "matrix") == 0) {
-            double values[9] = {0};
-            size_t count = 0;
-            const char *after = parse_double_array(p, values, 9, &count);
-            if (!after) {
-                return NULL;
-            }
-            if (count == 9) {
-                msg->ctm.has_any = 1;
-                msg->ctm.has_matrix = 1;
-                msg->ctm.matrix_count = count;
-                for (size_t i = 0; i < count; ++i) {
-                    msg->ctm.matrix[i] = values[i];
-                }
-            }
-            p = skip_ws(after);
-        } else {
-            const char *after = skip_json_value(p);
-            if (!after) {
-                return NULL;
-            }
-            p = skip_ws(after);
-        }
-
-        if (*p == ',') {
-            ++p;
-            p = skip_ws(p);
-            continue;
-        }
-        if (*p == '}') {
-            return p + 1;
-        }
-        return NULL;
-    }
-    return NULL;
-}
 
 static int parse_message(const char *payload, OsdExternalMessage *msg) {
     if (!payload || !msg) {
@@ -504,11 +434,6 @@ static int parse_message(const char *payload, OsdExternalMessage *msg) {
             msg->has_ttl = 1;
             msg->ttl_ms = (uint64_t)ttl;
             p = end;
-        } else if (strcmp(key, "ctm") == 0) {
-            p = parse_ctm_object(p, msg);
-            if (!p) {
-                return -1;
-            }
         } else {
             // Skip unknown value (best effort: handle nested objects/arrays by counting braces)
             const char *after = skip_json_value(p);
@@ -658,30 +583,6 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
                 bridge->snapshot.value[i] = 0.0;
                 changed = 1;
             }
-        }
-    }
-
-    if (msg->ctm.has_any) {
-        VideoCtmUpdate update = {0};
-        if (msg->ctm.has_matrix && msg->ctm.matrix_count == 9) {
-            update.fields |= VIDEO_CTM_UPDATE_MATRIX;
-            for (int i = 0; i < 9; ++i) {
-                update.matrix[i] = msg->ctm.matrix[i];
-            }
-        }
-        if (update.fields != 0) {
-            uint32_t serial = bridge->snapshot.ctm.serial;
-            if (serial == UINT32_MAX) {
-                serial = 0;
-            }
-            serial++;
-            if (serial == 0) {
-                serial = 1;
-            }
-            bridge->snapshot.ctm.update = update;
-            bridge->snapshot.ctm.serial = serial;
-            bridge->snapshot.last_update_ns = now_ns;
-            changed = 1;
         }
     }
 

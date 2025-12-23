@@ -99,7 +99,7 @@ to the defaults listed in `src/config.c` when omitted.
 
 ## External OSD Control
 
-The application supports an external OSD control feed that allows third-party tools to push text, numeric values, color transform matrices, and zoom commands to the renderer over UDP.
+The application supports an external OSD control feed that allows third-party tools to push text, numeric values, and zoom commands to the renderer over UDP.
 
 *   **Default Port:** 5005
 *   **Protocol:** JSON over UDP
