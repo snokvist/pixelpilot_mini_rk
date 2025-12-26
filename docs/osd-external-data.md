@@ -49,8 +49,10 @@ External producers only need to send fields they care about. A minimal update
 looks like:
 
 ```json
-{"text":["HELLO","WORLD"], "value":[12.5, 0.75]}
+{"texts":["HELLO","WORLD"], "values":[12.5, 0.75]}
 ```
+
+Use the `texts`/`values` keys to publish data.
 
 If fewer than eight entries are present, the remaining slots keep their prior
 contents. Including an empty array clears previously published data. Optional
@@ -59,7 +61,7 @@ linger. The receiver tracks TTL per text/value slot so independent publishers
 can multiplex the feed without clobbering each other:
 
 ```json
-{"value":[42.0], "ttl_ms": 5000}
+{"values":[42.0], "ttl_ms": 5000}
 ```
 
 When the helper thread observes that `clock_gettime(CLOCK_MONOTONIC)` exceeds
@@ -111,7 +113,7 @@ duration.
   to half size around the centre looks like:
 
   ```json
-  {"text":["","","","","","","","zoom=50,50,50,50"], "ttl_ms": 1000}
+  {"texts":["","","","","","","","zoom=50,50,50,50"], "ttl_ms": 1000}
   ```
 
 * Clearing the slot (empty string) or publishing `zoom=off` restores the full
@@ -177,7 +179,7 @@ each refresh, so larger steps make the pulse travel faster. Setting
    (arrays longer than eight entries, missing fields, TTL expiry).
 2. Run the binary with the feature enabled and pipe updates manually:
    ```sh
-   printf '%s' '{"text":["BATTERY 12.6V"]}' | socat - UDP-DATAGRAM:127.0.0.1:5005
+   printf '%s' '{"texts":["BATTERY 12.6V"]}' | socat - UDP-DATAGRAM:127.0.0.1:5005
    ```
    Confirm the OSD text widget renders the injected string and that a line plot
    bound to `ext.value1` responds to subsequent updates.
