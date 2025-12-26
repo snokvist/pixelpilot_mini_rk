@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <time.h>
 
 #include <float.h>
 #include <ctype.h>
@@ -53,6 +54,13 @@ static inline int osd_active_pitch_bytes(const OSD *o) {
 static inline int osd_active_pitch_px(const OSD *o) {
     int pitch_bytes = osd_active_pitch_bytes(o);
     return (pitch_bytes > 0) ? (pitch_bytes / 4) : 0;
+}
+
+static long long osd_ms_since(const struct timespec *newer, const struct timespec *older) {
+    if (!newer || !older) {
+        return 0;
+    }
+    return (newer->tv_sec - older->tv_sec) * 1000LL + (newer->tv_nsec - older->tv_nsec) / 1000000LL;
 }
 
 static int clampi(int v, int min_v, int max_v) {
@@ -3403,6 +3411,14 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
     if (o->layout.element_count > OSD_MAX_ELEMENTS) {
         o->layout.element_count = OSD_MAX_ELEMENTS;
     }
+    for (int i = 0; i < o->layout.element_count; ++i) {
+        int elem_refresh = o->layout.elements[i].refresh_ms > 0 ? o->layout.elements[i].refresh_ms : cfg->osd_refresh_ms;
+        if (elem_refresh < OSD_REFRESH_MIN_MS) {
+            elem_refresh = OSD_REFRESH_MIN_MS;
+        }
+        o->element_refresh_ms[i] = elem_refresh;
+        o->element_last_refresh[i] = (struct timespec){0, 0};
+    }
     o->element_count = o->layout.element_count;
     for (int i = 0; i < o->element_count; ++i) {
         o->elements[i].type = o->layout.elements[i].type;
@@ -3471,11 +3487,51 @@ int osd_ensure_above_video(int fd, uint32_t video_plane_id, OSD *o) {
     return ret;
 }
 
-void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
-                      int audio_disabled, int restart_count, const OsdExternalFeedSnapshot *ext,
-                      OSD *o) {
-    if (!o->enabled || !o->active) {
-        return;
+int osd_refresh_hint_ms(const OSD *o, int global_refresh_ms) {
+    int min_refresh = (global_refresh_ms > 0) ? global_refresh_ms : OSD_REFRESH_MIN_MS;
+    if (!o) {
+        return min_refresh;
+    }
+    for (int i = 0; i < o->element_count && i < OSD_MAX_ELEMENTS; ++i) {
+        int elem_ms = o->element_refresh_ms[i];
+        if (elem_ms > 0 && elem_ms < min_refresh) {
+            min_refresh = elem_ms;
+        }
+    }
+    if (min_refresh < OSD_REFRESH_MIN_MS) {
+        min_refresh = OSD_REFRESH_MIN_MS;
+    }
+    return min_refresh;
+}
+
+int osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
+                     int audio_disabled, int restart_count, const OsdExternalFeedSnapshot *ext,
+                     const struct timespec *now, OSD *o) {
+    if (!o->enabled || !o->active || now == NULL) {
+        return 0;
+    }
+
+    int due_any = 0;
+    int element_due[OSD_MAX_ELEMENTS] = {0};
+    for (int i = 0; i < o->element_count; ++i) {
+        int interval_ms = o->element_refresh_ms[i] > 0 ? o->element_refresh_ms[i] : o->refresh_ms;
+        if (interval_ms < OSD_REFRESH_MIN_MS) {
+            interval_ms = OSD_REFRESH_MIN_MS;
+        }
+        struct timespec *last = &o->element_last_refresh[i];
+        if (last->tv_sec == 0 && last->tv_nsec == 0) {
+            element_due[i] = 1;
+            due_any = 1;
+            continue;
+        }
+        long long elapsed = osd_ms_since(now, last);
+        if (elapsed >= interval_ms) {
+            element_due[i] = 1;
+            due_any = 1;
+        }
+    }
+    if (!due_any) {
+        return 0;
     }
 
     uint32_t *original_draw_map = o->draw_map;
@@ -3530,30 +3586,42 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
         ctx.have_ctm_metrics = 0;
     }
 
+    int updated = 0;
     for (int i = 0; i < o->element_count; ++i) {
+        if (!element_due[i]) {
+            continue;
+        }
         OsdElementType type = o->layout.elements[i].type;
         o->elements[i].type = type;
         switch (type) {
         case OSD_WIDGET_TEXT:
             osd_render_text_element(o, i, &ctx);
+            updated = 1;
             break;
         case OSD_WIDGET_LINE:
             osd_render_line_element(o, i, &ctx);
+            updated = 1;
             break;
         case OSD_WIDGET_BAR:
             osd_render_bar_element(o, i, &ctx);
+            updated = 1;
             break;
         case OSD_WIDGET_OUTLINE:
             osd_render_outline_element(o, i, &ctx);
+            updated = 1;
             break;
         default:
             osd_clear_rect(o, &o->elements[i].rect);
             osd_store_rect(o, &o->elements[i].rect, 0, 0, 0, 0);
+            updated = 1;
             break;
         }
+        o->element_last_refresh[i] = *now;
     }
 
-    osd_commit_touch(fd, o->crtc_id, o);
+    if (updated) {
+        osd_commit_touch(fd, o->crtc_id, o);
+    }
 
     if (using_scratch) {
         osd_damage_flush(o);
@@ -3564,6 +3632,7 @@ void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const 
 
     o->draw_map = original_draw_map;
     o->draw_pitch = original_draw_pitch;
+    return updated;
 }
 
 int osd_is_enabled(const OSD *o) {
