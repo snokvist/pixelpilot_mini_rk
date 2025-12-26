@@ -3,6 +3,10 @@
 // - Text rows show TICK that increments by 1 each second.
 // - Values follow sine curves (0.5 Hz) with per-channel phase offsets.
 // Build:  gcc -O2 -Wall -std=c11 osd_feed_test.c -o osd_feed_test -lm
+//
+// Payload fields:
+//   texts[]  -> maps to ext.textN (null entries skipped, "" clears)
+//   values[] -> maps to ext.valueN (null entries skipped)
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -134,9 +138,9 @@ int main(int argc, char **argv)
 
         if (clear_flag) {
             if (ttl_ms > 0)
-                snprintf(buf, sizeof(buf), "{\"text\":[],\"value\":[],\"ttl_ms\":%d}\n", ttl_ms);
+                snprintf(buf, sizeof(buf), "{\"texts\":[],\"values\":[],\"ttl_ms\":%d}\n", ttl_ms);
             else
-                snprintf(buf, sizeof(buf), "{\"text\":[],\"value\":[]}\n");
+                snprintf(buf, sizeof(buf), "{\"texts\":[],\"values\":[]}\n");
         } else {
             char text_part[1024] = {0};
             char value_part[512] = {0};
@@ -161,11 +165,11 @@ int main(int argc, char **argv)
 
             if (ttl_ms > 0)
                 snprintf(buf, sizeof(buf),
-                         "{\"text\":%s,\"value\":%s,\"ttl_ms\":%d}\n",
+                         "{\"texts\":%s,\"values\":%s,\"ttl_ms\":%d}\n",
                          text_part, value_part, ttl_ms);
             else
                 snprintf(buf, sizeof(buf),
-                         "{\"text\":%s,\"value\":%s}\n",
+                         "{\"texts\":%s,\"values\":%s}\n",
                          text_part, value_part);
         }
 

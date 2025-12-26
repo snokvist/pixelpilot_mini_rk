@@ -396,13 +396,13 @@ static int parse_message(const char *payload, OsdExternalMessage *msg) {
         }
         ++p;
         p = skip_ws(p);
-        if (strcmp(key, "text") == 0) {
+        if (strcmp(key, "texts") == 0) {
             msg->has_text = 1;
             p = parse_string_array(p, msg);
             if (!p) {
                 return -1;
             }
-        } else if (strcmp(key, "value") == 0) {
+        } else if (strcmp(key, "values") == 0) {
             msg->has_value = 1;
             p = parse_number_array(p, msg);
             if (!p) {

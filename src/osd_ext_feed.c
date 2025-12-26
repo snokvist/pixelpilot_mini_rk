@@ -447,8 +447,8 @@ int main(int argc, char **argv)
 
                 char parsed_texts[MAX_ENTRIES][64];
                 double parsed_values[MAX_ENTRIES];
-                size_t text_count = parse_string_array(udp_buf, "text", parsed_texts, MAX_ENTRIES);
-                size_t value_count = parse_number_array(udp_buf, "value", parsed_values, MAX_ENTRIES);
+                size_t text_count = parse_string_array(udp_buf, "texts", parsed_texts, MAX_ENTRIES);
+                size_t value_count = parse_number_array(udp_buf, "values", parsed_values, MAX_ENTRIES);
                 uint64_t ttl_ms_field = 0;
                 bool has_ttl_field = parse_uint_field(udp_buf, "ttl_ms", &ttl_ms_field);
 
