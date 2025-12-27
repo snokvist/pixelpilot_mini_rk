@@ -60,8 +60,14 @@ static void osd_external_update_expiry_locked(OsdExternalBridge *bridge) {
             }
         }
     }
+    if (bridge->zoom_expiry_ns > 0) {
+        if (next_expiry == 0 || bridge->zoom_expiry_ns < next_expiry) {
+            next_expiry = bridge->zoom_expiry_ns;
+        }
+    }
     bridge->expiry_ns = next_expiry;
     bridge->snapshot.expiry_ns = next_expiry;
+    bridge->snapshot.zoom_expiry_ns = bridge->zoom_expiry_ns;
 }
 
 static void osd_external_reset_locked(OsdExternalBridge *bridge) {
@@ -70,11 +76,13 @@ static void osd_external_reset_locked(OsdExternalBridge *bridge) {
     }
     memset(bridge->snapshot.text, 0, sizeof(bridge->snapshot.text));
     for (size_t i = 0; i < ARRAY_SIZE(bridge->snapshot.value); ++i) {
-    bridge->snapshot.value[i] = 0.0;
+        bridge->snapshot.value[i] = 0.0;
     }
     bridge->snapshot.zoom_command[0] = '\0';
+    bridge->snapshot.zoom_expiry_ns = 0;
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
+    bridge->zoom_expiry_ns = 0;
     bridge->expiry_ns = 0;
     memset(bridge->slots, 0, sizeof(bridge->slots));
 }
@@ -111,6 +119,11 @@ static void osd_external_expire_locked(OsdExternalBridge *bridge, uint64_t now_n
             slot->value_expiry_ns = 0;
             slot->is_metric = 0;
         }
+    }
+    if (bridge->snapshot.zoom_command[0] != '\0' && bridge->zoom_expiry_ns > 0 && now_ns >= bridge->zoom_expiry_ns) {
+        bridge->snapshot.zoom_command[0] = '\0';
+        bridge->zoom_expiry_ns = 0;
+        changed = 1;
     }
     osd_external_update_expiry_locked(bridge);
     if (changed) {
@@ -602,6 +615,17 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
         if (strncmp(bridge->snapshot.zoom_command, msg->zoom_command, sizeof(bridge->snapshot.zoom_command)) != 0) {
             snprintf(bridge->snapshot.zoom_command, sizeof(bridge->snapshot.zoom_command), "%s", msg->zoom_command);
             changed = 1;
+        }
+        if (has_ttl_field) {
+            if (ttl_ns > 0 && ttl_ns <= UINT64_MAX - now_ns) {
+                bridge->zoom_expiry_ns = now_ns + ttl_ns;
+            } else if (ttl_ns > 0) {
+                bridge->zoom_expiry_ns = 0;
+            } else {
+                bridge->zoom_expiry_ns = 0;
+            }
+        } else {
+            bridge->zoom_expiry_ns = 0;
         }
     }
 

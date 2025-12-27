@@ -2,6 +2,7 @@
 #define OSD_H
 
 #include <stdint.h>
+#include <time.h>
 
 #include "config.h"
 #include "drm_fb.h"
@@ -149,13 +150,16 @@ typedef struct OSD {
             OsdOutlineState outline;
         } data;
     } elements[OSD_MAX_ELEMENTS];
+    int element_refresh_ms[OSD_MAX_ELEMENTS];
+    struct timespec element_last_refresh[OSD_MAX_ELEMENTS];
 } OSD;
 
 void osd_init(OSD *osd);
 int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plane_id, OSD *osd);
-void osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
-                      int audio_disabled, int restart_count, const OsdExternalFeedSnapshot *ext,
-                      OSD *osd);
+int osd_refresh_hint_ms(const OSD *osd, int global_refresh_ms);
+int osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const PipelineState *ps,
+                     int audio_disabled, int restart_count, const OsdExternalFeedSnapshot *ext,
+                     const struct timespec *now, OSD *osd);
 int osd_is_enabled(const OSD *osd);
 int osd_is_active(const OSD *osd);
 int osd_enable(int fd, OSD *osd);
