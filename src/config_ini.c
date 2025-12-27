@@ -69,11 +69,13 @@ static void builder_init(OsdLayoutBuilder *b, const OsdLayout *defaults) {
         b->layout = *defaults;
         for (int i = 0; i < b->layout.element_count && i < OSD_MAX_ELEMENTS; ++i) {
             b->type_set[i] = 1;
+            b->layout.elements[i].refresh_ms = 0;
         }
     } else {
         osd_layout_defaults(&b->layout);
         for (int i = 0; i < b->layout.element_count; ++i) {
             b->type_set[i] = 1;
+            b->layout.elements[i].refresh_ms = 0;
         }
     }
 }
@@ -105,6 +107,7 @@ static OsdElementConfig *builder_ensure(OsdLayoutBuilder *b, const char *name, i
     elem->placement.anchor = OSD_POS_TOP_LEFT;
     elem->placement.offset_x = 0;
     elem->placement.offset_y = 0;
+    elem->refresh_ms = 0;
     elem->type = OSD_WIDGET_TEXT;
     elem->data.text.line_count = 0;
     elem->data.text.padding = 6;
@@ -120,6 +123,7 @@ static OsdElementConfig *builder_ensure(OsdLayoutBuilder *b, const char *name, i
 
 static void builder_reset_text(OsdElementConfig *elem) {
     elem->type = OSD_WIDGET_TEXT;
+    elem->refresh_ms = 0;
     elem->data.text.line_count = 0;
     elem->data.text.padding = 6;
     elem->data.text.fg = 0xB0FFFFFFu;
@@ -129,6 +133,7 @@ static void builder_reset_text(OsdElementConfig *elem) {
 
 static void builder_reset_line(OsdElementConfig *elem) {
     elem->type = OSD_WIDGET_LINE;
+    elem->refresh_ms = 0;
     elem->data.line.width = 360;
     elem->data.line.height = 80;
     elem->data.line.sample_stride_px = 4;
@@ -146,6 +151,7 @@ static void builder_reset_line(OsdElementConfig *elem) {
 
 static void builder_reset_bar(OsdElementConfig *elem) {
     elem->type = OSD_WIDGET_BAR;
+    elem->refresh_ms = 0;
     elem->data.bar.width = 360;
     elem->data.bar.height = 80;
     elem->data.bar.sample_stride_px = 12;
@@ -169,6 +175,7 @@ static void builder_reset_bar(OsdElementConfig *elem) {
 
 static void builder_reset_outline(OsdElementConfig *elem) {
     elem->type = OSD_WIDGET_OUTLINE;
+    elem->refresh_ms = 0;
     ini_copy_string(elem->data.outline.metric, sizeof(elem->data.outline.metric), "ext.value1");
     elem->data.outline.threshold = 30.0;
     elem->data.outline.activate_when_below = 1;
@@ -946,6 +953,15 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
         }
         elem->placement.offset_x = ox;
         elem->placement.offset_y = oy;
+        return 0;
+    }
+    if (strcasecmp(key, "refresh-ms") == 0) {
+        elem->refresh_ms = atoi(value);
+        if (elem->refresh_ms < OSD_REFRESH_MIN_MS && elem->refresh_ms != 0) {
+            LOGW("config: osd element '%s' refresh %dms below minimum; using %dms", elem->name, elem->refresh_ms,
+                 OSD_REFRESH_MIN_MS);
+            elem->refresh_ms = OSD_REFRESH_MIN_MS;
+        }
         return 0;
     }
     if (elem->type == OSD_WIDGET_TEXT) {

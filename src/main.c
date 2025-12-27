@@ -451,8 +451,17 @@ int main(int argc, char **argv) {
         }
         pfds[nfds++] = (struct pollfd){.fd = STDIN_FILENO, .events = 0};
 
-        int tout = 200;
-        (void)poll(pfds, nfds, tout);
+        int poll_timeout_ms = 200;
+        if (cfg.osd_enable && osd_is_active(&osd)) {
+            int hint_ms = osd_refresh_hint_ms(&osd, cfg.osd_refresh_ms);
+            if (hint_ms > 0 && hint_ms < poll_timeout_ms) {
+                poll_timeout_ms = hint_ms;
+            }
+            if (poll_timeout_ms < 1) {
+                poll_timeout_ms = 1;
+            }
+        }
+        (void)poll(pfds, nfds, poll_timeout_ms);
 
         if (ufd >= 0 && nfds > 0 && (pfds[0].revents & POLLIN)) {
             if (udev_monitor_did_hotplug(&um)) {
@@ -600,7 +609,8 @@ int main(int argc, char **argv) {
         if (cfg.osd_enable && connected && osd_is_active(&osd)) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
-            if (ms_since(now, last_osd) >= cfg.osd_refresh_ms) {
+            int refresh_hint_ms = osd_refresh_hint_ms(&osd, cfg.osd_refresh_ms);
+            if (ms_since(now, last_osd) >= refresh_hint_ms) {
                 OsdExternalFeedSnapshot ext_snapshot;
                 osd_external_get_snapshot(&ext_bridge, &ext_snapshot);
                 const char *zoom_text = ext_snapshot.zoom_command;
@@ -621,8 +631,10 @@ int main(int argc, char **argv) {
                     }
                     g_strlcpy(last_zoom_command, zoom_text != NULL ? zoom_text : "", sizeof(last_zoom_command));
                 }
-                osd_update_stats(fd, &cfg, &ms, &ps, audio_disabled, restart_count, &ext_snapshot, &osd);
-                last_osd = now;
+                int updated = osd_update_stats(fd, &cfg, &ms, &ps, audio_disabled, restart_count, &ext_snapshot, &now, &osd);
+                if (updated) {
+                    last_osd = now;
+                }
             }
         }
 
