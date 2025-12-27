@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euxo pipefail
           # Clone and build rockchip-mpp as it is not available in standard repos
-          git clone --depth 1 https://github.com/rockchip-linux/mpp.git
+          git clone --depth 1 https://github.com/HermanChen/mpp.git
           cd mpp
           cmake -DRKPLATFORM=ON -DHAVE_DRM=ON -DCMAKE_INSTALL_PREFIX=/usr/local .
           make -j$(nproc)
