@@ -624,8 +624,6 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
             } else {
                 bridge->zoom_expiry_ns = 0;
             }
-        } else {
-            bridge->zoom_expiry_ns = 0;
         }
     }
 
