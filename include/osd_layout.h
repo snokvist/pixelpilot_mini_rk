@@ -109,6 +109,7 @@ typedef struct {
     OsdElementType type;
     char name[48];
     OsdPlacement placement;
+    int refresh_ms; /* Optional per-element refresh override; 0 inherits global OSD refresh. */
     union {
         OsdTextConfig text;
         OsdLineConfig line;

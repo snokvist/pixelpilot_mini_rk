@@ -58,7 +58,9 @@ If fewer than eight entries are present, the remaining slots keep their prior
 contents. Including an empty array clears previously published data. Optional
 `ttl_ms` lets publishers request automatic expiry so stale telemetry does not
 linger. The receiver tracks TTL per text/value slot so independent publishers
-can multiplex the feed without clobbering each other:
+can multiplex the feed without clobbering each other. TTL also applies to
+`zoom` commands so a zoom request can naturally expire and revert when its TTL
+elapses:
 
 ```json
 {"values":[42.0], "ttl_ms": 5000}
@@ -109,8 +111,9 @@ duration.
 * Commands are debounced: the receiver only reprograms the plane when the text
   changes. Publish the same string again only when refreshing its TTL.
 * Include `ttl_ms` with every zoom update so the request naturally expires when
-  the publisher stops sending data. A typical one-second zoom command that crops
-  to half size around the centre looks like:
+  the publisher stops sending data. The receiver clears zoom commands when
+  their TTL elapses. A typical one-second zoom command that crops to half size
+  around the centre looks like:
 
   ```json
   {"texts":["","","","","","","","zoom=50,50,50,50"], "ttl_ms": 1000}
