@@ -14,8 +14,8 @@ The payload is a JSON object. All fields are optional, but at least one should b
 
 ```json
 {
-  "text": ["string1", "string2", ...],
-  "value": [1.23, 4.56, ...],
+  "texts": ["string1", "string2", ...],
+  "values": [1.23, 4.56, ...],
   "zoom": "200,200,50,50",
   "ttl_ms": 1000
 }
@@ -25,21 +25,21 @@ The payload is a JSON object. All fields are optional, but at least one should b
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `text` | Array of Strings | Updates the text slots. Max 8 items. Strings are mapped to slots 0-7 by index. |
-| `value` | Array of Numbers | Updates the value slots. Max 8 items. Values are mapped to slots 0-7 by index. |
+| `texts` | Array of Strings | Updates the text slots. Max 8 items. Strings are mapped to slots 0-7 by index. |
+| `values` | Array of Numbers | Updates the value slots. Max 8 items. Values are mapped to slots 0-7 by index. |
 | `zoom` | String | Sets the zoom level and center point. See "Zoom Control" below. |
 | `ttl_ms` | Integer | Time-to-live in milliseconds. If present, the updated slots will expire and clear after this duration. If omitted, updates are persistent until overwritten or cleared. |
 
 ## Slot Mapping
 
 The OSD engine maintains 8 text slots and 8 value slots (indices 0-7).
-*   Sending `text` updates slots starting from index 0.
-*   Sending `value` updates slots starting from index 0.
-*   Sending an empty array `[]` for `text` or `value` clears all respective slots.
+*   Sending `texts` updates slots starting from index 0.
+*   Sending `values` updates slots starting from index 0.
+*   Sending an empty array `[]` for `texts` or `values` clears all respective slots.
 *   Sending an empty string `""` for a specific text slot clears that slot.
 *   Sending `null` for a specific slot skips the update for that slot, preserving its current value. This allows multiple senders to update different indices without interference.
 
-To reference these slots in your `osd.ini` configuration, use tokens like `{external.text0}`, `{external.value0}`, etc.
+To reference these slots in your `osd.ini` configuration, use tokens like `{ext.text1}`, `{ext.value1}`, etc.
 
 ## Zoom Control
 
@@ -63,7 +63,7 @@ This sets 2x zoom centered on the middle of the screen.
 **1. Display a message for 5 seconds:**
 ```json
 {
-  "text": ["Hello World"],
+  "texts": ["Hello World"],
   "ttl_ms": 5000
 }
 ```
@@ -71,15 +71,15 @@ This sets 2x zoom centered on the middle of the screen.
 **2. Update battery voltage and status:**
 ```json
 {
-  "text": ["Battery OK"],
-  "value": [12.4]
+  "texts": ["Battery OK"],
+  "values": [12.4]
 }
 ```
 
 **3. Clear all external text and values:**
 ```json
 {
-  "text": [],
-  "value": []
+  "texts": [],
+  "values": []
 }
 ```
