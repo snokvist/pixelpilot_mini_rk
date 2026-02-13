@@ -345,6 +345,15 @@ static gboolean plane_pick_modifier_for_format(int fd,
     return decided;
 }
 
+static gboolean plane_has_linear_layout_for_format(int fd, uint32_t plane_id, uint32_t fourcc) {
+    uint64_t modifier = DRM_FORMAT_MOD_INVALID;
+    gboolean uses_modifier = FALSE;
+    if (!plane_pick_modifier_for_format(fd, plane_id, fourcc, &modifier, &uses_modifier)) {
+        return FALSE;
+    }
+    return !uses_modifier;
+}
+
 static gboolean plane_accepts_linear_nv12_atomic(int fd, uint32_t plane_id, uint32_t crtc_id) {
     uint32_t prop_fb_id = 0;
     uint32_t prop_crtc_id = 0;
@@ -1709,7 +1718,13 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     DecoderPlaneFormat requested_format = cfg->plane_format;
     if (requested_format == DECODER_PLANE_FORMAT_AUTO) {
         gboolean plane_lists_yuv = plane_lists_format(drm_fd, (uint32_t)cfg->plane_id, DRM_FORMAT_YUV420_8BIT);
-        requested_format = plane_lists_yuv ? DECODER_PLANE_FORMAT_YUV420_8BIT : DECODER_PLANE_FORMAT_NV12;
+        gboolean yuv_layout_supported =
+            plane_lists_yuv && plane_has_linear_layout_for_format(drm_fd, (uint32_t)cfg->plane_id, DRM_FORMAT_YUV420_8BIT);
+        requested_format = yuv_layout_supported ? DECODER_PLANE_FORMAT_YUV420_8BIT : DECODER_PLANE_FORMAT_NV12;
+        if (plane_lists_yuv && !yuv_layout_supported) {
+            LOGW("Video decoder: auto format skipped yuv420_8bit on plane %u because it only advertises non-linear modifiers",
+                 (uint32_t)cfg->plane_id);
+        }
         LOGI("Video decoder: auto-selected requested plane format '%s' for plane %u",
              cfg_decoder_plane_format_name(requested_format),
              (uint32_t)cfg->plane_id);
@@ -1764,6 +1779,14 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
                                         &vd->target_uses_modifier)) {
         vd->target_modifier = DRM_FORMAT_MOD_LINEAR;
         vd->target_uses_modifier = FALSE;
+    }
+
+    if (vd->target_uses_modifier) {
+        LOGE("Video decoder: target format '%s' on plane %u requires non-linear modifier 0x%016llx, but the current allocator only supports linear layouts",
+             vd->target_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" : "nv12",
+             vd->plane_id,
+             (unsigned long long)vd->target_modifier);
+        return -2;
     }
 
     uint32_t probe_fb_id = 0;
