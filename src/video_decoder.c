@@ -547,6 +547,8 @@ struct FrameSlot {
     int prime_fd;
     uint32_t fb_id;
     uint32_t handle;
+    gboolean owns_prime_fd;
+    gboolean handle_is_dumb;
 };
 
 struct VideoDecoder {
@@ -612,6 +614,7 @@ struct VideoDecoder {
     gboolean target_uses_modifier;
     RK_U32 frame_hor_stride;
     RK_U32 frame_ver_stride;
+    gboolean use_external_buffers;
 };
 
 VideoDecoder *video_decoder_new(void) {
@@ -1106,37 +1109,48 @@ static void log_decoder_neon_status_once(void) {
     }
 }
 
+static void release_frame_slot(VideoDecoder *vd, int index) {
+    if (vd == NULL || index < 0 || index >= DECODER_MAX_FRAMES) {
+        return;
+    }
+    struct FrameSlot *slot = &vd->frame_map[index];
+    if (slot->fb_id != 0) {
+        drmModeRmFB(vd->drm_fd, slot->fb_id);
+        slot->fb_id = 0;
+    }
+    if (slot->prime_fd >= 0 && slot->owns_prime_fd) {
+        close(slot->prime_fd);
+    }
+    slot->prime_fd = -1;
+    slot->owns_prime_fd = FALSE;
+
+    if (slot->handle != 0) {
+        if (slot->handle_is_dumb) {
+            struct drm_mode_destroy_dumb dmd = {.handle = slot->handle};
+            ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
+        } else {
+            struct drm_gem_close close_req = {.handle = slot->handle};
+            ioctl(vd->drm_fd, DRM_IOCTL_GEM_CLOSE, &close_req);
+        }
+        slot->handle = 0;
+    }
+    slot->handle_is_dumb = FALSE;
+}
+
 static void reset_frame_map(VideoDecoder *vd) {
     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
-        vd->frame_map[i].prime_fd = -1;
-        vd->frame_map[i].fb_id = 0;
-        vd->frame_map[i].handle = 0;
+        release_frame_slot(vd, i);
     }
 }
 
 static void release_frame_group(VideoDecoder *vd) {
-    if (vd->frm_grp == NULL) {
-        return;
-    }
     video_ctm_reset(&vd->ctm);
-    for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
-        if (vd->frame_map[i].fb_id) {
-            drmModeRmFB(vd->drm_fd, vd->frame_map[i].fb_id);
-            vd->frame_map[i].fb_id = 0;
-        }
-        if (vd->frame_map[i].prime_fd >= 0) {
-            close(vd->frame_map[i].prime_fd);
-            vd->frame_map[i].prime_fd = -1;
-        }
-        if (vd->frame_map[i].handle) {
-            struct drm_mode_destroy_dumb dmd = {.handle = vd->frame_map[i].handle};
-            ioctl(vd->drm_fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dmd);
-            vd->frame_map[i].handle = 0;
-        }
+    reset_frame_map(vd);
+    if (vd->frm_grp != NULL) {
+        mpp_buffer_group_clear(vd->frm_grp);
+        mpp_buffer_group_put(vd->frm_grp);
+        vd->frm_grp = NULL;
     }
-    mpp_buffer_group_clear(vd->frm_grp);
-    mpp_buffer_group_put(vd->frm_grp);
-    vd->frm_grp = NULL;
     vd->src_w = 0;
     vd->src_h = 0;
     vd->frame_fourcc = 0;
@@ -1379,6 +1393,115 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
     return ret;
 }
 
+static uint32_t register_internal_framebuffer(VideoDecoder *vd, MppFrame frame) {
+    if (vd == NULL || frame == NULL) {
+        return 0;
+    }
+
+    MppBuffer buffer = mpp_frame_get_buffer(frame);
+    if (buffer == NULL) {
+        return 0;
+    }
+
+    MppBufferInfo info;
+    memset(&info, 0, sizeof(info));
+    if (mpp_buffer_info_get(buffer, &info) != MPP_OK || info.fd < 0) {
+        return 0;
+    }
+
+    for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
+        if (vd->frame_map[i].prime_fd == info.fd && vd->frame_map[i].fb_id != 0) {
+            return vd->frame_map[i].fb_id;
+        }
+    }
+
+    int slot_index = -1;
+    for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
+        if (vd->frame_map[i].prime_fd < 0) {
+            slot_index = i;
+            break;
+        }
+    }
+    if (slot_index < 0) {
+        return 0;
+    }
+
+    struct drm_prime_handle dph;
+    memset(&dph, 0, sizeof(dph));
+    dph.fd = info.fd;
+    int ret = ioctl(vd->drm_fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &dph);
+    if (ret != 0) {
+        LOGW("PRIME_FD_TO_HANDLE failed for internal decoder buffer: %s", g_strerror(errno));
+        return 0;
+    }
+
+    uint32_t width = mpp_frame_get_width(frame);
+    uint32_t height = mpp_frame_get_height(frame);
+    uint32_t hor_stride = mpp_frame_get_hor_stride(frame);
+    uint32_t ver_stride = mpp_frame_get_ver_stride(frame);
+
+    uint32_t handles[4] = {0};
+    uint32_t pitches[4] = {0};
+    uint32_t offsets[4] = {0};
+    uint64_t modifiers[4] = {0};
+    handles[0] = dph.handle;
+    handles[1] = dph.handle;
+    pitches[0] = hor_stride;
+    pitches[1] = hor_stride;
+    offsets[0] = 0;
+    offsets[1] = hor_stride * ver_stride;
+    modifiers[0] = vd->target_modifier;
+    modifiers[1] = vd->target_modifier;
+
+    uint32_t fb_id = 0;
+    ret = drmModeAddFB2WithModifiers(vd->drm_fd,
+                                     width,
+                                     height,
+                                     vd->target_fourcc,
+                                     handles,
+                                     pitches,
+                                     offsets,
+                                     modifiers,
+                                     &fb_id,
+                                     DRM_MODE_FB_MODIFIERS);
+    if (ret != 0) {
+        /* Some compressed layouts expose as a single data plane. */
+        memset(handles, 0, sizeof(handles));
+        memset(pitches, 0, sizeof(pitches));
+        memset(offsets, 0, sizeof(offsets));
+        memset(modifiers, 0, sizeof(modifiers));
+        handles[0] = dph.handle;
+        pitches[0] = hor_stride;
+        modifiers[0] = vd->target_modifier;
+        ret = drmModeAddFB2WithModifiers(vd->drm_fd,
+                                         width,
+                                         height,
+                                         vd->target_fourcc,
+                                         handles,
+                                         pitches,
+                                         offsets,
+                                         modifiers,
+                                         &fb_id,
+                                         DRM_MODE_FB_MODIFIERS);
+    }
+
+    if (ret != 0) {
+        struct drm_gem_close close_req = {.handle = dph.handle};
+        ioctl(vd->drm_fd, DRM_IOCTL_GEM_CLOSE, &close_req);
+        LOGW("drmModeAddFB2WithModifiers failed for internal decoder buffer on plane %u: %s",
+             vd->plane_id,
+             g_strerror(errno));
+        return 0;
+    }
+
+    vd->frame_map[slot_index].prime_fd = info.fd;
+    vd->frame_map[slot_index].owns_prime_fd = FALSE;
+    vd->frame_map[slot_index].handle = dph.handle;
+    vd->frame_map[slot_index].handle_is_dumb = FALSE;
+    vd->frame_map[slot_index].fb_id = fb_id;
+    return fb_id;
+}
+
 static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
     RK_U32 width = mpp_frame_get_width(frame);
     RK_U32 height = mpp_frame_get_height(frame);
@@ -1417,6 +1540,7 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
             continue;
         }
         vd->frame_map[i].handle = dmcd.handle;
+        vd->frame_map[i].handle_is_dumb = TRUE;
 
         struct drm_prime_handle dph;
         memset(&dph, 0, sizeof(dph));
@@ -1442,6 +1566,7 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
             continue;
         }
         vd->frame_map[i].prime_fd = info.fd;
+        vd->frame_map[i].owns_prime_fd = TRUE;
         if (dph.fd != info.fd) {
             close(dph.fd);
         }
@@ -1552,10 +1677,25 @@ static gpointer frame_thread_func(gpointer data) {
         }
 
         if (mpp_frame_get_info_change(frame)) {
-            if (setup_external_buffers(vd, frame) != 0) {
-                vd->running = FALSE;
-                mpp_frame_deinit(&frame);
-                break;
+            if (vd->use_external_buffers) {
+                if (setup_external_buffers(vd, frame) != 0) {
+                    vd->running = FALSE;
+                    mpp_frame_deinit(&frame);
+                    break;
+                }
+            } else {
+                RK_U32 width = mpp_frame_get_width(frame);
+                RK_U32 height = mpp_frame_get_height(frame);
+                RK_U32 hor_stride = mpp_frame_get_hor_stride(frame);
+                RK_U32 ver_stride = mpp_frame_get_ver_stride(frame);
+                vd->frame_fourcc = vd->target_fourcc;
+                vd->frame_hor_stride = hor_stride;
+                vd->frame_ver_stride = ver_stride;
+                g_mutex_lock(&vd->lock);
+                vd->src_w = width;
+                vd->src_h = height;
+                g_mutex_unlock(&vd->lock);
+                vd->mpi->control(vd->ctx, MPP_DEC_SET_INFO_CHANGE_READY, NULL);
             }
         } else {
             RK_U32 errinfo = mpp_frame_get_errinfo(frame);
@@ -1573,23 +1713,31 @@ static gpointer frame_thread_func(gpointer data) {
                 continue;
             }
 
-            MppBuffer buffer = mpp_frame_get_buffer(frame);
-            if (buffer != NULL) {
-                MppBufferInfo info;
-                memset(&info, 0, sizeof(info));
-                if (mpp_buffer_info_get(buffer, &info) == MPP_OK) {
-                    for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
-                        if (vd->frame_map[i].prime_fd == info.fd) {
-                            uint32_t fb_to_post = vd->frame_map[i].fb_id;
-                            g_mutex_lock(&vd->lock);
-                            vd->pending_fb = fb_to_post;
-                            vd->pending_pts = mpp_frame_get_pts(frame);
-                            g_cond_signal(&vd->cond);
-                            g_mutex_unlock(&vd->lock);
-                            break;
+            uint32_t fb_to_post = 0;
+            if (vd->use_external_buffers) {
+                MppBuffer buffer = mpp_frame_get_buffer(frame);
+                if (buffer != NULL) {
+                    MppBufferInfo info;
+                    memset(&info, 0, sizeof(info));
+                    if (mpp_buffer_info_get(buffer, &info) == MPP_OK) {
+                        for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
+                            if (vd->frame_map[i].prime_fd == info.fd) {
+                                fb_to_post = vd->frame_map[i].fb_id;
+                                break;
+                            }
                         }
                     }
                 }
+            } else {
+                fb_to_post = register_internal_framebuffer(vd, frame);
+            }
+
+            if (fb_to_post != 0) {
+                g_mutex_lock(&vd->lock);
+                vd->pending_fb = fb_to_post;
+                vd->pending_pts = mpp_frame_get_pts(frame);
+                g_cond_signal(&vd->cond);
+                g_mutex_unlock(&vd->lock);
             }
         }
 
@@ -1784,31 +1932,33 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         vd->target_uses_modifier = FALSE;
     }
 
+    vd->use_external_buffers = !vd->target_uses_modifier;
     if (vd->target_uses_modifier) {
-        LOGE("Video decoder: target format '%s' on plane %u requires non-linear modifier 0x%016llx, but the current allocator only supports linear layouts",
+        LOGI("Video decoder: enabling internal-buffer import path for format '%s' modifier 0x%016llx on plane %u",
              vd->target_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" : "nv12",
-             vd->plane_id,
-             (unsigned long long)vd->target_modifier);
-        return -2;
+             (unsigned long long)vd->target_modifier,
+             vd->plane_id);
     }
 
-    uint32_t probe_fb_id = 0;
-    uint32_t probe_handle = 0;
-    if (!create_test_target_fb(drm_fd,
-                               64,
-                               64,
-                               vd->target_fourcc,
-                               vd->target_modifier,
-                               vd->target_uses_modifier,
-                               &probe_fb_id,
-                               &probe_handle)) {
-        LOGE("Video decoder: target format '%s' with %smodifier 0x%016llx is not importable with current buffer path",
-             vd->target_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" : "nv12",
-             vd->target_uses_modifier ? "" : "linear ",
-             (unsigned long long)vd->target_modifier);
-        return -2;
+    if (vd->use_external_buffers) {
+        uint32_t probe_fb_id = 0;
+        uint32_t probe_handle = 0;
+        if (!create_test_target_fb(drm_fd,
+                                   64,
+                                   64,
+                                   vd->target_fourcc,
+                                   vd->target_modifier,
+                                   vd->target_uses_modifier,
+                                   &probe_fb_id,
+                                   &probe_handle)) {
+            LOGE("Video decoder: target format '%s' with %smodifier 0x%016llx is not importable with current buffer path",
+                 vd->target_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" : "nv12",
+                 vd->target_uses_modifier ? "" : "linear ",
+                 (unsigned long long)vd->target_modifier);
+            return -2;
+        }
+        destroy_test_fb(drm_fd, probe_fb_id, probe_handle);
     }
-    destroy_test_fb(drm_fd, probe_fb_id, probe_handle);
 
     vd->packet_buf_size = DECODER_READ_BUF_SIZE;
     vd->packet_buf = g_malloc0(vd->packet_buf_size);

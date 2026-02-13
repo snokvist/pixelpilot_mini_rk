@@ -68,7 +68,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[pip].enable` | `true` enables a second PiP video stream/decoder instance (audio disabled for PiP). |
 | `[pip].udp-port` | UDP port for the PiP stream (default `5601`). |
 | `[pip].video-plane-id` | DRM plane used by PiP (default `96`). PiP uses strict plane selection and will fail to start instead of falling back to the main video plane. |
-| `[pip].format` | PiP plane format target (`auto`, `nv12` or `yuv420_8bit`; default `auto`). Current allocator path supports only linear layouts. `auto` skips `yuv420_8bit` when the target plane only advertises non-linear modifiers (for example AFBC on plane 96) and selects `nv12` instead. If strict PiP plane selection still cannot satisfy the chosen format, PiP is disabled to avoid endless restart retries. Explicit `yuv420_8bit` still fails fast until non-linear buffer allocation/import is implemented. |
+| `[pip].format` | PiP plane format target (`auto`, `nv12` or `yuv420_8bit`; default `auto`). For non-linear modifier formats (for example AFBC on plane 96), decoder now switches to an internal-buffer import path and attempts modifier-backed `drmModeAddFB2WithModifiers` registration per decoded frame. `auto` still falls back to `nv12` if the requested strict plane cannot satisfy the selected format. |
 | `[pip].size` | PiP destination rectangle size in `WIDTHxHEIGHT` format (default `640x480`). |
 | `[pip].x` / `[pip].y` | PiP destination rectangle top-left coordinates in pixels. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |

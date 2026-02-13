@@ -67,8 +67,9 @@ If hardware/driver constraints force format conversion, then an explicit convers
 
 - PiP now supports strict requested-plane selection so it cannot silently steal the main NV12 plane.
 - PiP format configuration plumbing is in place (`auto`/`nv12`/`yuv420_8bit`).
-- `yuv420_8bit` path is partially wired (format/plane/modifier selection), while AFBC/modifier-backed framebuffer correctness remains under implementation. Decoder init now probes a test framebuffer for the selected format/modifier and fails fast (returning the permanent-unsupported signal) when the current buffer allocator cannot import it.
-- `pip.format=auto` now skips `yuv420_8bit` on planes that only advertise non-linear modifiers and chooses `nv12` immediately. If strict plane selection still cannot satisfy the selected format, PiP is now disabled (instead of retrying forever). Explicit `yuv420_8bit` requests still fail fast with a clear allocator/modifier error.
+- `yuv420_8bit` path now attempts modifier-backed rendering via an internal-buffer import path: decoder frames are imported with `DRM_IOCTL_PRIME_FD_TO_HANDLE` and registered through `drmModeAddFB2WithModifiers` for the selected plane modifier.
+- `pip.format=auto` still keeps strict-plane safety: if the selected strict plane cannot satisfy the chosen format, PiP is disabled (instead of retrying forever).
+- AFBC details are still hardware-sensitive and under validation; the code now logs modifier-backed registration failures explicitly so bring-up can iterate with real device traces.
 
 ## Practical rollout plan
 
