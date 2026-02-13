@@ -94,12 +94,6 @@ typedef struct {
 } OsdBarState;
 
 typedef struct {
-    int phase;
-    int last_active;
-    int last_thickness;
-} OsdOutlineState;
-
-typedef struct {
     uint8_t *pixels;
     int width;
     int height;
@@ -154,7 +148,6 @@ typedef struct OSD {
             OsdTextState text;
             OsdLineState line;
             OsdBarState bar;
-            OsdOutlineState outline;
             OsdImageState image;
         } data;
     } elements[OSD_MAX_ELEMENTS];
