@@ -86,7 +86,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[osd].refresh-ms` | Interval between OSD refreshes. |
 | `[osd].plane-id` | Optional override for the OSD plane (mirrors `[drm].osd-plane-id`). |
 | `[osd].elements` | Comma-separated list describing the render order of `[osd.element.NAME]` blocks. |
-| `[osd.element.NAME].type` | Widget style (`text`, `line`, `bar`, `outline`, or `image`). Each type unlocks additional keys listed in the sample file. |
+| `[osd.element.NAME].type` | Widget style (`text`, `line`, `bar`, or `image`). Each type unlocks additional keys listed in the sample file. |
 | `[osd.element.NAME].anchor` / `offset` / `size` / color keys | Control placement and styling for OSD widgets. See inline comments in the sample file for full semantics. |
 | `[osd.element.NAME].line` | For text widgets, each `line =` entry appends a formatted row supporting `{token}` placeholders. |
 | `[osd.element.NAME].metric` | For line/bar widgets, selects the metric token (e.g. `udp.bitrate.latest_mbps`) sampled each refresh. |
