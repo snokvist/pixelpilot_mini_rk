@@ -1187,6 +1187,14 @@ static int osd_load_png_image(const char *path, OsdImageState *state) {
         return -1;
     }
 
+    png_byte signature[8];
+    size_t signature_len = fread(signature, 1, sizeof(signature), fp);
+    if (signature_len != sizeof(signature) || png_sig_cmp(signature, 0, sizeof(signature)) != 0) {
+        LOGW("OSD: file '%s' is not a valid PNG", path);
+        fclose(fp);
+        return -1;
+    }
+
     png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
     if (!png) {
         fclose(fp);
@@ -1206,6 +1214,7 @@ static int osd_load_png_image(const char *path, OsdImageState *state) {
     }
 
     png_init_io(png, fp);
+    png_set_sig_bytes(png, (int)sizeof(signature));
     png_read_info(png, info);
 
     png_uint_32 width = 0;
