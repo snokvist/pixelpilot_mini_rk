@@ -338,6 +338,11 @@ static void start_pip_pipeline(AppCfg *cfg,
                 LOGW("PiP disabled: requested format '%s' is not implemented on this build",
                      cfg_decoder_plane_format_name(pip_cfg.plane_format));
             }
+        } else if (pip_start_rc == -3) {
+            cfg->pip.enable = 0;
+            LOGW("PiP disabled: strict plane %d does not support selected format '%s'",
+                 pip_cfg.plane_id,
+                 cfg_decoder_plane_format_name(pip_cfg.plane_format));
         }
         return;
     }

@@ -961,13 +961,13 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     int decoder_init_rc = video_decoder_init(ps->decoder, cfg, ms, drm_fd);
     if (decoder_init_rc != 0) {
         LOGE("Failed to initialise video decoder");
-        if (decoder_init_rc == -2) {
+        if (decoder_init_rc == -2 || decoder_init_rc == -3) {
             if (pipeline != NULL) {
                 gst_element_set_state(pipeline, GST_STATE_NULL);
             }
             cleanup_pipeline(ps);
             ps->state = PIPELINE_STOPPED;
-            return -2;
+            return decoder_init_rc;
         }
         goto fail;
     }

@@ -1738,6 +1738,9 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     if (desired_fourcc == DRM_FORMAT_NV12) {
         if (!video_decoder_select_plane(drm_fd, vd->crtc_id, (uint32_t)cfg->plane_id, strict_requested, &chosen_plane)) {
             LOGE("Video decoder: unable to find NV12-capable plane for CRTC %u", vd->crtc_id);
+            if (strict_requested) {
+                return -3;
+            }
             return -1;
         }
     } else {
@@ -1746,7 +1749,7 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
             chosen_plane = (uint32_t)cfg->plane_id;
         } else if (strict_requested) {
             LOGE("Video decoder: requested plane %u does not advertise yuv420_8bit format", (uint32_t)cfg->plane_id);
-            return -1;
+            return -3;
         } else {
             LOGW("Video decoder: requested plane %u does not advertise yuv420_8bit format; searching for fallback plane",
                  (uint32_t)cfg->plane_id);
