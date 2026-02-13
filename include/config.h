@@ -78,6 +78,7 @@ typedef struct {
     char config_path[PATH_MAX];
     int plane_id;
     VideoViewportCfg viewport;
+    int strict_plane_selection;
     int use_udev;
     int mode_w;
     int mode_h;

@@ -291,7 +291,10 @@ static gboolean plane_accepts_linear_nv12(int fd, uint32_t plane_id, uint32_t cr
     return plane_accepts_linear_nv12_atomic(fd, plane_id, crtc_id);
 }
 
-static gboolean video_decoder_select_plane(int fd, uint32_t crtc_id, uint32_t requested,
+static gboolean video_decoder_select_plane(int fd,
+                                           uint32_t crtc_id,
+                                           uint32_t requested,
+                                           gboolean strict_requested,
                                            uint32_t *out_plane) {
     if (out_plane == NULL) {
         return FALSE;
@@ -319,13 +322,18 @@ static gboolean video_decoder_select_plane(int fd, uint32_t crtc_id, uint32_t re
         if (plane_accepts_linear_nv12(fd, requested, crtc_id, crtc_index)) {
             *out_plane = requested;
             found = TRUE;
+        } else if (strict_requested) {
+            LOGE("Video decoder: requested plane %u does not support linear NV12 on CRTC %u and strict selection is enabled",
+                 requested,
+                 crtc_id);
         } else {
             LOGW("Video decoder: requested plane %u does not support linear NV12 on CRTC %u; searching for alternative",
-                 requested, crtc_id);
+                 requested,
+                 crtc_id);
         }
     }
 
-    for (uint32_t i = 0; !found && i < pres->count_planes; ++i) {
+    for (uint32_t i = 0; !found && !strict_requested && i < pres->count_planes; ++i) {
         uint32_t plane_id = pres->planes[i];
         if (plane_id == requested) {
             continue;
@@ -1485,7 +1493,11 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->packet_buf = NULL;
 
     uint32_t chosen_plane = 0;
-    if (!video_decoder_select_plane(drm_fd, vd->crtc_id, (uint32_t)cfg->plane_id, &chosen_plane)) {
+    if (!video_decoder_select_plane(drm_fd,
+                                    vd->crtc_id,
+                                    (uint32_t)cfg->plane_id,
+                                    cfg->strict_plane_selection ? TRUE : FALSE,
+                                    &chosen_plane)) {
         LOGE("Video decoder: unable to find NV12-capable plane for CRTC %u", vd->crtc_id);
         return -1;
     }

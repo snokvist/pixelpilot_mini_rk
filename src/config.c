@@ -188,6 +188,7 @@ void cfg_defaults(AppCfg *c) {
     c->viewport.y = 0;
     c->viewport.width = 0;
     c->viewport.height = 0;
+    c->strict_plane_selection = 0;
     c->use_udev = 1;
     c->mode_w = 0;
     c->mode_h = 0;

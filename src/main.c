@@ -304,6 +304,7 @@ static void configure_pip_cfg(const AppCfg *base_cfg, AppCfg *pip_cfg) {
     pip_cfg->udp_port = base_cfg->pip.udp_port;
     pip_cfg->plane_id = base_cfg->pip.plane_id;
     pip_cfg->viewport = base_cfg->pip.viewport;
+    pip_cfg->strict_plane_selection = 1;
     pip_cfg->no_audio = 1;
     pip_cfg->record.enable = 0;
     pip_cfg->osd_enable = 0;
