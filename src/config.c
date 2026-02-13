@@ -21,6 +21,11 @@ static void usage(const char *prog) {
             "  --no-udev                    (disable hotplug listener)\n"
             "  --config PATH                (load settings from ini file)\n"
             "  --udp-port N                 (default: 5600)\n"
+            "  --pip                        (enable PiP stream)\n"
+            "  --pip-udp-port N            (PiP listen port; default: 5601)\n"
+            "  --pip-plane-id N            (PiP video plane; default: 96)\n"
+            "  --pip-size WxH              (PiP destination size, e.g. 640x480)\n"
+            "  --pip-pos X,Y               (PiP destination top-left position)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --appsink-max-buffers N      (default: 4)\n"
@@ -179,6 +184,10 @@ void cfg_defaults(AppCfg *c) {
     memset(c, 0, sizeof(*c));
     strcpy(c->card_path, "/dev/dri/card0");
     c->plane_id = 76;
+    c->viewport.x = 0;
+    c->viewport.y = 0;
+    c->viewport.width = 0;
+    c->viewport.height = 0;
     c->use_udev = 1;
     c->mode_w = 0;
     c->mode_h = 0;
@@ -243,6 +252,14 @@ void cfg_defaults(AppCfg *c) {
     c->idr.loss_threshold = 1;
     c->idr.jitter_threshold_ms = 25.0;
     c->idr.jitter_cooldown_ms = 750;
+
+    c->pip.enable = 0;
+    c->pip.udp_port = 5601;
+    c->pip.plane_id = 96;
+    c->pip.viewport.x = 0;
+    c->pip.viewport.y = 0;
+    c->pip.viewport.width = 640;
+    c->pip.viewport.height = 480;
 
     c->video_ctm.enable = 0;
     for (int i = 0; i < 9; ++i) {
@@ -384,6 +401,34 @@ static void cli_copy_string(char *dst, size_t dst_size, const char *src) {
     dst[copy_len] = '\0';
 }
 
+static int parse_size_arg(const char *arg, int *w_out, int *h_out) {
+    if (arg == NULL || w_out == NULL || h_out == NULL) {
+        return -1;
+    }
+    int w = 0;
+    int h = 0;
+    if (sscanf(arg, "%dx%d", &w, &h) != 2 || w <= 0 || h <= 0) {
+        return -1;
+    }
+    *w_out = w;
+    *h_out = h;
+    return 0;
+}
+
+static int parse_position_arg(const char *arg, int *x_out, int *y_out) {
+    if (arg == NULL || x_out == NULL || y_out == NULL) {
+        return -1;
+    }
+    int x = 0;
+    int y = 0;
+    if (sscanf(arg, "%d,%d", &x, &y) != 2 || x < 0 || y < 0) {
+        return -1;
+    }
+    *x_out = x;
+    *y_out = y;
+    return 0;
+}
+
 int parse_cli(int argc, char **argv, AppCfg *cfg) {
     cfg_defaults(cfg);
 
@@ -423,6 +468,39 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             cfg->use_udev = 0;
         } else if (!strcmp(argv[i], "--udp-port") && i + 1 < argc) {
             cfg->udp_port = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--pip")) {
+            cfg->pip.enable = 1;
+        } else if (!strcmp(argv[i], "--pip-udp-port") && i + 1 < argc) {
+            int port = atoi(argv[++i]);
+            if (port <= 0 || port > 65535) {
+                LOGE("--pip-udp-port requires a value between 1 and 65535");
+                return -1;
+            }
+            cfg->pip.enable = 1;
+            cfg->pip.udp_port = port;
+        } else if (!strcmp(argv[i], "--pip-plane-id") && i + 1 < argc) {
+            cfg->pip.enable = 1;
+            cfg->pip.plane_id = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--pip-size") && i + 1 < argc) {
+            int w = 0;
+            int h = 0;
+            if (parse_size_arg(argv[++i], &w, &h) != 0) {
+                LOGE("--pip-size requires WxH with positive dimensions");
+                return -1;
+            }
+            cfg->pip.enable = 1;
+            cfg->pip.viewport.width = w;
+            cfg->pip.viewport.height = h;
+        } else if (!strcmp(argv[i], "--pip-pos") && i + 1 < argc) {
+            int x = 0;
+            int y = 0;
+            if (parse_position_arg(argv[++i], &x, &y) != 0) {
+                LOGE("--pip-pos requires X,Y with non-negative coordinates");
+                return -1;
+            }
+            cfg->pip.enable = 1;
+            cfg->pip.viewport.x = x;
+            cfg->pip.viewport.y = y;
         } else if (!strcmp(argv[i], "--vid-pt") && i + 1 < argc) {
             cfg->vid_pt = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--aud-pt") && i + 1 < argc) {

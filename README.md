@@ -65,6 +65,11 @@ to the defaults listed in `src/config.c` when omitted.
 | `[drm].osd-plane-id` | Optional explicit plane for the OSD overlay (0 keeps the auto-selection). |
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
+| `[pip].enable` | `true` enables a second PiP video stream/decoder instance (audio disabled for PiP). |
+| `[pip].udp-port` | UDP port for the PiP stream (default `5601`). |
+| `[pip].video-plane-id` | DRM plane used by PiP (default `96`). |
+| `[pip].size` | PiP destination rectangle size in `WIDTHxHEIGHT` format (default `640x480`). |
+| `[pip].x` / `[pip].y` | PiP destination rectangle top-left coordinates in pixels. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
 | `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
@@ -207,3 +212,8 @@ When 64 consecutive HTTP bursts fail to clear the decoder warnings, the requeste
 
 Manual restarts follow the same path. Send the process a `SIGHUP` (for example `kill -HUP $(cat /tmp/pixelpilot_mini_rk.pid)`) to force an immediate teardown/restart cycle without dropping other runtime toggles such as audio fallbacks or active OSD overlays.
 
+## PiP design note (second UDP stream / plane 96)
+
+For planned picture-in-picture support that reuses the same decoder path on a second UDP port and targets configurable DRM planes (including plane 96 `YUV420_8BIT` scenarios), see `docs/pip_yuv420_8bit_plan.md`.
+
+The short version: the current decoder path is linear `NV12`-centric, while plane 96 often advertises `YUV420_8BIT` through AFBC modifiers; supporting that path cleanly requires modifier-aware buffer allocation/import rather than a simple software color conversion.

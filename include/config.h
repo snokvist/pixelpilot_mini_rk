@@ -37,6 +37,20 @@ typedef struct {
 } VideoCtmCfg;
 
 typedef struct {
+    int x;
+    int y;
+    int width;
+    int height;
+} VideoViewportCfg;
+
+typedef struct {
+    int enable;
+    int udp_port;
+    int plane_id;
+    VideoViewportCfg viewport;
+} PipCfg;
+
+typedef struct {
     int enable;
     char bind_address[64];
     int port;
@@ -63,6 +77,7 @@ typedef struct {
     char connector_name[32];
     char config_path[PATH_MAX];
     int plane_id;
+    VideoViewportCfg viewport;
     int use_udev;
     int mode_w;
     int mode_h;
@@ -112,6 +127,7 @@ typedef struct {
     SseCfg sse;
     IdrCfg idr;
     VideoCtmCfg video_ctm;
+    PipCfg pip;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);

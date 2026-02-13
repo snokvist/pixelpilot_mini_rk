@@ -381,6 +381,10 @@ struct VideoDecoder {
     uint32_t crtc_id;
     int mode_w;
     int mode_h;
+    int viewport_x;
+    int viewport_y;
+    int viewport_w;
+    int viewport_h;
     uint32_t src_w;
     uint32_t src_h;
 
@@ -1076,10 +1080,24 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         display_src_h = 1;
     }
 
-    uint32_t dst_w_u32 = (vd->mode_w > 0) ? (uint32_t)vd->mode_w : 0;
-    uint32_t dst_h_u32 = (vd->mode_h > 0) ? (uint32_t)vd->mode_h : 0;
-    if (display_src_w > 0 && display_src_h > 0 && dst_w_u32 > 0 && dst_h_u32 > 0) {
-        compute_plane_destination(dst_w_u32, dst_h_u32, display_src_w, display_src_h, &dst_w_u32, &dst_h_u32);
+    uint32_t target_w_u32 = 0;
+    uint32_t target_h_u32 = 0;
+    int target_x = 0;
+    int target_y = 0;
+    if (vd->viewport_w > 0 && vd->viewport_h > 0) {
+        target_w_u32 = (uint32_t)vd->viewport_w;
+        target_h_u32 = (uint32_t)vd->viewport_h;
+        target_x = vd->viewport_x;
+        target_y = vd->viewport_y;
+    } else {
+        target_w_u32 = (vd->mode_w > 0) ? (uint32_t)vd->mode_w : 0;
+        target_h_u32 = (vd->mode_h > 0) ? (uint32_t)vd->mode_h : 0;
+    }
+
+    uint32_t dst_w_u32 = target_w_u32;
+    uint32_t dst_h_u32 = target_h_u32;
+    if (display_src_w > 0 && display_src_h > 0 && target_w_u32 > 0 && target_h_u32 > 0) {
+        compute_plane_destination(target_w_u32, target_h_u32, display_src_w, display_src_h, &dst_w_u32, &dst_h_u32);
     }
 
     int dst_w = (int)dst_w_u32;
@@ -1110,7 +1128,7 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         }
     }
 
-    if (zoom_out_scale < 1.0 && vd->mode_w > 0 && vd->mode_h > 0) {
+    if (zoom_out_scale < 1.0 && target_w_u32 > 0 && target_h_u32 > 0) {
         int scaled_w = (int)lround((double)dst_w * zoom_out_scale);
         int scaled_h = (int)lround((double)dst_h * zoom_out_scale);
         if (scaled_w <= 0) {
@@ -1123,13 +1141,13 @@ static int commit_plane(VideoDecoder *vd, uint32_t fb_id, uint32_t src_w, uint32
         dst_h = scaled_h;
     }
 
-    int dst_x = 0;
-    int dst_y = 0;
-    if (vd->mode_w > 0) {
-        dst_x = (vd->mode_w - dst_w) / 2;
+    int dst_x = target_x;
+    int dst_y = target_y;
+    if (target_w_u32 > 0) {
+        dst_x += ((int)target_w_u32 - dst_w) / 2;
     }
-    if (vd->mode_h > 0) {
-        dst_y = (vd->mode_h - dst_h) / 2;
+    if (target_h_u32 > 0) {
+        dst_y += ((int)target_h_u32 - dst_h) / 2;
     }
 
     uint64_t src_x_q16 = use_zoom ? ((uint64_t)zoom_local.x << 16) : 0;
@@ -1455,6 +1473,10 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->crtc_id = ms->crtc_id;
     vd->mode_w = ms->mode_w;
     vd->mode_h = ms->mode_h;
+    vd->viewport_x = cfg->viewport.x;
+    vd->viewport_y = cfg->viewport.y;
+    vd->viewport_w = cfg->viewport.width;
+    vd->viewport_h = cfg->viewport.height;
     video_ctm_init(&vd->ctm, cfg);
     vd->frame_fourcc = 0;
     vd->frame_hor_stride = 0;

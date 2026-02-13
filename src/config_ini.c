@@ -1180,6 +1180,61 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "pip") == 0) {
+        if (strcasecmp(key, "enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->pip.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "udp-port") == 0 || strcasecmp(key, "port") == 0) {
+            int port = atoi(value);
+            if (port <= 0 || port > 65535) {
+                LOGE("config: pip udp port '%s' out of range", value);
+                return -1;
+            }
+            cfg->pip.udp_port = port;
+            cfg->pip.enable = 1;
+            return 0;
+        }
+        if (strcasecmp(key, "video-plane-id") == 0 || strcasecmp(key, "plane-id") == 0) {
+            cfg->pip.plane_id = atoi(value);
+            cfg->pip.enable = 1;
+            return 0;
+        }
+        if (strcasecmp(key, "size") == 0) {
+            int w = 0;
+            int h = 0;
+            if (parse_size(value, &w, &h) != 0 || w <= 0 || h <= 0) {
+                return -1;
+            }
+            cfg->pip.viewport.width = w;
+            cfg->pip.viewport.height = h;
+            cfg->pip.enable = 1;
+            return 0;
+        }
+        if (strcasecmp(key, "x") == 0) {
+            int x = atoi(value);
+            if (x < 0) {
+                return -1;
+            }
+            cfg->pip.viewport.x = x;
+            cfg->pip.enable = 1;
+            return 0;
+        }
+        if (strcasecmp(key, "y") == 0) {
+            int y = atoi(value);
+            if (y < 0) {
+                return -1;
+            }
+            cfg->pip.viewport.y = y;
+            cfg->pip.enable = 1;
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "record") == 0) {
         if (strcasecmp(key, "enable") == 0) {
             int v = 0;

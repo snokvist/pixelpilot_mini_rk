@@ -295,6 +295,49 @@ static void pipeline_restart_now(AppCfg *cfg,
     }
 }
 
+static void configure_pip_cfg(const AppCfg *base_cfg, AppCfg *pip_cfg) {
+    if (base_cfg == NULL || pip_cfg == NULL) {
+        return;
+    }
+
+    *pip_cfg = *base_cfg;
+    pip_cfg->udp_port = base_cfg->pip.udp_port;
+    pip_cfg->plane_id = base_cfg->pip.plane_id;
+    pip_cfg->viewport = base_cfg->pip.viewport;
+    pip_cfg->no_audio = 1;
+    pip_cfg->record.enable = 0;
+    pip_cfg->osd_enable = 0;
+    pip_cfg->sse.enable = 0;
+    pip_cfg->osd_external.enable = 0;
+}
+
+static void start_pip_pipeline(const AppCfg *cfg,
+                               const ModesetResult *ms,
+                               int fd,
+                               PipelineState *pip_ps) {
+    if (cfg == NULL || ms == NULL || pip_ps == NULL || !cfg->pip.enable) {
+        return;
+    }
+    if (pip_ps->state != PIPELINE_STOPPED) {
+        return;
+    }
+
+    AppCfg pip_cfg;
+    configure_pip_cfg(cfg, &pip_cfg);
+    if (pipeline_start(&pip_cfg, ms, fd, 1, pip_ps) != 0) {
+        LOGE("Failed to start PiP pipeline");
+        return;
+    }
+
+    LOGI("PiP started: udp=%d plane=%d viewport=%dx%d+%d+%d",
+         pip_cfg.udp_port,
+         pip_cfg.plane_id,
+         pip_cfg.viewport.width,
+         pip_cfg.viewport.height,
+         pip_cfg.viewport.x,
+         pip_cfg.viewport.y);
+}
+
 int main(int argc, char **argv) {
     AppCfg cfg;
     if (parse_cli(argc, argv, &cfg) != 0) {
@@ -333,6 +376,8 @@ int main(int argc, char **argv) {
     ModesetResult ms = {0};
     PipelineState ps = {0};
     ps.state = PIPELINE_STOPPED;
+    PipelineState pip_ps = {0};
+    pip_ps.state = PIPELINE_STOPPED;
     int stats_enabled_cached = -1;
     UdevMonitor um = {0};
     OSD osd;
@@ -392,6 +437,7 @@ int main(int argc, char **argv) {
                 }
                 pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
             }
+            start_pip_pipeline(&cfg, &ms, fd, &pip_ps);
             clock_gettime(CLOCK_MONOTONIC, &window_start);
             restart_count = 0;
         } else {
@@ -410,9 +456,10 @@ int main(int argc, char **argv) {
 
     while (!g_exit_flag) {
         pipeline_poll_child(&ps);
+        pipeline_poll_child(&pip_ps);
 
         const char *pending_restart_reason = NULL;
-        if (pipeline_consume_reinit_request(&ps)) {
+        if (pipeline_consume_reinit_request(&ps) || pipeline_consume_reinit_request(&pip_ps)) {
             pending_restart_reason = "IDR recovery loop";
         }
         if (g_reinit_flag > 0) {
@@ -436,6 +483,12 @@ int main(int argc, char **argv) {
                                      &window_start,
                                      &restart_count,
                                      pending_restart_reason);
+                if (cfg.pip.enable) {
+                    if (pip_ps.state != PIPELINE_STOPPED) {
+                        pipeline_stop(&pip_ps, 700);
+                    }
+                    start_pip_pipeline(&cfg, &ms, fd, &pip_ps);
+                }
                 backoff_ms = 0;
             } else {
                 LOGW("Pipeline restart requested (%s) but no display is connected; ignoring.",
@@ -478,6 +531,9 @@ int main(int argc, char **argv) {
                             pipeline_stop(&ps, 700);
                             stats_cache_invalidate(&stats_enabled_cached);
                         }
+                        if (pip_ps.state != PIPELINE_STOPPED) {
+                            pipeline_stop(&pip_ps, 700);
+                        }
                         if (osd_is_active(&osd)) {
                             pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, FALSE);
                             osd_disable(fd, &osd);
@@ -519,6 +575,7 @@ int main(int argc, char **argv) {
                                 }
                                 pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, osd_is_active(&osd) ? TRUE : FALSE);
                             }
+                            start_pip_pipeline(&cfg, &ms, fd, &pip_ps);
                             clock_gettime(CLOCK_MONOTONIC, &window_start);
                             restart_count = 0;
                             backoff_ms = 0;
@@ -655,7 +712,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (connected && ps.state == PIPELINE_STOPPED) {
+        if (connected && (ps.state == PIPELINE_STOPPED || (cfg.pip.enable && pip_ps.state == PIPELINE_STOPPED))) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             long long elapsed_ms = ms_since(now, window_start);
@@ -670,11 +727,16 @@ int main(int argc, char **argv) {
             }
             LOGW("Pipeline not running; restarting%s...", audio_disabled ? " (audio=fakesink)" : "");
             stats_cache_invalidate(&stats_enabled_cached);
-            if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
-                LOGE("Restart failed");
-                pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
-            } else {
-                pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
+            if (ps.state == PIPELINE_STOPPED) {
+                if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
+                    LOGE("Restart failed");
+                    pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
+                } else {
+                    pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
+                }
+            }
+            if (cfg.pip.enable && pip_ps.state == PIPELINE_STOPPED) {
+                start_pip_pipeline(&cfg, &ms, fd, &pip_ps);
             }
         }
     }
@@ -682,6 +744,9 @@ int main(int argc, char **argv) {
     if (ps.state != PIPELINE_STOPPED) {
         pipeline_stop(&ps, 700);
         stats_cache_invalidate(&stats_enabled_cached);
+    }
+    if (pip_ps.state != PIPELINE_STOPPED) {
+        pipeline_stop(&pip_ps, 700);
     }
     if (osd_is_active(&osd)) {
         pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, FALSE);
