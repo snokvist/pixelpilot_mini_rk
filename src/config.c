@@ -222,18 +222,6 @@ void cfg_defaults(AppCfg *c) {
 
     osd_layout_defaults(&c->osd_layout);
 
-    c->splash.enable = 0;
-    c->splash.idle_timeout_ms = 2000;
-    c->splash.fps = 30.0;
-    c->splash.input_path[0] = '\0';
-    c->splash.default_sequence[0] = '\0';
-    c->splash.sequence_count = 0;
-    for (int i = 0; i < SPLASH_MAX_SEQUENCES; ++i) {
-        c->splash.sequences[i].name[0] = '\0';
-        c->splash.sequences[i].start_frame = -1;
-        c->splash.sequences[i].end_frame = -1;
-    }
-
     c->record.enable = 0;
     strcpy(c->record.output_path, "/media");
     c->record.mode = RECORD_MODE_SEQUENTIAL;

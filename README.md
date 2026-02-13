@@ -23,7 +23,7 @@ The project ships with systemd units for both the primary `pixelpilot_mini_rk` p
 sudo make install
 ```
 
-This copies the binaries to `/usr/local/bin`, installs the unit files into `/etc/systemd/system`, reloads the systemd daemon, and enables both services so they start automatically on the next boot. The install target also writes a default `/etc/pixelpilot_mini.ini` configuration and places the bundled idle spinner at `/usr/local/share/pixelpilot_mini_rk/spinner_ai_1080p30.h265`. Adjust the INI after installation to tune the pipeline.
+This copies the binaries to `/usr/local/bin`, installs the unit files into `/etc/systemd/system`, reloads the systemd daemon, and enables both services so they start automatically on the next boot. The install target also writes a default `/etc/pixelpilot_mini.ini` configuration. Adjust the INI after installation to tune the pipeline.
 
 To remove the services and binaries later, run:
 
@@ -31,7 +31,7 @@ To remove the services and binaries later, run:
 sudo make uninstall
 ```
 
-The uninstall target disables the services, removes the installed files (including the default INI and spinner asset), and reloads the systemd daemon to pick up the changes.
+The uninstall target disables the services, removes the installed files (including the default INI), and reloads the systemd daemon to pick up the changes.
 
 ## Configuration via INI
 
@@ -72,12 +72,6 @@ to the defaults listed in `src/config.c` when omitted.
 | `[idr].port` | HTTP port that exposes the IDR trigger endpoint (default `80`). |
 | `[idr].path` | HTTP path used when issuing the inline request (default `/request/idr`). |
 | `[idr].timeout-ms` | TCP timeout applied to each IDR request in milliseconds (default `200`). |
-| `[splash].enable` | `true` enables the idle fallback player that loops local H.265 sequences when the UDP stream is idle. |
-| `[splash].input` | Path to an Annex-B H.265 elementary stream with intra-only frames that the splash player should loop. |
-| `[splash].fps` | Frame rate used when timestamping splash buffers. |
-| `[splash].idle-timeout-ms` | Milliseconds of inactivity on the video stream before the splash source takes over. |
-| `[splash].default-sequence` | Optional name of the `[splash.sequence.*]` block that should start looping once idle. |
-| `[splash.sequence.NAME].start` / `end` | Inclusive frame range describing a named splash sequence that can be queued. |
 | `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
@@ -212,33 +206,3 @@ When 64 consecutive HTTP bursts fail to clear the decoder warnings, the requeste
 
 Manual restarts follow the same path. Send the process a `SIGHUP` (for example `kill -HUP $(cat /tmp/pixelpilot_mini_rk.pid)`) to force an immediate teardown/restart cycle without dropping other runtime toggles such as audio fallbacks or active OSD overlays.
 
-## Splash fallback playback
-
-When the primary UDP stream drops out it is often desirable to display a "waiting" slate rather than leaving the screen idle.
-Set `[splash].enable = true` to arm the bundled splash player. The player loops H.265 frame ranges from a local Annex-B
-elementary stream and feeds them through the existing decode path whenever the configured `[splash].idle-timeout-ms`
-threshold elapses without new video packets. As soon as RTP traffic resumes the selector switches back to the live feed.
-
-Splash sequences are defined in `[splash.sequence.NAME]` blocks and reference inclusive start/end frame numbers inside the
-input file. Multiple sequences can be chained to create a simple playlist. The example below loops two segments while the
-receiver is idle:
-
-```ini
-[splash]
-enable = true
-input = /opt/pixelpilot/splash/standby.h265
-fps = 30.0
-idle-timeout-ms = 2000
-default-sequence = intro
-
-[splash.sequence.intro]
-start = 0
-end = 179
-
-[splash.sequence.loop]
-start = 180
-end = 359
-```
-
-Provide an H.265 stream with repeated key frames (all-I-frame content works best). Each sequence should align with GOP
-boundaries to avoid decoding artifacts. Disable the feature by omitting the `[splash]` section or setting `enable = false`.

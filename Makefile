@@ -2,7 +2,6 @@ CC ?= gcc
 PREFIX ?= /usr/local
 BINDIR := $(PREFIX)/bin
 SYSCONFDIR ?= /etc
-ASSETDIR := $(PREFIX)/share/pixelpilot_mini_rk
 SYSTEMD_DIR := /etc/systemd/system
 
 # Default to using 4 parallel jobs unless the caller already requested a
@@ -115,13 +114,10 @@ install: all
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 0755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
 	install -d $(DESTDIR)$(SYSCONFDIR)
-	sed -e 's|@ASSETDIR@|$(ASSETDIR)|g' config/pixelpilot_mini.ini > $(DESTDIR)$(SYSCONFDIR)/pixelpilot_mini.ini
-	chmod 0644 $(DESTDIR)$(SYSCONFDIR)/pixelpilot_mini.ini
+	install -m 0644 config/pixelpilot_mini.ini $(DESTDIR)$(SYSCONFDIR)/pixelpilot_mini.ini
 	install -d $(DESTDIR)$(SYSTEMD_DIR)
 	sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@SYSCONFDIR@|$(SYSCONFDIR)|g' systemd/pixelpilot_mini_rk.service > $(DESTDIR)$(SYSTEMD_DIR)/pixelpilot_mini_rk.service
 	chmod 0644 $(DESTDIR)$(SYSTEMD_DIR)/pixelpilot_mini_rk.service
-	install -d $(DESTDIR)$(ASSETDIR)
-	install -m 0644 assets/spinner_ai_1080p30.h265 $(DESTDIR)$(ASSETDIR)/spinner_ai_1080p30.h265
 	@if [ -z "$(DESTDIR)" ] && command -v systemctl >/dev/null 2>&1; then \
 	systemctl daemon-reload; \
 	systemctl enable pixelpilot_mini_rk.service; \
@@ -134,7 +130,6 @@ uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
 	rm -f $(DESTDIR)$(SYSTEMD_DIR)/pixelpilot_mini_rk.service
 	rm -f $(DESTDIR)$(SYSCONFDIR)/pixelpilot_mini.ini
-	rm -f $(DESTDIR)$(ASSETDIR)/spinner_ai_1080p30.h265
 	@if [ -z "$(DESTDIR)" ] && command -v systemctl >/dev/null 2>&1; then \
 	systemctl daemon-reload; \
 	fi

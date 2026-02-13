@@ -312,95 +312,6 @@ static int parse_double(const char *value, double *out) {
     return 0;
 }
 
-static SplashSequenceCfg *splash_find_sequence(SplashCfg *splash, const char *name) {
-    if (splash == NULL || name == NULL || *name == '\0') {
-        return NULL;
-    }
-    for (int i = 0; i < splash->sequence_count; ++i) {
-        if (strcmp(splash->sequences[i].name, name) == 0) {
-            return &splash->sequences[i];
-        }
-    }
-    return NULL;
-}
-
-static SplashSequenceCfg *splash_ensure_sequence(SplashCfg *splash, const char *name) {
-    if (splash == NULL || name == NULL || *name == '\0') {
-        return NULL;
-    }
-    SplashSequenceCfg *seq = splash_find_sequence(splash, name);
-    if (seq != NULL) {
-        return seq;
-    }
-    if (splash->sequence_count >= SPLASH_MAX_SEQUENCES) {
-        return NULL;
-    }
-    seq = &splash->sequences[splash->sequence_count++];
-    memset(seq, 0, sizeof(*seq));
-    ini_copy_string(seq->name, sizeof(seq->name), name);
-    seq->start_frame = -1;
-    seq->end_frame = -1;
-    return seq;
-}
-
-static int parse_splash_section(AppCfg *cfg, const char *key, const char *value) {
-    if (strcasecmp(key, "enable") == 0) {
-        int v = 0;
-        if (parse_bool(value, &v) != 0) {
-            return -1;
-        }
-        cfg->splash.enable = v;
-        return 0;
-    }
-    if (strcasecmp(key, "input") == 0 || strcasecmp(key, "input-path") == 0) {
-        ini_copy_string(cfg->splash.input_path, sizeof(cfg->splash.input_path), value);
-        return 0;
-    }
-    if (strcasecmp(key, "fps") == 0) {
-        double fps = 0.0;
-        if (parse_double(value, &fps) != 0) {
-            return -1;
-        }
-        cfg->splash.fps = fps;
-        return 0;
-    }
-    if (strcasecmp(key, "idle-timeout-ms") == 0) {
-        cfg->splash.idle_timeout_ms = atoi(value);
-        if (cfg->splash.idle_timeout_ms < 0) {
-            cfg->splash.idle_timeout_ms = 0;
-        }
-        return 0;
-    }
-    if (strcasecmp(key, "default-sequence") == 0) {
-        ini_copy_string(cfg->splash.default_sequence, sizeof(cfg->splash.default_sequence), value);
-        return 0;
-    }
-    return -1;
-}
-
-static int parse_splash_sequence(AppCfg *cfg, const char *section, const char *key, const char *value) {
-    const char *prefix = "splash.sequence.";
-    size_t prefix_len = strlen(prefix);
-    if (strncasecmp(section, prefix, prefix_len) != 0) {
-        return -1;
-    }
-    const char *name = section + prefix_len;
-    SplashSequenceCfg *seq = splash_ensure_sequence(&cfg->splash, name);
-    if (seq == NULL) {
-        LOGE("config: too many splash sequences defined (max %d)", SPLASH_MAX_SEQUENCES);
-        return -1;
-    }
-    if (strcasecmp(key, "start") == 0 || strcasecmp(key, "start-frame") == 0) {
-        seq->start_frame = atoi(value);
-        return 0;
-    }
-    if (strcasecmp(key, "end") == 0 || strcasecmp(key, "end-frame") == 0) {
-        seq->end_frame = atoi(value);
-        return 0;
-    }
-    return -1;
-}
-
 static int parse_named_color(const char *value, uint32_t *out) {
     static const struct {
         const char *name;
@@ -1456,19 +1367,6 @@ int cfg_load_file(const char *path, AppCfg *cfg) {
             value = value + 1;
         }
 
-        if (strncasecmp(current_section, "splash.sequence.", strlen("splash.sequence.")) == 0) {
-            if (parse_splash_sequence(cfg, current_section, key, value) != 0) {
-                LOGE("config:%d: failed to parse splash sequence setting %s", lineno, key);
-                fclose(fp);
-                return -1;
-            }
-            continue;
-        }
-        if (strcasecmp(current_section, "splash") == 0) {
-            if (parse_splash_section(cfg, key, value) == 0) {
-                continue;
-            }
-        }
         if (strncasecmp(current_section, "osd.element.", strlen("osd.element.")) == 0) {
             if (parse_osd_element(&builder, current_section, key, value) != 0) {
                 LOGE("config:%d: failed to parse osd element setting %s", lineno, key);
@@ -1493,21 +1391,6 @@ int cfg_load_file(const char *path, AppCfg *cfg) {
 
     if (builder_finalize(&builder, &cfg->osd_layout) != 0) {
         return -1;
-    }
-
-    if (cfg->splash.sequence_count > SPLASH_MAX_SEQUENCES) {
-        cfg->splash.sequence_count = SPLASH_MAX_SEQUENCES;
-    }
-    for (int i = 0; i < cfg->splash.sequence_count; ++i) {
-        SplashSequenceCfg *seq = &cfg->splash.sequences[i];
-        if (seq->start_frame < 0 || seq->end_frame < 0) {
-            LOGE("config: splash sequence '%s' missing start/end", seq->name);
-            return -1;
-        }
-        if (seq->end_frame < seq->start_frame) {
-            LOGE("config: splash sequence '%s' has end before start", seq->name);
-            return -1;
-        }
     }
 
     return 0;

@@ -6,8 +6,6 @@
 
 #include "osd_layout.h"
 
-#define SPLASH_MAX_SEQUENCES 32
-
 #ifndef OSD_REFRESH_MIN_MS
 #define OSD_REFRESH_MIN_MS 50
 #endif
@@ -26,22 +24,6 @@ typedef enum {
     RECORD_MODE_SEQUENTIAL,
     RECORD_MODE_FRAGMENTED,
 } RecordMode;
-
-typedef struct {
-    char name[64];
-    int start_frame;
-    int end_frame;
-} SplashSequenceCfg;
-
-typedef struct {
-    int enable;
-    int idle_timeout_ms;
-    double fps;
-    char input_path[PATH_MAX];
-    char default_sequence[64];
-    int sequence_count;
-    SplashSequenceCfg sequences[SPLASH_MAX_SEQUENCES];
-} SplashCfg;
 
 typedef struct {
     int enable;
@@ -126,7 +108,6 @@ typedef struct {
         int udp_port;
     } osd_external;
 
-    SplashCfg splash;
     RecordCfg record;
     SseCfg sse;
     IdrCfg idr;
