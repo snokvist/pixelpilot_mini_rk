@@ -454,6 +454,7 @@ int main(int argc, char **argv) {
     struct timespec last_osd;
     clock_gettime(CLOCK_MONOTONIC, &last_osd);
     char last_zoom_command[OSD_EXTERNAL_TEXT_LEN] = "";
+    struct timespec last_pip_retry = {0, 0};
 
     while (!g_exit_flag) {
         pipeline_poll_child(&ps);
@@ -713,7 +714,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        if (connected && (ps.state == PIPELINE_STOPPED || (cfg.pip.enable && pip_ps.state == PIPELINE_STOPPED))) {
+        if (connected && ps.state == PIPELINE_STOPPED) {
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             long long elapsed_ms = ms_since(now, window_start);
@@ -728,16 +729,21 @@ int main(int argc, char **argv) {
             }
             LOGW("Pipeline not running; restarting%s...", audio_disabled ? " (audio=fakesink)" : "");
             stats_cache_invalidate(&stats_enabled_cached);
-            if (ps.state == PIPELINE_STOPPED) {
-                if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
-                    LOGE("Restart failed");
-                    pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
-                } else {
-                    pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
-                }
+            if (pipeline_start(&cfg, &ms, fd, audio_disabled, &ps) != 0) {
+                LOGE("Restart failed");
+                pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
+            } else {
+                pipeline_maybe_set_stats(&cfg, &ps, &stats_enabled_cached, stats_consumers_active(&osd, &sse_streamer));
             }
-            if (cfg.pip.enable && pip_ps.state == PIPELINE_STOPPED) {
+        }
+
+        if (connected && cfg.pip.enable && ps.state == PIPELINE_RUNNING && pip_ps.state == PIPELINE_STOPPED) {
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (last_pip_retry.tv_sec == 0 || ms_since(now, last_pip_retry) >= 2000) {
+                LOGW("PiP pipeline not running; retrying start on configured plane");
                 start_pip_pipeline(&cfg, &ms, fd, &pip_ps);
+                last_pip_retry = now;
             }
         }
     }

@@ -428,9 +428,9 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
 
     ps->pipeline = pipeline;
     ps->video_sink = appsink;
-    ps->video_depay = depay;
-    ps->video_parser = parser;
-    ps->video_capsfilter = capsfilter;
+    ps->video_depay = gst_object_ref(depay);
+    ps->video_parser = gst_object_ref(parser);
+    ps->video_capsfilter = gst_object_ref(capsfilter);
     ps->udp_receiver = receiver;
     return TRUE;
 
