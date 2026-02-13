@@ -67,7 +67,7 @@ If hardware/driver constraints force format conversion, then an explicit convers
 
 - PiP now supports strict requested-plane selection so it cannot silently steal the main NV12 plane.
 - PiP format configuration plumbing is in place (`auto`/`nv12`/`yuv420_8bit`).
-- `yuv420_8bit` currently fails fast with an explicit message because AFBC/modifier-aware framebuffer import is not implemented yet.
+- `yuv420_8bit` path is partially wired (format/plane/modifier selection), while AFBC/modifier-backed framebuffer correctness remains under implementation; `auto` currently falls back to `nv12` when needed.
 
 ## Practical rollout plan
 

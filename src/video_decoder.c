@@ -198,6 +198,98 @@ static gboolean plane_lists_format(int fd, uint32_t plane_id, uint32_t fourcc) {
     return found;
 }
 
+static gboolean plane_pick_modifier_for_format(int fd,
+                                              uint32_t plane_id,
+                                              uint32_t fourcc,
+                                              uint64_t *modifier_out,
+                                              gboolean *has_modifier_out) {
+    if (modifier_out == NULL || has_modifier_out == NULL) {
+        return FALSE;
+    }
+    *modifier_out = DRM_FORMAT_MOD_INVALID;
+    *has_modifier_out = FALSE;
+
+    drmModeObjectProperties *props = drmModeObjectGetProperties(fd, plane_id, DRM_MODE_OBJECT_PLANE);
+    if (props == NULL) {
+        return FALSE;
+    }
+
+    gboolean decided = FALSE;
+    for (uint32_t i = 0; i < props->count_props && !decided; ++i) {
+        drmModePropertyRes *prop = drmModeGetProperty(fd, props->props[i]);
+        if (prop == NULL) {
+            continue;
+        }
+
+        if ((prop->flags & DRM_MODE_PROP_BLOB) && g_strcmp0(prop->name, "IN_FORMATS") == 0) {
+            uint64_t blob_id = props->prop_values[i];
+            drmModePropertyBlobRes *blob = drmModeGetPropertyBlob(fd, blob_id);
+            if (blob != NULL && blob->data != NULL && blob->length >= sizeof(struct drm_format_modifier_blob)) {
+                const uint8_t *blob_bytes = (const uint8_t *)blob->data;
+                size_t blob_len = blob->length;
+                const struct drm_format_modifier_blob *fmt_blob = (const struct drm_format_modifier_blob *)blob_bytes;
+
+                size_t formats_offset = fmt_blob->formats_offset;
+                size_t modifiers_offset = fmt_blob->modifiers_offset;
+                size_t formats_size = (size_t)fmt_blob->count_formats * sizeof(uint32_t);
+                size_t modifiers_size = (size_t)fmt_blob->count_modifiers * sizeof(struct drm_format_modifier);
+
+                if (formats_offset <= blob_len && formats_size <= blob_len - formats_offset) {
+                    const uint32_t *formats = (const uint32_t *)(blob_bytes + formats_offset);
+                    int format_index = -1;
+                    for (uint32_t f = 0; f < fmt_blob->count_formats; ++f) {
+                        if (formats[f] == fourcc) {
+                            format_index = (int)f;
+                            break;
+                        }
+                    }
+
+                    if (format_index >= 0) {
+                        if (fmt_blob->count_modifiers == 0) {
+                            *has_modifier_out = FALSE;
+                            *modifier_out = DRM_FORMAT_MOD_LINEAR;
+                            decided = TRUE;
+                        } else if (modifiers_offset <= blob_len && modifiers_size <= blob_len - modifiers_offset) {
+                            const struct drm_format_modifier *mods =
+                                (const struct drm_format_modifier *)(blob_bytes + modifiers_offset);
+                            uint64_t chosen = DRM_FORMAT_MOD_INVALID;
+                            for (uint32_t m = 0; m < fmt_blob->count_modifiers; ++m) {
+                                const struct drm_format_modifier *mod = &mods[m];
+                                if (format_index < (int)mod->offset || format_index >= (int)(mod->offset + 64)) {
+                                    continue;
+                                }
+                                uint32_t bit = (uint32_t)(format_index - mod->offset);
+                                if ((mod->formats & (1ull << bit)) == 0) {
+                                    continue;
+                                }
+                                if (mod->modifier == DRM_FORMAT_MOD_LINEAR || mod->modifier == DRM_FORMAT_MOD_NONE) {
+                                    chosen = DRM_FORMAT_MOD_LINEAR;
+                                    break;
+                                }
+                                if (chosen == DRM_FORMAT_MOD_INVALID) {
+                                    chosen = mod->modifier;
+                                }
+                            }
+                            if (chosen != DRM_FORMAT_MOD_INVALID) {
+                                *modifier_out = chosen;
+                                *has_modifier_out = (chosen != DRM_FORMAT_MOD_LINEAR && chosen != DRM_FORMAT_MOD_NONE);
+                                decided = TRUE;
+                            }
+                        }
+                    }
+                }
+            }
+            if (blob != NULL) {
+                drmModeFreePropertyBlob(blob);
+            }
+        }
+        drmModeFreeProperty(prop);
+    }
+
+    drmModeFreeObjectProperties(props);
+    return decided;
+}
+
 static gboolean plane_accepts_linear_nv12_atomic(int fd, uint32_t plane_id, uint32_t crtc_id) {
     uint32_t prop_fb_id = 0;
     uint32_t prop_crtc_id = 0;
@@ -451,6 +543,9 @@ struct VideoDecoder {
 
     VideoCtm ctm;
     uint32_t frame_fourcc;
+    uint32_t target_fourcc;
+    uint64_t target_modifier;
+    gboolean target_uses_modifier;
     RK_U32 frame_hor_stride;
     RK_U32 frame_ver_stride;
 };
@@ -981,6 +1076,9 @@ static void release_frame_group(VideoDecoder *vd) {
     vd->src_w = 0;
     vd->src_h = 0;
     vd->frame_fourcc = 0;
+    vd->target_fourcc = 0;
+    vd->target_modifier = DRM_FORMAT_MOD_INVALID;
+    vd->target_uses_modifier = FALSE;
     vd->frame_hor_stride = 0;
     vd->frame_ver_stride = 0;
 }
@@ -1293,20 +1391,48 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
         offsets[0] = 0;
         offsets[1] = dmcd.pitch * ver_stride;
 
-        ret = drmModeAddFB2(vd->drm_fd, width, height, DRM_FORMAT_NV12, handles, pitches, offsets,
-                            &vd->frame_map[i].fb_id, 0);
+        uint32_t addfb_flags = 0;
+        if (vd->target_uses_modifier) {
+            uint64_t modifiers[4] = {0};
+            modifiers[0] = vd->target_modifier;
+            modifiers[1] = vd->target_modifier;
+            addfb_flags = DRM_MODE_FB_MODIFIERS;
+            ret = drmModeAddFB2WithModifiers(vd->drm_fd,
+                                             width,
+                                             height,
+                                             vd->target_fourcc,
+                                             handles,
+                                             pitches,
+                                             offsets,
+                                             modifiers,
+                                             &vd->frame_map[i].fb_id,
+                                             addfb_flags);
+        } else {
+            ret = drmModeAddFB2(vd->drm_fd,
+                                width,
+                                height,
+                                vd->target_fourcc,
+                                handles,
+                                pitches,
+                                offsets,
+                                &vd->frame_map[i].fb_id,
+                                0);
+        }
         if (ret != 0) {
-            LOGW("drmModeAddFB2 failed: %s", g_strerror(errno));
+            LOGW("drmModeAddFB2(%s) failed on plane %u: %s",
+                 vd->target_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" : "nv12",
+                 vd->plane_id,
+                 g_strerror(errno));
             continue;
         }
 
     }
 
-    vd->frame_fourcc = DRM_FORMAT_NV12;
+    vd->frame_fourcc = vd->target_fourcc;
     vd->frame_hor_stride = hor_stride;
     vd->frame_ver_stride = ver_stride;
     if (vd->ctm.enabled && fmt == MPP_FMT_YUV420SP) {
-        if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, vd->frame_fourcc, 0, DRM_FORMAT_NV12) !=
+        if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, vd->frame_fourcc, 0, vd->target_fourcc) !=
             0) {
             vd->ctm.enabled = FALSE;
         }
@@ -1470,7 +1596,7 @@ void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *upda
         return;
     }
 
-    if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc, 0, DRM_FORMAT_NV12) != 0) {
+    if (video_ctm_prepare(&vd->ctm, width, height, hor_stride, ver_stride, fourcc, 0, vd->target_fourcc) != 0) {
         LOGW("Video decoder: failed to reapply CTM after live update");
     }
 }
@@ -1505,6 +1631,9 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->viewport_h = cfg->viewport.height;
     video_ctm_init(&vd->ctm, cfg);
     vd->frame_fourcc = 0;
+    vd->target_fourcc = 0;
+    vd->target_modifier = DRM_FORMAT_MOD_INVALID;
+    vd->target_uses_modifier = FALSE;
     vd->frame_hor_stride = 0;
     vd->frame_ver_stride = 0;
     vd->packet_buf_size = 0;
@@ -1519,27 +1648,56 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
              (uint32_t)cfg->plane_id);
     }
 
-    if (requested_format == DECODER_PLANE_FORMAT_YUV420_8BIT) {
-        gboolean plane_lists_yuv = plane_lists_format(drm_fd, (uint32_t)cfg->plane_id, DRM_FORMAT_YUV420_8BIT);
-        if (plane_lists_yuv) {
-            LOGE("Video decoder: requested format yuv420_8bit on plane %u requires AFBC/modifier-aware framebuffer setup, which is not implemented yet",
-                 (uint32_t)cfg->plane_id);
-        } else {
-            LOGE("Video decoder: requested plane %u does not advertise yuv420_8bit format", (uint32_t)cfg->plane_id);
-        }
-        return -2;
-    }
+    uint32_t desired_fourcc = (requested_format == DECODER_PLANE_FORMAT_YUV420_8BIT) ? DRM_FORMAT_YUV420_8BIT
+                                                                                       : DRM_FORMAT_NV12;
+    gboolean strict_requested = cfg->strict_plane_selection ? TRUE : FALSE;
 
     uint32_t chosen_plane = 0;
-    if (!video_decoder_select_plane(drm_fd,
-                                    vd->crtc_id,
-                                    (uint32_t)cfg->plane_id,
-                                    cfg->strict_plane_selection ? TRUE : FALSE,
-                                    &chosen_plane)) {
-        LOGE("Video decoder: unable to find NV12-capable plane for CRTC %u", vd->crtc_id);
-        return -1;
+    if (desired_fourcc == DRM_FORMAT_NV12) {
+        if (!video_decoder_select_plane(drm_fd, vd->crtc_id, (uint32_t)cfg->plane_id, strict_requested, &chosen_plane)) {
+            LOGE("Video decoder: unable to find NV12-capable plane for CRTC %u", vd->crtc_id);
+            return -1;
+        }
+    } else {
+        gboolean lists = plane_lists_format(drm_fd, (uint32_t)cfg->plane_id, desired_fourcc);
+        if (lists) {
+            chosen_plane = (uint32_t)cfg->plane_id;
+        } else if (strict_requested) {
+            LOGE("Video decoder: requested plane %u does not advertise yuv420_8bit format", (uint32_t)cfg->plane_id);
+            return -1;
+        } else {
+            LOGW("Video decoder: requested plane %u does not advertise yuv420_8bit format; searching for fallback plane",
+                 (uint32_t)cfg->plane_id);
+            drmModePlaneRes *pres = drmModeGetPlaneResources(drm_fd);
+            if (pres != NULL) {
+                for (uint32_t i = 0; i < pres->count_planes; ++i) {
+                    uint32_t pid = pres->planes[i];
+                    if (plane_lists_format(drm_fd, pid, desired_fourcc)) {
+                        chosen_plane = pid;
+                        break;
+                    }
+                }
+                drmModeFreePlaneResources(pres);
+            }
+            if (chosen_plane == 0) {
+                LOGE("Video decoder: unable to find yuv420_8bit-capable plane for CRTC %u", vd->crtc_id);
+                return -1;
+            }
+        }
     }
+
     vd->plane_id = chosen_plane;
+    vd->target_fourcc = desired_fourcc;
+    vd->target_modifier = DRM_FORMAT_MOD_INVALID;
+    vd->target_uses_modifier = FALSE;
+    if (!plane_pick_modifier_for_format(drm_fd,
+                                        vd->plane_id,
+                                        vd->target_fourcc,
+                                        &vd->target_modifier,
+                                        &vd->target_uses_modifier)) {
+        vd->target_modifier = DRM_FORMAT_MOD_LINEAR;
+        vd->target_uses_modifier = FALSE;
+    }
 
     vd->packet_buf_size = DECODER_READ_BUF_SIZE;
     vd->packet_buf = g_malloc0(vd->packet_buf_size);

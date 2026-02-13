@@ -330,9 +330,14 @@ static void start_pip_pipeline(AppCfg *cfg,
     if (pip_start_rc != 0) {
         LOGE("Failed to start PiP pipeline");
         if (pip_start_rc == -2) {
-            cfg->pip.enable = 0;
-            LOGW("PiP disabled: requested format '%s' is not implemented on this build",
-                 cfg_decoder_plane_format_name(pip_cfg.plane_format));
+            if (cfg->pip.format == DECODER_PLANE_FORMAT_AUTO) {
+                cfg->pip.format = DECODER_PLANE_FORMAT_NV12;
+                LOGW("PiP fallback: auto format selected unsupported yuv420_8bit path; switching to nv12");
+            } else {
+                cfg->pip.enable = 0;
+                LOGW("PiP disabled: requested format '%s' is not implemented on this build",
+                     cfg_decoder_plane_format_name(pip_cfg.plane_format));
+            }
         }
         return;
     }

@@ -24,7 +24,7 @@ static void usage(const char *prog) {
             "  --pip                        (enable PiP stream)\n"
             "  --pip-udp-port N            (PiP listen port; default: 5601)\n"
             "  --pip-plane-id N            (PiP video plane; default: 96)\n"
-            "  --pip-format FORMAT         (PiP format: auto|nv12|yuv420_8bit; default: yuv420_8bit)\n"
+            "  --pip-format FORMAT         (PiP format: auto|nv12|yuv420_8bit; default: auto)\n"
             "  --pip-size WxH              (PiP destination size, e.g. 640x480)\n"
             "  --pip-pos X,Y               (PiP destination top-left position)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
@@ -298,7 +298,7 @@ void cfg_defaults(AppCfg *c) {
     c->pip.enable = 0;
     c->pip.udp_port = 5601;
     c->pip.plane_id = 96;
-    c->pip.format = DECODER_PLANE_FORMAT_YUV420_8BIT;
+    c->pip.format = DECODER_PLANE_FORMAT_AUTO;
     c->pip.viewport.x = 0;
     c->pip.viewport.y = 0;
     c->pip.viewport.width = 640;
