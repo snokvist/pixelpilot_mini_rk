@@ -1457,7 +1457,7 @@ static uint32_t register_internal_framebuffer(VideoDecoder *vd, MppFrame frame) 
     ret = drmModeAddFB2WithModifiers(vd->drm_fd,
                                      width,
                                      height,
-                                     framebuffer_fourcc,
+                                     vd->target_fourcc,
                                      handles,
                                      pitches,
                                      offsets,
@@ -1476,7 +1476,7 @@ static uint32_t register_internal_framebuffer(VideoDecoder *vd, MppFrame frame) 
         ret = drmModeAddFB2WithModifiers(vd->drm_fd,
                                          width,
                                          height,
-                                         framebuffer_fourcc,
+                                         vd->target_fourcc,
                                          handles,
                                          pitches,
                                          offsets,
@@ -1615,8 +1615,7 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
         }
         if (ret != 0) {
             LOGW("drmModeAddFB2(%s) failed on plane %u: %s",
-                 framebuffer_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" :
-                 (framebuffer_fourcc == DRM_FORMAT_NV15 ? "nv15" : "nv12"),
+                 vd->target_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" : "nv12",
                  vd->plane_id,
                  g_strerror(errno));
             continue;
@@ -1694,7 +1693,7 @@ static gpointer frame_thread_func(gpointer data) {
                 RK_U32 height = mpp_frame_get_height(frame);
                 RK_U32 hor_stride = mpp_frame_get_hor_stride(frame);
                 RK_U32 ver_stride = mpp_frame_get_ver_stride(frame);
-                vd->frame_fourcc = framebuffer_fourcc;
+                vd->frame_fourcc = vd->target_fourcc;
                 vd->frame_hor_stride = hor_stride;
                 vd->frame_ver_stride = ver_stride;
                 g_mutex_lock(&vd->lock);
@@ -1931,7 +1930,7 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->target_uses_modifier = FALSE;
     if (!plane_pick_modifier_for_format(drm_fd,
                                         vd->plane_id,
-                                        framebuffer_fourcc,
+                                        vd->target_fourcc,
                                         &vd->target_modifier,
                                         &vd->target_uses_modifier)) {
         vd->target_modifier = DRM_FORMAT_MOD_LINEAR;
@@ -1952,14 +1951,13 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         if (!create_test_target_fb(drm_fd,
                                    64,
                                    64,
-                                   framebuffer_fourcc,
+                                   vd->target_fourcc,
                                    vd->target_modifier,
                                    vd->target_uses_modifier,
                                    &probe_fb_id,
                                    &probe_handle)) {
             LOGE("Video decoder: target format '%s' with %smodifier 0x%016llx is not importable with current buffer path",
-                 framebuffer_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" :
-                 (framebuffer_fourcc == DRM_FORMAT_NV15 ? "nv15" : "nv12"),
+                 vd->target_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" : "nv12",
                  vd->target_uses_modifier ? "" : "linear ",
                  (unsigned long long)vd->target_modifier);
             return -2;
