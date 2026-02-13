@@ -79,6 +79,61 @@ static gboolean create_test_nv12_fb(int fd, uint32_t width, uint32_t height, uin
     return TRUE;
 }
 
+static gboolean create_test_target_fb(int fd,
+                                      uint32_t width,
+                                      uint32_t height,
+                                      uint32_t fourcc,
+                                      uint64_t modifier,
+                                      gboolean use_modifier,
+                                      uint32_t *out_fb_id,
+                                      uint32_t *out_handle) {
+    if (out_fb_id == NULL || out_handle == NULL) {
+        return FALSE;
+    }
+
+    struct drm_mode_create_dumb dmcd;
+    memset(&dmcd, 0, sizeof(dmcd));
+    dmcd.width = width;
+    dmcd.height = height * 2;
+    dmcd.bpp = 8;
+
+    if (ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &dmcd) != 0) {
+        return FALSE;
+    }
+
+    uint32_t handles[4] = {0};
+    uint32_t pitches[4] = {0};
+    uint32_t offsets[4] = {0};
+    uint64_t modifiers[4] = {0};
+
+    handles[0] = dmcd.handle;
+    handles[1] = dmcd.handle;
+    pitches[0] = dmcd.pitch;
+    pitches[1] = dmcd.pitch;
+    offsets[0] = 0;
+    offsets[1] = dmcd.pitch * height;
+
+    uint32_t fb_id = 0;
+    int ret = 0;
+    if (use_modifier) {
+        modifiers[0] = modifier;
+        modifiers[1] = modifier;
+        ret = drmModeAddFB2WithModifiers(
+            fd, width, height, fourcc, handles, pitches, offsets, modifiers, &fb_id, DRM_MODE_FB_MODIFIERS);
+    } else {
+        ret = drmModeAddFB2(fd, width, height, fourcc, handles, pitches, offsets, &fb_id, 0);
+    }
+    if (ret != 0) {
+        struct drm_mode_destroy_dumb destroy_req = {.handle = dmcd.handle};
+        ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy_req);
+        return FALSE;
+    }
+
+    *out_fb_id = fb_id;
+    *out_handle = dmcd.handle;
+    return TRUE;
+}
+
 static void destroy_test_fb(int fd, uint32_t fb_id, uint32_t handle) {
     if (fb_id != 0) {
         drmModeRmFB(fd, fb_id);
@@ -1336,6 +1391,7 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
 
     reset_frame_map(vd);
 
+    int ready_fb_count = 0;
     for (int i = 0; i < DECODER_MAX_FRAMES; ++i) {
         struct drm_mode_create_dumb dmcd;
         memset(&dmcd, 0, sizeof(dmcd));
@@ -1426,6 +1482,13 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
             continue;
         }
 
+        ready_fb_count++;
+
+    }
+
+    if (ready_fb_count == 0) {
+        LOGE("Video decoder: failed to allocate any displayable framebuffers for plane %u", vd->plane_id);
+        return -1;
     }
 
     vd->frame_fourcc = vd->target_fourcc;
@@ -1480,7 +1543,11 @@ static gpointer frame_thread_func(gpointer data) {
         }
 
         if (mpp_frame_get_info_change(frame)) {
-            setup_external_buffers(vd, frame);
+            if (setup_external_buffers(vd, frame) != 0) {
+                vd->running = FALSE;
+                mpp_frame_deinit(&frame);
+                break;
+            }
         } else {
             RK_U32 errinfo = mpp_frame_get_errinfo(frame);
             RK_U32 discard = mpp_frame_get_discard(frame);
@@ -1698,6 +1765,24 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
         vd->target_modifier = DRM_FORMAT_MOD_LINEAR;
         vd->target_uses_modifier = FALSE;
     }
+
+    uint32_t probe_fb_id = 0;
+    uint32_t probe_handle = 0;
+    if (!create_test_target_fb(drm_fd,
+                               64,
+                               64,
+                               vd->target_fourcc,
+                               vd->target_modifier,
+                               vd->target_uses_modifier,
+                               &probe_fb_id,
+                               &probe_handle)) {
+        LOGE("Video decoder: target format '%s' with %smodifier 0x%016llx is not importable with current buffer path",
+             vd->target_fourcc == DRM_FORMAT_YUV420_8BIT ? "yuv420_8bit" : "nv12",
+             vd->target_uses_modifier ? "" : "linear ",
+             (unsigned long long)vd->target_modifier);
+        return -2;
+    }
+    destroy_test_fb(drm_fd, probe_fb_id, probe_handle);
 
     vd->packet_buf_size = DECODER_READ_BUF_SIZE;
     vd->packet_buf = g_malloc0(vd->packet_buf_size);
