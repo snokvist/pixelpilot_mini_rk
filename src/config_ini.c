@@ -1204,6 +1204,16 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->pip.enable = 1;
             return 0;
         }
+        if (strcasecmp(key, "format") == 0) {
+            DecoderPlaneFormat format;
+            if (cfg_parse_decoder_plane_format(value, &format) != 0) {
+                LOGE("config: pip format '%s' is invalid (use nv12 or yuv420_8bit)", value);
+                return -1;
+            }
+            cfg->pip.format = format;
+            cfg->pip.enable = 1;
+            return 0;
+        }
         if (strcasecmp(key, "size") == 0) {
             int w = 0;
             int h = 0;

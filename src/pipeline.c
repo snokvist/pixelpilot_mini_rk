@@ -958,8 +958,17 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
         }
     }
 
-    if (video_decoder_init(ps->decoder, cfg, ms, drm_fd) != 0) {
+    int decoder_init_rc = video_decoder_init(ps->decoder, cfg, ms, drm_fd);
+    if (decoder_init_rc != 0) {
         LOGE("Failed to initialise video decoder");
+        if (decoder_init_rc == -2) {
+            if (pipeline != NULL) {
+                gst_element_set_state(pipeline, GST_STATE_NULL);
+            }
+            cleanup_pipeline(ps);
+            ps->state = PIPELINE_STOPPED;
+            return -2;
+        }
         goto fail;
     }
     ps->decoder_initialized = TRUE;

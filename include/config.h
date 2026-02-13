@@ -36,6 +36,11 @@ typedef struct {
     double matrix[9];
 } VideoCtmCfg;
 
+typedef enum {
+    DECODER_PLANE_FORMAT_NV12 = 0,
+    DECODER_PLANE_FORMAT_YUV420_8BIT,
+} DecoderPlaneFormat;
+
 typedef struct {
     int x;
     int y;
@@ -47,6 +52,7 @@ typedef struct {
     int enable;
     int udp_port;
     int plane_id;
+    DecoderPlaneFormat format;
     VideoViewportCfg viewport;
 } PipCfg;
 
@@ -77,6 +83,7 @@ typedef struct {
     char connector_name[32];
     char config_path[PATH_MAX];
     int plane_id;
+    DecoderPlaneFormat plane_format;
     VideoViewportCfg viewport;
     int strict_plane_selection;
     int use_udev;
@@ -142,6 +149,8 @@ int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out);
 const char *cfg_custom_sink_mode_name(CustomSinkMode mode);
 int cfg_parse_record_mode(const char *value, RecordMode *mode_out);
 const char *cfg_record_mode_name(RecordMode mode);
+int cfg_parse_decoder_plane_format(const char *value, DecoderPlaneFormat *format_out);
+const char *cfg_decoder_plane_format_name(DecoderPlaneFormat format);
 int cfg_parse_host_and_port(const char *value, char *host_out, size_t host_len, int *port_out);
 int cfg_set_drm_mode_from_string(const char *value, AppCfg *cfg);
 

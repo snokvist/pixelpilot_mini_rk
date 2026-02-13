@@ -34,7 +34,7 @@ By contrast, the current code uses `drmModeAddFB2(..., flags = 0)` with linear d
    - `pip.udp-port` (int)
    - `pip.video-plane-id` (int, default `96`)
    - `pip.x`, `pip.y`, `pip.width`, `pip.height`
-   - optional `pip.format` (`auto|nv12|yuv420_8bit`)
+   - optional `pip.format` (`nv12|yuv420_8bit`)
 
 3. **Refactor video decoder plane selection to be format-aware**
    - replace NV12-only probes with reusable helpers:
@@ -61,6 +61,13 @@ Usually **not** as a software conversion step in this architecture.
 - If PiP must use plane 96 in `YUV420_8BIT`, this is primarily a **buffer layout/modifier compatibility** problem (AFBC), not a CPU colorspace-conversion problem.
 
 If hardware/driver constraints force format conversion, then an explicit conversion stage (RGA/GStreamer) may be needed, but that should be a fallback due to extra latency/CPU/GPU cost.
+
+
+## Current implementation status
+
+- PiP now supports strict requested-plane selection so it cannot silently steal the main NV12 plane.
+- PiP format configuration plumbing is in place (`nv12`/`yuv420_8bit`).
+- `yuv420_8bit` currently fails fast with an explicit message because AFBC/modifier-aware framebuffer import is not implemented yet.
 
 ## Practical rollout plan
 

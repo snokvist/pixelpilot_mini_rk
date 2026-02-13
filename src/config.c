@@ -24,6 +24,7 @@ static void usage(const char *prog) {
             "  --pip                        (enable PiP stream)\n"
             "  --pip-udp-port N            (PiP listen port; default: 5601)\n"
             "  --pip-plane-id N            (PiP video plane; default: 96)\n"
+            "  --pip-format FORMAT         (PiP format: nv12|yuv420_8bit; default: yuv420_8bit)\n"
             "  --pip-size WxH              (PiP destination size, e.g. 640x480)\n"
             "  --pip-pos X,Y               (PiP destination top-left position)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
@@ -96,6 +97,18 @@ static const RecordModeAlias kRecordModeAliases[] = {
     {"fragmentation", RECORD_MODE_FRAGMENTED},
 };
 
+typedef struct {
+    const char *name;
+    DecoderPlaneFormat format;
+} DecoderPlaneFormatAlias;
+
+static const DecoderPlaneFormatAlias kDecoderPlaneFormatAliases[] = {
+    {"nv12", DECODER_PLANE_FORMAT_NV12},
+    {"yuv420_8bit", DECODER_PLANE_FORMAT_YUV420_8BIT},
+    {"yuv420-8bit", DECODER_PLANE_FORMAT_YUV420_8BIT},
+    {"yuv420", DECODER_PLANE_FORMAT_YUV420_8BIT},
+};
+
 int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out) {
     if (value == NULL || mode_out == NULL) {
         return -1;
@@ -146,6 +159,30 @@ const char *cfg_record_mode_name(RecordMode mode) {
     }
 }
 
+int cfg_parse_decoder_plane_format(const char *value, DecoderPlaneFormat *format_out) {
+    if (value == NULL || format_out == NULL) {
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(kDecoderPlaneFormatAliases) / sizeof(kDecoderPlaneFormatAliases[0]); ++i) {
+        if (strcasecmp(value, kDecoderPlaneFormatAliases[i].name) == 0) {
+            *format_out = kDecoderPlaneFormatAliases[i].format;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *cfg_decoder_plane_format_name(DecoderPlaneFormat format) {
+    switch (format) {
+    case DECODER_PLANE_FORMAT_NV12:
+        return "nv12";
+    case DECODER_PLANE_FORMAT_YUV420_8BIT:
+        return "yuv420_8bit";
+    default:
+        return "unknown";
+    }
+}
+
 int cfg_set_drm_mode_from_string(const char *value, AppCfg *cfg) {
     if (cfg == NULL) {
         return -1;
@@ -184,6 +221,7 @@ void cfg_defaults(AppCfg *c) {
     memset(c, 0, sizeof(*c));
     strcpy(c->card_path, "/dev/dri/card0");
     c->plane_id = 76;
+    c->plane_format = DECODER_PLANE_FORMAT_NV12;
     c->viewport.x = 0;
     c->viewport.y = 0;
     c->viewport.width = 0;
@@ -257,6 +295,7 @@ void cfg_defaults(AppCfg *c) {
     c->pip.enable = 0;
     c->pip.udp_port = 5601;
     c->pip.plane_id = 96;
+    c->pip.format = DECODER_PLANE_FORMAT_YUV420_8BIT;
     c->pip.viewport.x = 0;
     c->pip.viewport.y = 0;
     c->pip.viewport.width = 640;
@@ -482,6 +521,14 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--pip-plane-id") && i + 1 < argc) {
             cfg->pip.enable = 1;
             cfg->pip.plane_id = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--pip-format") && i + 1 < argc) {
+            DecoderPlaneFormat format;
+            if (cfg_parse_decoder_plane_format(argv[++i], &format) != 0) {
+                LOGE("--pip-format requires one of: nv12, yuv420_8bit");
+                return -1;
+            }
+            cfg->pip.enable = 1;
+            cfg->pip.format = format;
         } else if (!strcmp(argv[i], "--pip-size") && i + 1 < argc) {
             int w = 0;
             int h = 0;

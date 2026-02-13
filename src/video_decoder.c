@@ -180,6 +180,24 @@ static gboolean plane_has_linear_nv12_from_blob(int fd, uint32_t plane_id, gbool
     return decided;
 }
 
+static gboolean plane_lists_format(int fd, uint32_t plane_id, uint32_t fourcc) {
+    drmModePlane *plane = drmModeGetPlane(fd, plane_id);
+    if (plane == NULL) {
+        return FALSE;
+    }
+
+    gboolean found = FALSE;
+    for (uint32_t i = 0; i < plane->count_formats; ++i) {
+        if (plane->formats[i] == fourcc) {
+            found = TRUE;
+            break;
+        }
+    }
+
+    drmModeFreePlane(plane);
+    return found;
+}
+
 static gboolean plane_accepts_linear_nv12_atomic(int fd, uint32_t plane_id, uint32_t crtc_id) {
     uint32_t prop_fb_id = 0;
     uint32_t prop_crtc_id = 0;
@@ -1491,6 +1509,17 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->frame_ver_stride = 0;
     vd->packet_buf_size = 0;
     vd->packet_buf = NULL;
+
+    if (cfg->plane_format == DECODER_PLANE_FORMAT_YUV420_8BIT) {
+        gboolean plane_lists_yuv = plane_lists_format(drm_fd, (uint32_t)cfg->plane_id, DRM_FORMAT_YUV420_8BIT);
+        if (plane_lists_yuv) {
+            LOGE("Video decoder: requested format yuv420_8bit on plane %u requires AFBC/modifier-aware framebuffer setup, which is not implemented yet",
+                 (uint32_t)cfg->plane_id);
+        } else {
+            LOGE("Video decoder: requested plane %u does not advertise yuv420_8bit format", (uint32_t)cfg->plane_id);
+        }
+        return -2;
+    }
 
     uint32_t chosen_plane = 0;
     if (!video_decoder_select_plane(drm_fd,

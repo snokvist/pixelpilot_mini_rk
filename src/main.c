@@ -303,6 +303,7 @@ static void configure_pip_cfg(const AppCfg *base_cfg, AppCfg *pip_cfg) {
     *pip_cfg = *base_cfg;
     pip_cfg->udp_port = base_cfg->pip.udp_port;
     pip_cfg->plane_id = base_cfg->pip.plane_id;
+    pip_cfg->plane_format = base_cfg->pip.format;
     pip_cfg->viewport = base_cfg->pip.viewport;
     pip_cfg->strict_plane_selection = 1;
     pip_cfg->no_audio = 1;
@@ -312,7 +313,7 @@ static void configure_pip_cfg(const AppCfg *base_cfg, AppCfg *pip_cfg) {
     pip_cfg->osd_external.enable = 0;
 }
 
-static void start_pip_pipeline(const AppCfg *cfg,
+static void start_pip_pipeline(AppCfg *cfg,
                                const ModesetResult *ms,
                                int fd,
                                PipelineState *pip_ps) {
@@ -325,8 +326,14 @@ static void start_pip_pipeline(const AppCfg *cfg,
 
     AppCfg pip_cfg;
     configure_pip_cfg(cfg, &pip_cfg);
-    if (pipeline_start(&pip_cfg, ms, fd, 1, pip_ps) != 0) {
+    int pip_start_rc = pipeline_start(&pip_cfg, ms, fd, 1, pip_ps);
+    if (pip_start_rc != 0) {
         LOGE("Failed to start PiP pipeline");
+        if (pip_start_rc == -2) {
+            cfg->pip.enable = 0;
+            LOGW("PiP disabled: requested format '%s' is not implemented on this build",
+                 cfg_decoder_plane_format_name(pip_cfg.plane_format));
+        }
         return;
     }
 
