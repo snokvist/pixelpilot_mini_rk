@@ -16,6 +16,8 @@ PKG_GSTCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags gstreamer-1.0 g
 PKG_GSTLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs gstreamer-1.0 gstreamer-video-1.0 gstreamer-app-1.0)
 PKG_MPPCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags rockchip-mpp)
 PKG_MPPLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs rockchip-mpp)
+PKG_PNGCFLAGS := $(shell $(PKG_CONFIG) --silence-errors --cflags libpng)
+PKG_PNGLIBS := $(shell $(PKG_CONFIG) --silence-errors --libs libpng)
 CFLAGS ?= -O2 -Wall
 CFLAGS += -Iinclude -Ithird_party/minimp4
 
@@ -71,6 +73,9 @@ else
 CFLAGS += -I/usr/include/rockchip
 endif
 
+ifneq ($(strip $(PKG_PNGCFLAGS)),)
+CFLAGS += $(PKG_PNGCFLAGS)
+endif
 
 ifneq ($(strip $(PKG_DRMLIBS)),)
 LDFLAGS += $(PKG_DRMLIBS)
@@ -88,6 +93,12 @@ ifneq ($(strip $(PKG_MPPLIBS)),)
 LDFLAGS += $(PKG_MPPLIBS)
 else
 LDFLAGS += -lrockchip_mpp
+endif
+
+ifneq ($(strip $(PKG_PNGLIBS)),)
+LDFLAGS += $(PKG_PNGLIBS)
+else
+LDFLAGS += -lpng
 endif
 
 LDFLAGS += -lpthread -lm -ldl

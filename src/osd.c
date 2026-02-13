@@ -13,6 +13,7 @@
 
 #include <float.h>
 #include <ctype.h>
+#include <png.h>
 
 #if defined(__has_include)
 #if __has_include(<libdrm/drm_fourcc.h>)
@@ -71,6 +72,36 @@ static int clampi(int v, int min_v, int max_v) {
         return max_v;
     }
     return v;
+}
+
+static inline uint32_t osd_blend_premul_argb(uint32_t dst, uint32_t src) {
+    uint32_t sa = (src >> 24) & 0xFFu;
+    if (sa == 0) {
+        return dst;
+    }
+    if (sa == 255) {
+        return src;
+    }
+    uint32_t da = (dst >> 24) & 0xFFu;
+    uint32_t inv = 255u - sa;
+
+    uint32_t sr = (src >> 16) & 0xFFu;
+    uint32_t sg = (src >> 8) & 0xFFu;
+    uint32_t sb = src & 0xFFu;
+    uint32_t dr = (dst >> 16) & 0xFFu;
+    uint32_t dg = (dst >> 8) & 0xFFu;
+    uint32_t db = dst & 0xFFu;
+
+    uint32_t out_a = sa + (da * inv + 127u) / 255u;
+    uint32_t out_r = sr + (dr * inv + 127u) / 255u;
+    uint32_t out_g = sg + (dg * inv + 127u) / 255u;
+    uint32_t out_b = sb + (db * inv + 127u) / 255u;
+
+    if (out_r > 255u) out_r = 255u;
+    if (out_g > 255u) out_g = 255u;
+    if (out_b > 255u) out_b = 255u;
+
+    return (out_a << 24) | (out_r << 16) | (out_g << 8) | out_b;
 }
 
 static void osd_clear(OSD *o, uint32_t argb) {
@@ -576,6 +607,8 @@ static void format_duration_hms(guint64 ns, char *buf, size_t buf_sz) {
 
 static void osd_format_metric_value(const char *metric_key, double value, char *buf, size_t buf_sz);
 static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, double *out_value);
+static void osd_compute_placement(const OSD *o, int rect_w, int rect_h, const OsdPlacement *placement,
+                                  int *out_x, int *out_y);
 
 static const char *osd_pipeline_state_name(const PipelineState *ps) {
     if (!ps) {
@@ -1142,6 +1175,162 @@ static void osd_draw_line(OSD *o, int x0, int y0, int x1, int y1, uint32_t argb)
             }
         }
     }
+}
+
+static int osd_load_png_image(const char *path, OsdImageState *state) {
+    if (!path || !state || path[0] == '\0') {
+        return -1;
+    }
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+        LOGW("OSD: failed to open image asset '%s': %s", path, strerror(errno));
+        return -1;
+    }
+
+    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png) {
+        fclose(fp);
+        return -1;
+    }
+    png_infop info = png_create_info_struct(png);
+    if (!info) {
+        png_destroy_read_struct(&png, NULL, NULL);
+        fclose(fp);
+        return -1;
+    }
+    if (setjmp(png_jmpbuf(png))) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        LOGW("OSD: failed to decode PNG asset '%s'", path);
+        return -1;
+    }
+
+    png_init_io(png, fp);
+    png_read_info(png, info);
+
+    png_uint_32 width = 0;
+    png_uint_32 height = 0;
+    int bit_depth = 0;
+    int color_type = 0;
+    png_get_IHDR(png, info, &width, &height, &bit_depth, &color_type, NULL, NULL, NULL);
+
+    if (width == 0 || height == 0 || width > 4096 || height > 4096) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        LOGW("OSD: invalid PNG dimensions %ux%u for '%s'", (unsigned)width, (unsigned)height, path);
+        return -1;
+    }
+
+    if (bit_depth == 16) png_set_strip_16(png);
+    if (color_type == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png);
+    if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) png_set_expand_gray_1_2_4_to_8(png);
+    if (png_get_valid(png, info, PNG_INFO_tRNS)) png_set_tRNS_to_alpha(png);
+    if (!(color_type & PNG_COLOR_MASK_ALPHA)) png_set_add_alpha(png, 0xFF, PNG_FILLER_AFTER);
+    if (color_type == PNG_COLOR_TYPE_GRAY || color_type == PNG_COLOR_TYPE_GRAY_ALPHA) png_set_gray_to_rgb(png);
+
+    png_read_update_info(png, info);
+    png_size_t rowbytes = png_get_rowbytes(png, info);
+    if (rowbytes < width * 4u) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        return -1;
+    }
+
+    size_t pixel_count = (size_t)width * (size_t)height;
+    if (pixel_count > SIZE_MAX / sizeof(uint32_t)) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        return -1;
+    }
+
+    uint8_t *raw = (uint8_t *)malloc(rowbytes * (size_t)height);
+    uint32_t *argb = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
+    png_bytep *rows = (png_bytep *)malloc(sizeof(png_bytep) * (size_t)height);
+    if (!raw || !argb || !rows) {
+        free(raw);
+        free(argb);
+        free(rows);
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(fp);
+        return -1;
+    }
+
+    for (png_uint_32 y = 0; y < height; ++y) {
+        rows[y] = raw + (size_t)y * rowbytes;
+    }
+    png_read_image(png, rows);
+    png_read_end(png, NULL);
+
+    for (png_uint_32 y = 0; y < height; ++y) {
+        const uint8_t *src = raw + (size_t)y * rowbytes;
+        for (png_uint_32 x = 0; x < width; ++x) {
+            uint8_t r = src[x * 4u + 0u];
+            uint8_t g = src[x * 4u + 1u];
+            uint8_t b = src[x * 4u + 2u];
+            uint8_t a = src[x * 4u + 3u];
+            uint32_t pr = ((uint32_t)r * a + 127u) / 255u;
+            uint32_t pg = ((uint32_t)g * a + 127u) / 255u;
+            uint32_t pb = ((uint32_t)b * a + 127u) / 255u;
+            argb[(size_t)y * width + x] = ((uint32_t)a << 24) | (pr << 16) | (pg << 8) | pb;
+        }
+    }
+
+    free(raw);
+    free(rows);
+    png_destroy_read_struct(&png, &info, NULL);
+    fclose(fp);
+
+    state->pixels = (uint8_t *)argb;
+    state->width = (int)width;
+    state->height = (int)height;
+    state->loaded = 1;
+    LOGI("OSD: loaded image asset '%s' (%dx%d)", path, state->width, state->height);
+    return 0;
+}
+
+static void osd_render_image_element(OSD *o, int idx, const OsdRenderContext *ctx) {
+    (void)ctx;
+    if (!o || idx < 0 || idx >= o->element_count) {
+        return;
+    }
+    const OsdElementConfig *elem_cfg = &o->layout.elements[idx];
+    OsdImageState *state = &o->elements[idx].data.image;
+    OSDRect prev = o->elements[idx].rect;
+
+    if (!state->loaded || !state->pixels || state->width <= 0 || state->height <= 0) {
+        osd_clear_rect_if_changed(o, &prev, NULL);
+        osd_store_rect(o, &o->elements[idx].rect, 0, 0, 0, 0);
+        return;
+    }
+
+    int draw_x = 0;
+    int draw_y = 0;
+    osd_compute_placement(o, state->width, state->height, &elem_cfg->placement, &draw_x, &draw_y);
+    OSDRect next = {draw_x, draw_y, state->width, state->height};
+    osd_clear_rect_if_changed(o, &prev, &next);
+
+    uint32_t *dst = osd_active_map(o);
+    uint32_t *src = (uint32_t *)state->pixels;
+    int pitch = osd_active_pitch_px(o);
+    if (dst && pitch > 0) {
+        for (int y = 0; y < state->height; ++y) {
+            int py = draw_y + y;
+            if (py < 0 || py >= o->h) {
+                continue;
+            }
+            for (int x = 0; x < state->width; ++x) {
+                int px = draw_x + x;
+                if (px < 0 || px >= o->w) {
+                    continue;
+                }
+                uint32_t sp = src[(size_t)y * (size_t)state->width + (size_t)x];
+                dst[(size_t)py * (size_t)pitch + (size_t)px] = osd_blend_premul_argb(dst[(size_t)py * (size_t)pitch + (size_t)px], sp);
+            }
+        }
+        osd_damage_add_rect(o, draw_x, draw_y, state->width, state->height);
+    }
+
+    osd_store_rect(o, &o->elements[idx].rect, draw_x, draw_y, state->width, state->height);
 }
 
 static void osd_draw_rect(OSD *o, int x, int y, int w, int h, uint32_t argb) {
@@ -3339,6 +3528,22 @@ static void osd_commit_touch(int fd, uint32_t crtc_id, OSD *o) {
     drmModeAtomicFree(req);
 }
 
+
+static void osd_release_image_assets(OSD *o) {
+    if (!o) {
+        return;
+    }
+    for (int i = 0; i < o->element_count; ++i) {
+        if (o->elements[i].type == OSD_WIDGET_IMAGE && o->elements[i].data.image.pixels) {
+            free(o->elements[i].data.image.pixels);
+            o->elements[i].data.image.pixels = NULL;
+            o->elements[i].data.image.width = 0;
+            o->elements[i].data.image.height = 0;
+            o->elements[i].data.image.loaded = 0;
+        }
+    }
+}
+
 static void osd_destroy_fb(int fd, OSD *o) {
     destroy_dumb_fb(fd, &o->fb);
     o->fb.map = NULL;
@@ -3433,12 +3638,21 @@ int osd_setup(int fd, const AppCfg *cfg, const ModesetResult *ms, int video_plan
             o->elements[i].data.outline.phase = 0;
             o->elements[i].data.outline.last_active = 0;
             o->elements[i].data.outline.last_thickness = 0;
+        } else if (o->elements[i].type == OSD_WIDGET_IMAGE) {
+            o->elements[i].data.image.pixels = NULL;
+            o->elements[i].data.image.width = 0;
+            o->elements[i].data.image.height = 0;
+            o->elements[i].data.image.loaded = 0;
+            if (osd_load_png_image(o->layout.elements[i].data.image.asset, &o->elements[i].data.image) != 0) {
+                LOGW("OSD: image element '%s' disabled because asset failed to load", o->layout.elements[i].name);
+            }
         }
     }
 
     osd_clear(o, 0x00000000u);
     if (osd_commit_enable(fd, ms->crtc_id, o) != 0) {
         LOGW("OSD: atomic enable failed. Disabling OSD.");
+        osd_release_image_assets(o);
         osd_destroy_fb(fd, o);
         o->enabled = 0;
         return -1;
@@ -3610,6 +3824,10 @@ int osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const P
             osd_render_outline_element(o, i, &ctx);
             updated = 1;
             break;
+        case OSD_WIDGET_IMAGE:
+            osd_render_image_element(o, i, &ctx);
+            updated = 1;
+            break;
         default:
             osd_clear_rect(o, &o->elements[i].rect);
             osd_store_rect(o, &o->elements[i].rect, 0, 0, 0, 0);
@@ -3676,6 +3894,7 @@ void osd_teardown(int fd, OSD *o) {
     if (osd_commit_disable(fd, o) == 0) {
         o->active = 0;
     }
+    osd_release_image_assets(o);
     if (o->scratch) {
         free(o->scratch);
         o->scratch = NULL;

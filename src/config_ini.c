@@ -187,6 +187,12 @@ static void builder_reset_outline(OsdElementConfig *elem) {
     elem->data.outline.pulse_step_ticks = 2;
 }
 
+static void builder_reset_image(OsdElementConfig *elem) {
+    elem->type = OSD_WIDGET_IMAGE;
+    elem->refresh_ms = 0;
+    elem->data.image.asset[0] = '\0';
+}
+
 static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
     if (!out_layout) {
         return -1;
@@ -264,6 +270,11 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
             }
             if (elem->data.outline.pulse_step_ticks <= 0) {
                 elem->data.outline.pulse_step_ticks = 2;
+            }
+        } else if (elem->type == OSD_WIDGET_IMAGE) {
+            if (elem->data.image.asset[0] == '\0') {
+                LOGE("config: osd image element '%s' missing asset path", elem->name);
+                return -1;
             }
         } else {
             LOGE("config: osd element '%s' has unsupported type", elem->name);
@@ -812,6 +823,14 @@ static int parse_osd_element_outline(OsdElementConfig *elem, const char *key, co
     return -1;
 }
 
+static int parse_osd_element_image(OsdElementConfig *elem, const char *key, const char *value) {
+    if (strcasecmp(key, "asset") == 0 || strcasecmp(key, "path") == 0 || strcasecmp(key, "png") == 0) {
+        ini_copy_string(elem->data.image.asset, sizeof(elem->data.image.asset), value);
+        return 0;
+    }
+    return -1;
+}
+
 static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name, const char *key, const char *value) {
     const char *prefix = "osd.element.";
     size_t prefix_len = strlen(prefix);
@@ -843,6 +862,11 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
         }
         if (strcasecmp(value, "outline") == 0) {
             builder_reset_outline(elem);
+            builder->type_set[idx] = 1;
+            return 0;
+        }
+        if (strcasecmp(value, "image") == 0) {
+            builder_reset_image(elem);
             builder->type_set[idx] = 1;
             return 0;
         }
@@ -886,6 +910,9 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
     }
     if (elem->type == OSD_WIDGET_OUTLINE) {
         return parse_osd_element_outline(elem, key, value);
+    }
+    if (elem->type == OSD_WIDGET_IMAGE) {
+        return parse_osd_element_image(elem, key, value);
     }
     return -1;
 }

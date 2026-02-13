@@ -12,7 +12,8 @@ typedef enum {
     OSD_WIDGET_TEXT = 0,
     OSD_WIDGET_LINE,
     OSD_WIDGET_BAR,
-    OSD_WIDGET_OUTLINE
+    OSD_WIDGET_OUTLINE,
+    OSD_WIDGET_IMAGE
 } OsdElementType;
 
 typedef enum {
@@ -106,6 +107,10 @@ typedef struct {
 } OsdOutlineConfig;
 
 typedef struct {
+    char asset[256];
+} OsdImageConfig;
+
+typedef struct {
     OsdElementType type;
     char name[48];
     OsdPlacement placement;
@@ -115,6 +120,7 @@ typedef struct {
         OsdLineConfig line;
         OsdBarConfig bar;
         OsdOutlineConfig outline;
+        OsdImageConfig image;
     } data;
 } OsdElementConfig;
 

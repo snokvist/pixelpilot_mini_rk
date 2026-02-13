@@ -99,6 +99,13 @@ typedef struct {
     int last_thickness;
 } OsdOutlineState;
 
+typedef struct {
+    uint8_t *pixels;
+    int width;
+    int height;
+    int loaded;
+} OsdImageState;
+
 typedef struct OSD {
     int enabled;
     int active;
@@ -148,6 +155,7 @@ typedef struct OSD {
             OsdLineState line;
             OsdBarState bar;
             OsdOutlineState outline;
+            OsdImageState image;
         } data;
     } elements[OSD_MAX_ELEMENTS];
     int element_refresh_ms[OSD_MAX_ELEMENTS];
