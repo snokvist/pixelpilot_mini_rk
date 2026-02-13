@@ -24,7 +24,7 @@ static void usage(const char *prog) {
             "  --pip                        (enable PiP stream)\n"
             "  --pip-udp-port N            (PiP listen port; default: 5601)\n"
             "  --pip-plane-id N            (PiP video plane; default: 96)\n"
-            "  --pip-format FORMAT         (PiP format: nv12|yuv420_8bit; default: yuv420_8bit)\n"
+            "  --pip-format FORMAT         (PiP format: auto|nv12|yuv420_8bit; default: yuv420_8bit)\n"
             "  --pip-size WxH              (PiP destination size, e.g. 640x480)\n"
             "  --pip-pos X,Y               (PiP destination top-left position)\n"
             "  --vid-pt N                   (default: 97 H265)\n"
@@ -103,6 +103,7 @@ typedef struct {
 } DecoderPlaneFormatAlias;
 
 static const DecoderPlaneFormatAlias kDecoderPlaneFormatAliases[] = {
+    {"auto", DECODER_PLANE_FORMAT_AUTO},
     {"nv12", DECODER_PLANE_FORMAT_NV12},
     {"yuv420_8bit", DECODER_PLANE_FORMAT_YUV420_8BIT},
     {"yuv420-8bit", DECODER_PLANE_FORMAT_YUV420_8BIT},
@@ -174,6 +175,8 @@ int cfg_parse_decoder_plane_format(const char *value, DecoderPlaneFormat *format
 
 const char *cfg_decoder_plane_format_name(DecoderPlaneFormat format) {
     switch (format) {
+    case DECODER_PLANE_FORMAT_AUTO:
+        return "auto";
     case DECODER_PLANE_FORMAT_NV12:
         return "nv12";
     case DECODER_PLANE_FORMAT_YUV420_8BIT:
@@ -524,7 +527,7 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--pip-format") && i + 1 < argc) {
             DecoderPlaneFormat format;
             if (cfg_parse_decoder_plane_format(argv[++i], &format) != 0) {
-                LOGE("--pip-format requires one of: nv12, yuv420_8bit");
+                LOGE("--pip-format requires one of: auto, nv12, yuv420_8bit");
                 return -1;
             }
             cfg->pip.enable = 1;

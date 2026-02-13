@@ -37,7 +37,8 @@ typedef struct {
 } VideoCtmCfg;
 
 typedef enum {
-    DECODER_PLANE_FORMAT_NV12 = 0,
+    DECODER_PLANE_FORMAT_AUTO = 0,
+    DECODER_PLANE_FORMAT_NV12,
     DECODER_PLANE_FORMAT_YUV420_8BIT,
 } DecoderPlaneFormat;
 

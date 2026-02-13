@@ -1510,7 +1510,16 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->packet_buf_size = 0;
     vd->packet_buf = NULL;
 
-    if (cfg->plane_format == DECODER_PLANE_FORMAT_YUV420_8BIT) {
+    DecoderPlaneFormat requested_format = cfg->plane_format;
+    if (requested_format == DECODER_PLANE_FORMAT_AUTO) {
+        gboolean plane_lists_yuv = plane_lists_format(drm_fd, (uint32_t)cfg->plane_id, DRM_FORMAT_YUV420_8BIT);
+        requested_format = plane_lists_yuv ? DECODER_PLANE_FORMAT_YUV420_8BIT : DECODER_PLANE_FORMAT_NV12;
+        LOGI("Video decoder: auto-selected requested plane format '%s' for plane %u",
+             cfg_decoder_plane_format_name(requested_format),
+             (uint32_t)cfg->plane_id);
+    }
+
+    if (requested_format == DECODER_PLANE_FORMAT_YUV420_8BIT) {
         gboolean plane_lists_yuv = plane_lists_format(drm_fd, (uint32_t)cfg->plane_id, DRM_FORMAT_YUV420_8BIT);
         if (plane_lists_yuv) {
             LOGE("Video decoder: requested format yuv420_8bit on plane %u requires AFBC/modifier-aware framebuffer setup, which is not implemented yet",

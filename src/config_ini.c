@@ -1207,7 +1207,7 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         if (strcasecmp(key, "format") == 0) {
             DecoderPlaneFormat format;
             if (cfg_parse_decoder_plane_format(value, &format) != 0) {
-                LOGE("config: pip format '%s' is invalid (use nv12 or yuv420_8bit)", value);
+                LOGE("config: pip format '%s' is invalid (use auto, nv12 or yuv420_8bit)", value);
                 return -1;
             }
             cfg->pip.format = format;

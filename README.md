@@ -68,7 +68,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[pip].enable` | `true` enables a second PiP video stream/decoder instance (audio disabled for PiP). |
 | `[pip].udp-port` | UDP port for the PiP stream (default `5601`). |
 | `[pip].video-plane-id` | DRM plane used by PiP (default `96`). PiP uses strict plane selection and will fail to start instead of falling back to the main video plane. |
-| `[pip].format` | PiP plane format target (`nv12` or `yuv420_8bit`; default `yuv420_8bit`). Current code only renders NV12; `yuv420_8bit` is recognized and currently disabled with a clear startup error until AFBC/modifier support lands. |
+| `[pip].format` | PiP plane format target (`auto`, `nv12` or `yuv420_8bit`; default `yuv420_8bit`). Current code only renders NV12; `yuv420_8bit` is recognized and currently disabled with a clear startup error until AFBC/modifier support lands. |
 | `[pip].size` | PiP destination rectangle size in `WIDTHxHEIGHT` format (default `640x480`). |
 | `[pip].x` / `[pip].y` | PiP destination rectangle top-left coordinates in pixels. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
