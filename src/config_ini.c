@@ -4,6 +4,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -300,6 +301,20 @@ static int parse_bool(const char *value, int *out) {
         return 0;
     }
     return -1;
+}
+
+static int parse_int_strict(const char *value, int *out) {
+    if (!value || !out) {
+        return -1;
+    }
+    errno = 0;
+    char *end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (end == value || !end || *end != '\0' || errno != 0 || parsed < INT_MIN || parsed > INT_MAX) {
+        return -1;
+    }
+    *out = (int)parsed;
+    return 0;
 }
 
 static int parse_double(const char *value, double *out) {
@@ -773,7 +788,12 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
         return -1;
     }
     if (strcasecmp(key, "id") == 0) {
-        elem->id = atoi(value);
+        int parsed_id = 0;
+        if (parse_int_strict(value, &parsed_id) != 0) {
+            LOGE("config: osd element '%s' has invalid id '%s'", name, value);
+            return -1;
+        }
+        elem->id = parsed_id;
         return 0;
     }
     if (strcasecmp(key, "enabled") == 0) {
