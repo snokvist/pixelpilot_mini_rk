@@ -100,6 +100,8 @@ typedef struct {
 typedef struct {
     OsdElementType type;
     char name[48];
+    int id;
+    int enabled;
     OsdPlacement placement;
     int refresh_ms; /* Optional per-element refresh override; 0 inherits global OSD refresh. */
     union {

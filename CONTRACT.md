@@ -17,6 +17,7 @@ The payload is a JSON object. All fields are optional, but at least one should b
   "texts": ["string1", "string2", ...],
   "values": [1.23, 4.56, ...],
   "zoom": "200,200,50,50",
+  "asset_updates": [{"id": 0, "enabled": false}],
   "ttl_ms": 1000
 }
 ```
@@ -29,6 +30,7 @@ The payload is a JSON object. All fields are optional, but at least one should b
 | `values` | Array of Numbers | Updates the value slots. Max 8 items. Values are mapped to slots 0-7 by index. |
 | `zoom` | String | Sets the zoom level and center point. See "Zoom Control" below. |
 | `ttl_ms` | Integer | Time-to-live in milliseconds. If present, the updated slots will expire and clear after this duration. If omitted, updates are persistent until overwritten or cleared. |
+| `asset_updates` | Array of Objects | Optional compatibility field matching `waybeam_osd`. Each object supports `id` (0-7) and `enabled` (boolean) to show/hide a configured OSD element by configured asset `id`. |
 
 ## Slot Mapping
 
@@ -81,5 +83,25 @@ This sets 2x zoom centered on the middle of the screen.
 {
   "texts": [],
   "values": []
+}
+```
+
+## Asset Visibility Control (waybeam_osd compatible)
+
+To match `waybeam_osd` and reuse `osd_send.c`, send `asset_updates` entries with `id` and `enabled`.
+
+* `id` maps to the configured OSD element `id` (0-7) set in `[osd.element.*].id`.
+* `enabled: false` hides the element immediately.
+* `enabled: true` shows the element again.
+* Unknown fields in each object are ignored.
+* If `ttl_ms` is supplied, the visibility override expires automatically after the TTL.
+
+**Example:**
+```json
+{
+  "asset_updates": [
+    {"id": 3, "enabled": false},
+    {"id": 4, "enabled": true}
+  ]
 }
 ```

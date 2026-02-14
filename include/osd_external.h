@@ -4,6 +4,8 @@
 #include <pthread.h>
 #include <stdint.h>
 
+#include "osd_layout.h"
+
 #ifndef OSD_EXTERNAL_BIND_ADDR_LEN
 #define OSD_EXTERNAL_BIND_ADDR_LEN 64
 #endif
@@ -15,6 +17,7 @@
 #define OSD_EXTERNAL_MAX_TEXT 8
 #define OSD_EXTERNAL_TEXT_LEN 64
 #define OSD_EXTERNAL_MAX_VALUES 8
+#define OSD_EXTERNAL_MAX_ASSETS OSD_MAX_ELEMENTS
 
 typedef enum {
     OSD_EXTERNAL_STATUS_DISABLED = 0,
@@ -29,6 +32,8 @@ typedef struct {
     uint64_t expiry_ns;
     uint64_t zoom_expiry_ns;
     char zoom_command[OSD_EXTERNAL_TEXT_LEN];
+    uint8_t asset_enabled[OSD_EXTERNAL_MAX_ASSETS];
+    uint8_t asset_active_mask;
     OsdExternalStatus status;
 } OsdExternalFeedSnapshot;
 
@@ -51,6 +56,9 @@ typedef struct {
     OsdExternalFeedSnapshot snapshot;
     uint64_t expiry_ns;
     uint64_t zoom_expiry_ns;
+    uint8_t asset_active_mask;
+    uint8_t asset_enabled[OSD_EXTERNAL_MAX_ASSETS];
+    uint64_t asset_expiry_ns[OSD_EXTERNAL_MAX_ASSETS];
     uint64_t last_error_log_ns;
     OsdExternalSlotState slots[OSD_EXTERNAL_MAX_TEXT];
 } OsdExternalBridge;

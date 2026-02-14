@@ -61,18 +61,22 @@ typedef struct {
     int order_overridden;
     char order[OSD_MAX_ELEMENTS][48];
     int order_count;
+    int seeded_defaults;
+    int has_custom_elements;
 } OsdLayoutBuilder;
 
 static void builder_init(OsdLayoutBuilder *b, const OsdLayout *defaults) {
     memset(b, 0, sizeof(*b));
     if (defaults) {
         b->layout = *defaults;
+        b->seeded_defaults = 1;
         for (int i = 0; i < b->layout.element_count && i < OSD_MAX_ELEMENTS; ++i) {
             b->type_set[i] = 1;
             b->layout.elements[i].refresh_ms = 0;
         }
     } else {
         osd_layout_defaults(&b->layout);
+        b->seeded_defaults = 1;
         for (int i = 0; i < b->layout.element_count; ++i) {
             b->type_set[i] = 1;
             b->layout.elements[i].refresh_ms = 0;
@@ -93,6 +97,11 @@ static OsdElementConfig *builder_find(OsdLayoutBuilder *b, const char *name, int
 }
 
 static OsdElementConfig *builder_ensure(OsdLayoutBuilder *b, const char *name, int *index_out) {
+    if (b->seeded_defaults && !b->has_custom_elements) {
+        memset(&b->layout, 0, sizeof(b->layout));
+        memset(b->type_set, 0, sizeof(b->type_set));
+        b->seeded_defaults = 0;
+    }
     OsdElementConfig *elem = builder_find(b, name, index_out);
     if (elem) {
         return elem;
@@ -104,6 +113,8 @@ static OsdElementConfig *builder_ensure(OsdLayoutBuilder *b, const char *name, i
     elem = &b->layout.elements[idx];
     memset(elem, 0, sizeof(*elem));
     ini_copy_string(elem->name, sizeof(elem->name), name);
+    elem->id = -1;
+    elem->enabled = 1;
     elem->placement.anchor = OSD_POS_TOP_LEFT;
     elem->placement.offset_x = 0;
     elem->placement.offset_y = 0;
@@ -213,8 +224,18 @@ static int builder_finalize(OsdLayoutBuilder *b, OsdLayout *out_layout) {
         }
         *out_layout = b->layout;
     }
+    int used_ids[OSD_MAX_ELEMENTS] = {0};
     for (int i = 0; i < out_layout->element_count; ++i) {
         OsdElementConfig *elem = &out_layout->elements[i];
+        if (elem->id < 0 || elem->id >= OSD_MAX_ELEMENTS) {
+            LOGE("config: osd element '%s' must set id between 0 and %d", elem->name, OSD_MAX_ELEMENTS - 1);
+            return -1;
+        }
+        if (used_ids[elem->id]) {
+            LOGE("config: duplicate osd element id %d ('%s')", elem->id, elem->name);
+            return -1;
+        }
+        used_ids[elem->id] = 1;
         if (elem->type == OSD_WIDGET_TEXT) {
             if (elem->data.text.padding <= 0) {
                 elem->data.text.padding = 6;
@@ -726,6 +747,7 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
         LOGE("config: too many osd elements; increase OSD_MAX_ELEMENTS");
         return -1;
     }
+    builder->has_custom_elements = 1;
     if (strcasecmp(key, "type") == 0) {
         if (strcasecmp(value, "text") == 0) {
             builder_reset_text(elem);
@@ -749,6 +771,18 @@ static int parse_osd_element(OsdLayoutBuilder *builder, const char *section_name
         }
         LOGE("config: unknown osd element type '%s' for '%s'", value, name);
         return -1;
+    }
+    if (strcasecmp(key, "id") == 0) {
+        elem->id = atoi(value);
+        return 0;
+    }
+    if (strcasecmp(key, "enabled") == 0) {
+        int v = 0;
+        if (parse_bool(value, &v) != 0) {
+            return -1;
+        }
+        elem->enabled = v;
+        return 0;
     }
     if (strcasecmp(key, "anchor") == 0) {
         OSDWidgetPosition pos;
