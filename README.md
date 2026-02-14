@@ -103,6 +103,14 @@ The application supports an external OSD control feed that allows third-party to
 
 Enable it with `--osd-external` (or `[osd.external] enable = true`). See [CONTRACT.md](CONTRACT.md) for the full protocol specification and payload examples.
 
+For live/manual verification of `asset_updates` visibility handling, run:
+
+```sh
+python3 tests/test_udp_osd_controls.py --host 127.0.0.1 --port 5005 --asset-id 0 --cooldown 1.0
+```
+
+The harness sends disable, enable, and disable-with-TTL payloads with a 1s cooldown and prints the expected on-screen result for each step.
+
 ## CPU affinity control
 
 Use `--cpu-list` to provide a comma-separated list of CPU IDs that the process and its busy worker threads should run on. The main process mask is restricted to the specified CPUs and the UDP receiver and GStreamer bus threads are pinned in a round-robin fashion to spread the work across cores.
