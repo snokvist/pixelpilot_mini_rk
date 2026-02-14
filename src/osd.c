@@ -2682,6 +2682,52 @@ static void osd_bar_draw_footer(OSD *o, int idx, const char **lines, int line_co
     osd_store_rect(o, &state->footer_rect, x, y, box_w, box_h);
 }
 
+static void osd_clear_element_artifacts(OSD *o, int idx, OsdElementType type) {
+    if (!o || idx < 0 || idx >= o->element_count) {
+        return;
+    }
+
+    osd_clear_rect(o, &o->elements[idx].rect);
+    osd_store_rect(o, &o->elements[idx].rect, 0, 0, 0, 0);
+
+    if (type == OSD_WIDGET_LINE) {
+        OsdLineState *state = &o->elements[idx].data.line;
+        osd_clear_rect(o, &state->plot_rect);
+        osd_clear_rect(o, &state->header_rect);
+        osd_clear_rect(o, &state->label_rect);
+        osd_clear_rect(o, &state->footer_rect);
+        osd_store_rect(o, &state->plot_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->header_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
+    } else if (type == OSD_WIDGET_BAR) {
+        OsdBarState *state = &o->elements[idx].data.bar;
+        osd_clear_rect(o, &state->plot_rect);
+        osd_clear_rect(o, &state->header_rect);
+        osd_clear_rect(o, &state->label_rect);
+        osd_clear_rect(o, &state->footer_rect);
+        osd_store_rect(o, &state->plot_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->header_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->label_rect, 0, 0, 0, 0);
+        osd_store_rect(o, &state->footer_rect, 0, 0, 0, 0);
+    }
+}
+
+static int osd_external_asset_visible(const OsdExternalFeedSnapshot *ext, const OsdElementConfig *elem_cfg) {
+    if (!elem_cfg) {
+        return 1;
+    }
+    int visible = elem_cfg->enabled ? 1 : 0;
+    int id = elem_cfg->id;
+    if (!ext || id < 0 || id >= OSD_EXTERNAL_MAX_ASSETS) {
+        return visible;
+    }
+    if (!(ext->asset_active_mask & (1u << id))) {
+        return visible;
+    }
+    return ext->asset_enabled[id] ? 1 : 0;
+}
+
 static void osd_render_text_element(OSD *o, int idx, const OsdRenderContext *ctx) {
     OsdElementConfig *cfg = &o->layout.elements[idx];
     OsdTextConfig *text_cfg = &cfg->data.text;
@@ -3593,6 +3639,12 @@ int osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const P
         }
         OsdElementType type = o->layout.elements[i].type;
         o->elements[i].type = type;
+        if (!osd_external_asset_visible(ext, &o->layout.elements[i])) {
+            osd_clear_element_artifacts(o, i, type);
+            updated = 1;
+            o->element_last_refresh[i] = *now;
+            continue;
+        }
         switch (type) {
         case OSD_WIDGET_TEXT:
             osd_render_text_element(o, i, &ctx);
@@ -3611,8 +3663,7 @@ int osd_update_stats(int fd, const AppCfg *cfg, const ModesetResult *ms, const P
             updated = 1;
             break;
         default:
-            osd_clear_rect(o, &o->elements[i].rect);
-            osd_store_rect(o, &o->elements[i].rect, 0, 0, 0, 0);
+            osd_clear_element_artifacts(o, i, type);
             updated = 1;
             break;
         }

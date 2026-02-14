@@ -65,9 +65,18 @@ static void osd_external_update_expiry_locked(OsdExternalBridge *bridge) {
             next_expiry = bridge->zoom_expiry_ns;
         }
     }
+    for (size_t i = 0; i < OSD_EXTERNAL_MAX_ASSETS; ++i) {
+        if ((bridge->asset_active_mask & (1u << i)) && bridge->asset_expiry_ns[i] > 0) {
+            if (next_expiry == 0 || bridge->asset_expiry_ns[i] < next_expiry) {
+                next_expiry = bridge->asset_expiry_ns[i];
+            }
+        }
+    }
     bridge->expiry_ns = next_expiry;
     bridge->snapshot.expiry_ns = next_expiry;
     bridge->snapshot.zoom_expiry_ns = bridge->zoom_expiry_ns;
+    bridge->snapshot.asset_active_mask = bridge->asset_active_mask;
+    memcpy(bridge->snapshot.asset_enabled, bridge->asset_enabled, sizeof(bridge->snapshot.asset_enabled));
 }
 
 static void osd_external_reset_locked(OsdExternalBridge *bridge) {
@@ -79,10 +88,15 @@ static void osd_external_reset_locked(OsdExternalBridge *bridge) {
         bridge->snapshot.value[i] = 0.0;
     }
     bridge->snapshot.zoom_command[0] = '\0';
+    memset(bridge->snapshot.asset_enabled, 0, sizeof(bridge->snapshot.asset_enabled));
+    bridge->snapshot.asset_active_mask = 0;
     bridge->snapshot.zoom_expiry_ns = 0;
     bridge->snapshot.last_update_ns = 0;
     bridge->snapshot.expiry_ns = 0;
     bridge->zoom_expiry_ns = 0;
+    bridge->asset_active_mask = 0;
+    memset(bridge->asset_enabled, 0, sizeof(bridge->asset_enabled));
+    memset(bridge->asset_expiry_ns, 0, sizeof(bridge->asset_expiry_ns));
     bridge->expiry_ns = 0;
     memset(bridge->slots, 0, sizeof(bridge->slots));
 }
@@ -125,6 +139,14 @@ static void osd_external_expire_locked(OsdExternalBridge *bridge, uint64_t now_n
         bridge->zoom_expiry_ns = 0;
         changed = 1;
     }
+    for (size_t i = 0; i < OSD_EXTERNAL_MAX_ASSETS; ++i) {
+        if ((bridge->asset_active_mask & (1u << i)) && bridge->asset_expiry_ns[i] > 0 && now_ns >= bridge->asset_expiry_ns[i]) {
+            bridge->asset_active_mask &= (uint8_t)~(1u << i);
+            bridge->asset_enabled[i] = 0;
+            bridge->asset_expiry_ns[i] = 0;
+            changed = 1;
+        }
+    }
     osd_external_update_expiry_locked(bridge);
     if (changed) {
         bridge->snapshot.last_update_ns = now_ns;
@@ -156,6 +178,9 @@ typedef struct {
     uint64_t ttl_ms;
     char zoom_command[OSD_EXTERNAL_TEXT_LEN];
     int has_zoom;
+    int has_asset_updates;
+    uint8_t asset_mask;
+    uint8_t asset_enabled_mask;
 } OsdExternalMessage;
 
 static const char *skip_ws(const char *p) {
@@ -295,6 +320,21 @@ static const char *parse_number_array(const char *p, OsdExternalMessage *msg) {
     return p + 1;
 }
 
+static const char *parse_bool(const char *p, int *out_value) {
+    if (!p || !out_value) {
+        return NULL;
+    }
+    if (strncmp(p, "true", 4) == 0 && is_value_terminator((unsigned char)p[4])) {
+        *out_value = 1;
+        return p + 4;
+    }
+    if (strncmp(p, "false", 5) == 0 && is_value_terminator((unsigned char)p[5])) {
+        *out_value = 0;
+        return p + 5;
+    }
+    return NULL;
+}
+
 static const char *skip_json_value(const char *p) {
     if (!p) {
         return NULL;
@@ -380,6 +420,117 @@ static const char *skip_json_value(const char *p) {
 }
 
 
+static const char *parse_asset_update_object(const char *p, OsdExternalMessage *msg) {
+    if (!p || !msg || *p != '{') {
+        return NULL;
+    }
+    ++p;
+    int has_id = 0;
+    int id = -1;
+    int has_enabled = 0;
+    int enabled = 0;
+    while (*p) {
+        p = skip_ws(p);
+        if (*p == '}') {
+            ++p;
+            break;
+        }
+        if (*p != '"') {
+            return NULL;
+        }
+        char key[32];
+        const char *next = parse_string(p, key, sizeof(key));
+        if (!next) {
+            return NULL;
+        }
+        p = skip_ws(next);
+        if (*p != ':') {
+            return NULL;
+        }
+        ++p;
+        p = skip_ws(p);
+        if (strcmp(key, "id") == 0) {
+            char *end = NULL;
+            long parsed = strtol(p, &end, 10);
+            if (end == p) {
+                return NULL;
+            }
+            has_id = 1;
+            id = (int)parsed;
+            p = end;
+        } else if (strcmp(key, "enabled") == 0) {
+            int parsed_enabled = 0;
+            const char *after_bool = parse_bool(p, &parsed_enabled);
+            if (!after_bool) {
+                return NULL;
+            }
+            has_enabled = 1;
+            enabled = parsed_enabled;
+            p = after_bool;
+        } else {
+            const char *after = skip_json_value(p);
+            if (!after) {
+                return NULL;
+            }
+            p = after;
+        }
+        p = skip_ws(p);
+        if (*p == ',') {
+            ++p;
+            continue;
+        }
+        if (*p == '}') {
+            ++p;
+            break;
+        }
+        return NULL;
+    }
+    if (!has_id || !has_enabled) {
+        return p;
+    }
+    if (id < 0 || id >= OSD_EXTERNAL_MAX_ASSETS) {
+        return p;
+    }
+    msg->asset_mask |= (uint8_t)(1u << id);
+    if (enabled) {
+        msg->asset_enabled_mask |= (uint8_t)(1u << id);
+    } else {
+        msg->asset_enabled_mask &= (uint8_t)~(1u << id);
+    }
+    return p;
+}
+
+static const char *parse_asset_updates_array(const char *p, OsdExternalMessage *msg) {
+    if (!p || !msg || *p != '[') {
+        return NULL;
+    }
+    ++p;
+    p = skip_ws(p);
+    if (*p == ']') {
+        return p + 1;
+    }
+    while (*p) {
+        p = skip_ws(p);
+        if (*p != '{') {
+            return NULL;
+        }
+        p = parse_asset_update_object(p, msg);
+        if (!p) {
+            return NULL;
+        }
+        p = skip_ws(p);
+        if (*p == ',') {
+            ++p;
+            continue;
+        }
+        if (*p == ']') {
+            return p + 1;
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
 static int parse_message(const char *payload, OsdExternalMessage *msg) {
     if (!payload || !msg) {
         return -1;
@@ -442,6 +593,12 @@ static int parse_message(const char *payload, OsdExternalMessage *msg) {
             }
             snprintf(msg->zoom_command, sizeof(msg->zoom_command), "%s", tmp);
             p = next;
+        } else if (strcmp(key, "asset_updates") == 0) {
+            msg->has_asset_updates = 1;
+            p = parse_asset_updates_array(p, msg);
+            if (!p) {
+                return -1;
+            }
         } else {
             // Skip unknown value (best effort: handle nested objects/arrays by counting braces)
             const char *after = skip_json_value(p);
@@ -623,6 +780,29 @@ static void apply_message(OsdExternalBridge *bridge, const OsdExternalMessage *m
                 bridge->zoom_expiry_ns = 0;
             } else {
                 bridge->zoom_expiry_ns = 0;
+            }
+        }
+    }
+
+    if (msg->has_asset_updates) {
+        for (size_t i = 0; i < OSD_EXTERNAL_MAX_ASSETS; ++i) {
+            if (!(msg->asset_mask & (1u << i))) {
+                continue;
+            }
+            int enabled = (msg->asset_enabled_mask & (1u << i)) != 0;
+            if (!(bridge->asset_active_mask & (1u << i)) || bridge->asset_enabled[i] != (uint8_t)enabled) {
+                changed = 1;
+            }
+            bridge->asset_active_mask |= (uint8_t)(1u << i);
+            bridge->asset_enabled[i] = (uint8_t)enabled;
+            if (has_ttl_field) {
+                if (ttl_ns > 0 && ttl_ns <= UINT64_MAX - now_ns) {
+                    bridge->asset_expiry_ns[i] = now_ns + ttl_ns;
+                } else {
+                    bridge->asset_expiry_ns[i] = 0;
+                }
+            } else {
+                bridge->asset_expiry_ns[i] = 0;
             }
         }
     }

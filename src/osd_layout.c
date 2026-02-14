@@ -42,6 +42,8 @@ void osd_layout_defaults(OsdLayout *layout) {
 
     OsdElementConfig *text = &layout->elements[0];
     text->type = OSD_WIDGET_TEXT;
+    text->id = 0;
+    text->enabled = 1;
     strncpy(text->name, "stats", sizeof(text->name) - 1);
     placement_defaults(&text->placement, OSD_POS_TOP_LEFT);
     text_defaults(&text->data.text);
@@ -63,6 +65,8 @@ void osd_layout_defaults(OsdLayout *layout) {
 
     OsdElementConfig *plot = &layout->elements[1];
     plot->type = OSD_WIDGET_LINE;
+    plot->id = 1;
+    plot->enabled = 1;
     strncpy(plot->name, "jitter", sizeof(plot->name) - 1);
     placement_defaults(&plot->placement, OSD_POS_BOTTOM_LEFT);
     line_defaults(&plot->data.line);

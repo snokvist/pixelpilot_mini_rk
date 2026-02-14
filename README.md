@@ -85,8 +85,10 @@ to the defaults listed in `src/config.c` when omitted.
 | `[osd].enable` | Enable the OSD overlay plane. |
 | `[osd].refresh-ms` | Interval between OSD refreshes. |
 | `[osd].plane-id` | Optional override for the OSD plane (mirrors `[drm].osd-plane-id`). |
-| `[osd].elements` | Comma-separated list describing the render order of `[osd.element.NAME]` blocks. |
+| `[osd].elements` | Optional legacy render-order override for `[osd.element.NAME]` blocks. Usually unnecessary when each element has explicit `id`/`enabled`. |
 | `[osd.element.NAME].type` | Widget style (`text`, `line`, `bar`, or `image`). Each type unlocks additional keys listed in the sample file. |
+| `[osd.element.NAME].id` | Required asset id (0-7) used by external `asset_updates` visibility commands. IDs must be unique. |
+| `[osd.element.NAME].enabled` | Initial visibility (`true`/`false`) for the element before external overrides. |
 | `[osd.element.NAME].anchor` / `offset` / `size` / color keys | Control placement and styling for OSD widgets. See inline comments in the sample file for full semantics. |
 | `[osd.element.NAME].line` | For text widgets, each `line =` entry appends a formatted row supporting `{token}` placeholders. |
 | `[osd.element.NAME].metric` | For line/bar widgets, selects the metric token (e.g. `udp.bitrate.latest_mbps`) sampled each refresh. |
@@ -94,12 +96,20 @@ to the defaults listed in `src/config.c` when omitted.
 
 ## External OSD Control
 
-The application supports an external OSD control feed that allows third-party tools to push text, numeric values, and zoom commands to the renderer over UDP.
+The application supports an external OSD control feed that allows third-party tools to push text, numeric values, zoom commands, and `waybeam_osd`-style `asset_updates` visibility toggles over UDP.
 
 *   **Default Port:** 5005
 *   **Protocol:** JSON over UDP
 
 Enable it with `--osd-external` (or `[osd.external] enable = true`). See [CONTRACT.md](CONTRACT.md) for the full protocol specification and payload examples.
+
+For live/manual verification of `asset_updates` visibility handling, run:
+
+```sh
+python3 tests/test_udp_osd_controls.py --host 127.0.0.1 --port 5005 --asset-id 0 --cooldown 1.0
+```
+
+The harness sends disable, enable, and disable-with-TTL payloads with a 1s cooldown and prints the expected on-screen result for each step.
 
 ## CPU affinity control
 
