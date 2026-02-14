@@ -40,6 +40,16 @@ def run_test_sequence(host: str, port: int, asset_id: int, cooldown_s: float) ->
                 f"Asset id={asset_id} should disappear immediately, then revert after TTL (~3s)."
             ),
         },
+        {
+            "name": "Enable zoom",
+            "payload": {"zoom": "200,200,50,50"},
+            "expectation": "Video should zoom to 2x centered view.",
+        },
+        {
+            "name": "Disable zoom",
+            "payload": {"zoom": "off"},
+            "expectation": "Video should return to normal (no zoom).",
+        },
     ]
 
     print("UDP OSD control harness")
@@ -66,6 +76,8 @@ def run_test_sequence(host: str, port: int, asset_id: int, cooldown_s: float) ->
     print("  1) asset_updates enable=false")
     print("  2) asset_updates enable=true")
     print("  3) asset_updates enable=false with ttl_ms (auto-expiry)")
+    print("  4) zoom enable (200,200,50,50)")
+    print("  5) zoom disable (off)")
 
 
 def parse_args() -> argparse.Namespace:
