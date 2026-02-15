@@ -28,6 +28,8 @@ class FaultMode(str, Enum):
     FIXED_PACKET_DELAY = "fixed_packet_delay"
     PACKET_JITTER = "packet_jitter"
     BURST_PACKET_LOSS = "burst_packet_loss"
+    BURST_PACKET_DELAY = "burst_packet_delay"
+    BURST_PACKET_JITTER = "burst_packet_jitter"
     DROP_EVERY_N_FRAMES = "drop_every_n_frames"
     DELAY_WHOLE_FRAMES = "delay_whole_frames"
 
@@ -39,6 +41,8 @@ MODE_LIST: List[FaultMode] = [
     FaultMode.FIXED_PACKET_DELAY,
     FaultMode.PACKET_JITTER,
     FaultMode.BURST_PACKET_LOSS,
+    FaultMode.BURST_PACKET_DELAY,
+    FaultMode.BURST_PACKET_JITTER,
     FaultMode.DROP_EVERY_N_FRAMES,
     FaultMode.DELAY_WHOLE_FRAMES,
 ]
@@ -76,6 +80,13 @@ class Parameters:
     jitter_delta_ms: int = 20
     burst_period_packets: int = 250
     burst_length_packets: int = 30
+    burst_delay_period_frames: int = 120
+    burst_delay_length_frames: int = 6
+    burst_delay_ms: int = 80
+    burst_jitter_period_frames: int = 150
+    burst_jitter_length_frames: int = 8
+    burst_jitter_min_ms: int = 5
+    burst_jitter_max_ms: int = 120
     drop_every_n_frames: int = 30
     whole_frame_delay_ms: int = 40
 
@@ -90,7 +101,12 @@ class Injector:
         self.stats = Stats()
         self.packet_counter = 0
         self.current_timestamp: Optional[int] = None
+        self.frame_counter = 0
         self.drop_current_frame = False
+        self.current_frame_burst_delay_ms = 0
+        self.current_frame_burst_jitter_ms = 0
+        self.burst_delay_frames_left = 0
+        self.burst_jitter_frames_left = 0
 
         self.queue: List[ScheduledPacket] = []
         self._serial = 0
@@ -152,6 +168,35 @@ class Injector:
         if self.current_timestamp is None or timestamp != self.current_timestamp:
             self.current_timestamp = timestamp
             self.stats.frames_seen += 1
+            self.frame_counter += 1
+
+            self.current_frame_burst_delay_ms = 0
+            self.current_frame_burst_jitter_ms = 0
+
+            if self.mode == FaultMode.BURST_PACKET_DELAY:
+                if self.burst_delay_frames_left > 0:
+                    self.current_frame_burst_delay_ms = self.params.burst_delay_ms
+                    self.burst_delay_frames_left -= 1
+                else:
+                    period = max(1, self.params.burst_delay_period_frames)
+                    length = max(1, self.params.burst_delay_length_frames)
+                    if self.frame_counter % period == 0:
+                        self.current_frame_burst_delay_ms = self.params.burst_delay_ms
+                        self.burst_delay_frames_left = max(0, length - 1)
+
+            if self.mode == FaultMode.BURST_PACKET_JITTER:
+                jitter_min = min(self.params.burst_jitter_min_ms, self.params.burst_jitter_max_ms)
+                jitter_max = max(self.params.burst_jitter_min_ms, self.params.burst_jitter_max_ms)
+                if self.burst_jitter_frames_left > 0:
+                    self.current_frame_burst_jitter_ms = random.randint(jitter_min, jitter_max)
+                    self.burst_jitter_frames_left -= 1
+                else:
+                    period = max(1, self.params.burst_jitter_period_frames)
+                    length = max(1, self.params.burst_jitter_length_frames)
+                    if self.frame_counter % period == 0:
+                        self.current_frame_burst_jitter_ms = random.randint(jitter_min, jitter_max)
+                        self.burst_jitter_frames_left = max(0, length - 1)
+
             if self.mode == FaultMode.DROP_EVERY_N_FRAMES:
                 n = max(1, self.params.drop_every_n_frames)
                 self.drop_current_frame = (self.stats.frames_seen % n) == 0
@@ -207,6 +252,14 @@ class Injector:
             self._send_now(packet)
             return
 
+        if self.mode == FaultMode.BURST_PACKET_DELAY:
+            self._schedule(packet, self.current_frame_burst_delay_ms)
+            return
+
+        if self.mode == FaultMode.BURST_PACKET_JITTER:
+            self._schedule(packet, self.current_frame_burst_jitter_ms)
+            return
+
         if self.mode == FaultMode.DROP_EVERY_N_FRAMES:
             if self.drop_current_frame:
                 self.stats.packets_dropped += 1
@@ -248,7 +301,7 @@ def draw_ui(stdscr: curses.window, injector: Injector) -> None:
     safe_add(0, 0, "RTP Fault Injector (manual visual test)", curses.A_BOLD)
     safe_add(1, 0, f"In: 0.0.0.0:{injector.cfg.in_port}  ->  Out: {injector.cfg.out_host}:{injector.cfg.out_port}")
 
-    safe_add(3, 0, "Modes (use Up/Down or number keys 1-8):")
+    safe_add(3, 0, f"Modes (use Up/Down or number keys 1-{len(MODE_LIST)}):")
     for idx, mode in enumerate(MODE_LIST):
         prefix = ">" if idx == injector.mode_index else " "
         attr = curses.A_REVERSE if idx == injector.mode_index else curses.A_NORMAL
@@ -268,17 +321,71 @@ def draw_ui(stdscr: curses.window, injector: Injector) -> None:
     safe_add(row + 9, 2, f"fixed_delay_ms={p.fixed_delay_ms}")
     safe_add(row + 10, 2, f"jitter_base_delay_ms={p.jitter_base_delay_ms}, jitter_delta_ms={p.jitter_delta_ms}")
     safe_add(row + 11, 2, f"burst_period_packets={p.burst_period_packets}, burst_length_packets={p.burst_length_packets}")
-    safe_add(row + 12, 2, f"drop_every_n_frames={p.drop_every_n_frames}")
-    safe_add(row + 13, 2, f"whole_frame_delay_ms={p.whole_frame_delay_ms}")
+    safe_add(row + 12, 2, f"burst_delay_period_frames={p.burst_delay_period_frames}, burst_delay_length_frames={p.burst_delay_length_frames}, burst_delay_ms={p.burst_delay_ms}")
+    safe_add(row + 13, 2, f"burst_jitter_period_frames={p.burst_jitter_period_frames}, burst_jitter_length_frames={p.burst_jitter_length_frames}, burst_jitter_range=[{p.burst_jitter_min_ms},{p.burst_jitter_max_ms}] ms")
+    safe_add(row + 14, 2, f"drop_every_n_frames={p.drop_every_n_frames}")
+    safe_add(row + 15, 2, f"whole_frame_delay_ms={p.whole_frame_delay_ms}")
 
-    safe_add(row + 15, 0, "Keys: q quit | r reset stats | [ ] random-drop +/-0.5 | -/= delay -/+5ms")
-    safe_add(row + 16, 0, "      ,/. frame-drop N -/+1 | ;/' drop-every-N-packets -/+1")
-    safe_add(row + 17, 0, "Note: dropping full frames can break reference chain until next IDR/CRA")
+    safe_add(row + 17, 0, f"Active mode tuning with +/-: {active_parameter_summary(injector)}")
+    safe_add(row + 18, 0, "Keys: q quit | r reset stats | +/- adjust active mode severity")
+    safe_add(row + 19, 0, "Note: dropping full frames can break reference chain until next IDR/CRA")
 
-    if max_y < 32:
+    if max_y < 36:
         safe_add(max_y - 1, 0, "[Terminal is small: UI truncated, injector still active]", curses.A_DIM)
 
     stdscr.refresh()
+
+
+def active_parameter_summary(injector: Injector) -> str:
+    p = injector.params
+    mode = injector.mode
+    if mode == FaultMode.PASSTHROUGH:
+        return "no-op in passthrough"
+    if mode == FaultMode.DROP_EVERY_N_PACKETS:
+        return f"drop_every_n_packets={p.drop_every_n_packets}"
+    if mode == FaultMode.DROP_RANDOM_PACKETS:
+        return f"random_drop_percent={p.random_drop_percent:.1f}"
+    if mode == FaultMode.FIXED_PACKET_DELAY:
+        return f"fixed_delay_ms={p.fixed_delay_ms}"
+    if mode == FaultMode.PACKET_JITTER:
+        return f"jitter_delta_ms={p.jitter_delta_ms}"
+    if mode == FaultMode.BURST_PACKET_LOSS:
+        return f"burst_length_packets={p.burst_length_packets}"
+    if mode == FaultMode.BURST_PACKET_DELAY:
+        return f"burst_delay_ms={p.burst_delay_ms}"
+    if mode == FaultMode.BURST_PACKET_JITTER:
+        return f"burst_jitter_max_ms={p.burst_jitter_max_ms}"
+    if mode == FaultMode.DROP_EVERY_N_FRAMES:
+        return f"drop_every_n_frames={p.drop_every_n_frames}"
+    if mode == FaultMode.DELAY_WHOLE_FRAMES:
+        return f"whole_frame_delay_ms={p.whole_frame_delay_ms}"
+    return "n/a"
+
+
+def adjust_active_mode(injector: Injector, increase: bool) -> None:
+    p = injector.params
+    direction = 1 if increase else -1
+    mode = injector.mode
+
+    if mode == FaultMode.DROP_EVERY_N_PACKETS:
+        p.drop_every_n_packets = max(1, p.drop_every_n_packets + direction)
+    elif mode == FaultMode.DROP_RANDOM_PACKETS:
+        p.random_drop_percent = min(100.0, max(0.0, p.random_drop_percent + 0.5 * direction))
+    elif mode == FaultMode.FIXED_PACKET_DELAY:
+        p.fixed_delay_ms = max(0, p.fixed_delay_ms + 5 * direction)
+    elif mode == FaultMode.PACKET_JITTER:
+        p.jitter_delta_ms = max(0, p.jitter_delta_ms + 5 * direction)
+    elif mode == FaultMode.BURST_PACKET_LOSS:
+        period = max(1, p.burst_period_packets)
+        p.burst_length_packets = min(period, max(0, p.burst_length_packets + direction))
+    elif mode == FaultMode.BURST_PACKET_DELAY:
+        p.burst_delay_ms = max(0, p.burst_delay_ms + 5 * direction)
+    elif mode == FaultMode.BURST_PACKET_JITTER:
+        p.burst_jitter_max_ms = max(p.burst_jitter_min_ms, p.burst_jitter_max_ms + 5 * direction)
+    elif mode == FaultMode.DROP_EVERY_N_FRAMES:
+        p.drop_every_n_frames = max(1, p.drop_every_n_frames + direction)
+    elif mode == FaultMode.DELAY_WHOLE_FRAMES:
+        p.whole_frame_delay_ms = max(0, p.whole_frame_delay_ms + 5 * direction)
 
 
 def handle_key(key: int, injector: Injector) -> bool:
@@ -289,27 +396,17 @@ def handle_key(key: int, injector: Injector) -> bool:
         injector.set_mode(injector.mode_index - 1)
     elif key == curses.KEY_DOWN:
         injector.set_mode(injector.mode_index + 1)
-    elif ord("1") <= key <= ord("8"):
+    elif ord("1") <= key <= ord("9"):
         injector.set_mode(key - ord("1"))
+    elif key == ord("0") and len(MODE_LIST) >= 10:
+        injector.set_mode(9)
     elif key in (ord("r"), ord("R")):
         injector.stats = Stats()
         injector.packet_counter = 0
-    elif key == ord("["):
-        injector.params.random_drop_percent = max(0.0, injector.params.random_drop_percent - 0.5)
-    elif key == ord("]"):
-        injector.params.random_drop_percent = min(100.0, injector.params.random_drop_percent + 0.5)
     elif key == ord("-"):
-        injector.params.fixed_delay_ms = max(0, injector.params.fixed_delay_ms - 5)
-    elif key == ord("="):
-        injector.params.fixed_delay_ms += 5
-    elif key == ord(","):
-        injector.params.drop_every_n_frames = max(1, injector.params.drop_every_n_frames - 1)
-    elif key == ord("."):
-        injector.params.drop_every_n_frames += 1
-    elif key == ord(";"):
-        injector.params.drop_every_n_packets = max(1, injector.params.drop_every_n_packets - 1)
-    elif key == ord("'"):
-        injector.params.drop_every_n_packets += 1
+        adjust_active_mode(injector, increase=False)
+    elif key in (ord("+"), ord("=")):
+        adjust_active_mode(injector, increase=True)
 
     return True
 
