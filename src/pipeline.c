@@ -714,6 +714,9 @@ static gpointer appsink_thread_func(gpointer data) {
         max_packet = 1024 * 1024;
     }
 
+    const guint64 corrupt_idr_min_interval_ns = 1000ull * 1000ull * 1000ull;
+    guint64 last_corrupt_idr_ns = 0;
+
     while (TRUE) {
         g_mutex_lock(&ps->lock);
         gboolean stop_requested = ps->stop_requested;
@@ -742,8 +745,12 @@ static gpointer appsink_thread_func(gpointer data) {
 
                 if (corrupted) {
                     if (ps->idr_requester != NULL) {
-                        LOGW("Pipeline: corrupted H.265 access unit detected; requesting IDR");
-                        idr_requester_handle_warning(ps->idr_requester);
+                        guint64 now_ns = monotonic_time_ns();
+                        if (last_corrupt_idr_ns == 0 || now_ns - last_corrupt_idr_ns >= corrupt_idr_min_interval_ns) {
+                            LOGW("Pipeline: corrupted H.265 access unit detected; requesting IDR");
+                            idr_requester_handle_warning(ps->idr_requester);
+                            last_corrupt_idr_ns = now_ns;
+                        }
                     }
                 } else if (ps->idr_requester != NULL) {
                     idr_requester_note_clean_frame(ps->idr_requester);
