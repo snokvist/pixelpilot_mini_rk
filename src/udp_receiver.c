@@ -51,8 +51,7 @@
 #define UDP_RECEIVER_BATCH 8
 #define UDP_AUDIO_SEQ_MAX_ADVANCE 8192
 #define NS_PER_MS 1000000ULL
-/* Shared guard against loss+jitter IDR bursts at high frame rates (e.g. 120 fps). */
-#define IDR_TRIGGER_MIN_GAP_NS (100ull * NS_PER_MS)
+#define IDR_TRIGGER_MIN_GAP_DEFAULT_NS (100ull * NS_PER_MS)
 
 typedef struct {
     guint16 sequence;
@@ -129,6 +128,7 @@ struct UdpReceiver {
     guint idr_loss_events;
     guint64 idr_jitter_last_ns;
     guint64 idr_last_trigger_ns;
+    guint64 idr_trigger_min_gap_ns;
 };
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
@@ -445,7 +445,7 @@ static gboolean idr_trigger_allowed(struct UdpReceiver *ur, guint64 arrival_ns) 
     }
 
     if (ur->idr_last_trigger_ns != 0 && arrival_ns > ur->idr_last_trigger_ns) {
-        if (arrival_ns - ur->idr_last_trigger_ns < IDR_TRIGGER_MIN_GAP_NS) {
+        if (arrival_ns - ur->idr_last_trigger_ns < ur->idr_trigger_min_gap_ns) {
             return FALSE;
         }
     }
@@ -1089,6 +1089,7 @@ UdpReceiver *udp_receiver_create(int udp_port,
     ur->buffer_size = 0;
     ur->last_packet_ns = 0;
     ur->idr = requester;
+    ur->idr_trigger_min_gap_ns = IDR_TRIGGER_MIN_GAP_DEFAULT_NS;
     return ur;
 }
 
@@ -1176,6 +1177,10 @@ int udp_receiver_start(UdpReceiver *ur, const AppCfg *cfg, int cpu_slot) {
     reset_rtp_timeline(ur, TRUE);
     ur->cfg = cfg;
     ur->cpu_slot = cpu_slot;
+    ur->idr_trigger_min_gap_ns = IDR_TRIGGER_MIN_GAP_DEFAULT_NS;
+    if (cfg != NULL) {
+        ur->idr_trigger_min_gap_ns = (guint64)cfg->idr.trigger_min_gap_ms * NS_PER_MS;
+    }
     ur->last_packet_ns = 0;
     update_fastpath_locked(ur);
     g_mutex_unlock(&ur->lock);

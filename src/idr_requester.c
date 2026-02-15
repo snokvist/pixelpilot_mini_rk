@@ -18,8 +18,7 @@
 #define IDR_MAX_INTERVAL_MS 500u
 #define IDR_QUIET_RESET_MS 750u
 #define IDR_REINIT_THRESHOLD 64u
-/* ~12 frames at 120 fps: suppress immediate re-trigger storms after recovery. */
-#define IDR_RECOVERY_COOLDOWN_MS 100u
+#define IDR_RECOVERY_COOLDOWN_DEFAULT_MS 100u
 
 typedef struct {
     IdrRequester *owner;
@@ -58,6 +57,7 @@ struct IdrRequester {
     IdrReinitCallback reinit_cb;
     gpointer reinit_user_data;
     gboolean reinit_pending;
+    guint recovery_cooldown_ms;
     guint64 recovery_cooldown_until_ms;
 };
 
@@ -280,6 +280,10 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
     req->reinit_cb = NULL;
     req->reinit_user_data = NULL;
     req->reinit_pending = FALSE;
+    req->recovery_cooldown_ms = IDR_RECOVERY_COOLDOWN_DEFAULT_MS;
+    if (cfg != NULL) {
+        req->recovery_cooldown_ms = cfg->recovery_cooldown_ms;
+    }
     req->recovery_cooldown_until_ms = 0;
 
     return req;
@@ -573,7 +577,7 @@ void idr_requester_note_recovery(IdrRequester *req) {
         req->last_request_ms = 0;
         req->last_warning_ms = 0;
         req->reinit_pending = FALSE;
-        req->recovery_cooldown_until_ms = now_ms + IDR_RECOVERY_COOLDOWN_MS;
+        req->recovery_cooldown_until_ms = now_ms + (guint64)req->recovery_cooldown_ms;
     }
     g_mutex_unlock(&req->lock);
 }

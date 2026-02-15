@@ -72,6 +72,14 @@ to the defaults listed in `src/config.c` when omitted.
 | `[idr].port` | HTTP port that exposes the IDR trigger endpoint (default `80`). |
 | `[idr].path` | HTTP path used when issuing the inline request (default `/request/idr`). |
 | `[idr].timeout-ms` | TCP timeout applied to each IDR request in milliseconds (default `200`). |
+| `[idr].endpoint` | Optional fixed IDR target as `HOST` or `HOST:PORT` (bypasses auto source tracking). |
+| `[idr].stats-trigger` | Enable/disable stats-driven IDR triggers from packet loss and jitter counters. |
+| `[idr].loss-window-ms` | Rolling window used when counting frame-loss events (default `200`). |
+| `[idr].loss-threshold` | Number of loss events inside the window before triggering (default `1`). |
+| `[idr].jitter-threshold-ms` | Instant or average jitter threshold that allows an IDR trigger (default `25`). |
+| `[idr].jitter-cooldown-ms` | Minimum spacing between jitter-triggered IDR requests (default `750`). |
+| `[idr].trigger-min-gap-ms` | Global minimum spacing between any stats-triggered IDR requests (default `100`). |
+| `[idr].recovery-cooldown-ms` | Suppress warning-driven IDR retries briefly after decode recovery (default `100`). |
 | `[audio].device` | ALSA device string handed to the sink (e.g. `plughw:CARD=rockchiphdmi0,DEV=0`). |
 | `[audio].disable` | `true` drops the audio branch entirely (equivalent to `--no-audio`). |
 | `[audio].optional` | `true` allows auto-fallback to a fakesink when the audio path fails; `false` keeps retrying the real sink. |
@@ -258,9 +266,9 @@ updates. Byte-oriented counters in the SSE payload are pre-scaled to truncated m
 
 ## Automatic IDR recovery
 
-Packet loss or corruption around an IDR frame leaves the decoder without valid reference data until a fresh I-frame arrives. When enabled, PixelPilot watches the video decoder warnings and immediately issues an HTTP GET burst (defaulting to `http://SOURCE:80/request/idr`) to request a new IDR. The requester fires one request instantly, three more spaced 50 ms apart, then falls back to an exponential interval capped at 500 ms while warnings persist. Each attempt uses a 200 ms TCP timeout so misbehaving endpoints do not clog the worker queue.
+Packet loss or corruption around an IDR frame leaves the decoder without valid reference data until a fresh I-frame arrives. When enabled, PixelPilot watches decoder warnings and issues an HTTP GET request (default `http://SOURCE:80/request/idr`) to request a new IDR. It starts immediately, then backs off exponentially from short intervals to a capped retry interval while warnings persist. Each attempt uses a 200 ms TCP timeout so misbehaving endpoints do not clog the worker queue.
 
-Tune the behaviour through `[idr]` in the INI (or the matching `--idr-*` CLI flags): disable it entirely with `idr.enable = false`, override the port or path to match the camera firmware, or extend the timeout when proxies or long RTT links sit between the devices. Every trigger is logged with the cumulative total, and the `udp.idr_requests` counter exposes the same total in OSD templates, SSE payloads, and other telemetry sinks.
+Tune the behaviour through `[idr]` in the INI (or the matching `--idr-*` CLI flags): disable it entirely with `idr.enable = false`, override the port/path/endpoint to match camera firmware, adjust loss/jitter trigger sensitivity, or raise `idr.recovery-cooldown-ms` and `idr.trigger-min-gap-ms` to harden against stormy links. Every trigger is logged with the cumulative total, and the `udp.idr_requests` counter exposes the same total in OSD templates, SSE payloads, and other telemetry sinks.
 
 When 64 consecutive HTTP bursts fail to clear the decoder warnings, the requester now gives up on further IDR spam and tells the main loop to rebuild the entire pipeline. This mirrors a manual restart: the pipeline tears down the UDP receiver, decoder, and sinks before bringing them back up with the existing configuration. The strategy avoids endless HTTP loops when the camera ignores triggers or the stream never delivers a usable key frame.
 

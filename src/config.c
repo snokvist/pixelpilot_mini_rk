@@ -55,6 +55,8 @@ static void usage(const char *prog) {
             "  --idr-loss-threshold N       (loss events inside window before triggering; default: 1)\n"
             "  --idr-jitter-threshold-ms N  (instant/avg jitter threshold before triggering; default: 25)\n"
             "  --idr-jitter-cooldown-ms N   (minimum spacing between jitter triggers; default: 750)\n"
+            "  --idr-recovery-cooldown-ms N (suppress IDR retries after recovery; default: 100)\n"
+            "  --idr-trigger-min-gap-ms N  (minimum spacing between any stats triggers; default: 100)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -243,6 +245,8 @@ void cfg_defaults(AppCfg *c) {
     c->idr.loss_threshold = 1;
     c->idr.jitter_threshold_ms = 25.0;
     c->idr.jitter_cooldown_ms = 750;
+    c->idr.recovery_cooldown_ms = 100;
+    c->idr.trigger_min_gap_ms = 100;
 
     c->video_ctm.enable = 0;
     for (int i = 0; i < 9; ++i) {
@@ -597,6 +601,20 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg->idr.jitter_cooldown_ms = (unsigned int)cooldown;
+        } else if (!strcmp(argv[i], "--idr-recovery-cooldown-ms") && i + 1 < argc) {
+            int cooldown = atoi(argv[++i]);
+            if (cooldown < 0) {
+                LOGE("--idr-recovery-cooldown-ms requires a non-negative value");
+                return -1;
+            }
+            cfg->idr.recovery_cooldown_ms = (unsigned int)cooldown;
+        } else if (!strcmp(argv[i], "--idr-trigger-min-gap-ms") && i + 1 < argc) {
+            int gap = atoi(argv[++i]);
+            if (gap < 0) {
+                LOGE("--idr-trigger-min-gap-ms requires a non-negative value");
+                return -1;
+            }
+            cfg->idr.trigger_min_gap_ms = (unsigned int)gap;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {

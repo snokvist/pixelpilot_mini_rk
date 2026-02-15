@@ -1252,6 +1252,22 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg->idr.jitter_cooldown_ms = (unsigned int)v;
             return 0;
         }
+        if (strcasecmp(key, "recovery-cooldown-ms") == 0) {
+            int v = atoi(value);
+            if (v < 0) {
+                v = 0;
+            }
+            cfg->idr.recovery_cooldown_ms = (unsigned int)v;
+            return 0;
+        }
+        if (strcasecmp(key, "trigger-min-gap-ms") == 0) {
+            int v = atoi(value);
+            if (v < 0) {
+                v = 0;
+            }
+            cfg->idr.trigger_min_gap_ms = (unsigned int)v;
+            return 0;
+        }
         return -1;
     }
     if (strcasecmp(section, "gst") == 0) {
