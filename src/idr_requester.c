@@ -20,7 +20,7 @@
 #define IDR_REINIT_THRESHOLD 64u
 #define IDR_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD 5u
 #define IDR_FAILURE_LOCKOUT_MS 60000u
-#define IDR_STARTUP_RETRY_GUARD_MS 1000u
+#define IDR_STARTUP_RETRY_GUARD_MS 3000u
 
 typedef struct {
     IdrRequester *owner;
@@ -473,8 +473,8 @@ void idr_requester_handle_warning(IdrRequester *req) {
     } else {
         guint required_interval_ms = req->next_interval_ms;
         if (req->attempt_count == 1 && required_interval_ms < IDR_STARTUP_RETRY_GUARD_MS) {
-            /* Avoid immediately issuing a second IDR request right after startup.
-             * This gives the first request a short window to take effect. */
+            /* Avoid issuing a second IDR request too soon after startup.
+             * Give the first startup request enough time to take effect. */
             required_interval_ms = IDR_STARTUP_RETRY_GUARD_MS;
         }
         if (now_ms >= req->last_request_ms + required_interval_ms) {
