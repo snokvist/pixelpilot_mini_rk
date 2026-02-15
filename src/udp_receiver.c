@@ -498,6 +498,10 @@ static void schedule_video_resync_locked(UdpReceiver *ur, const char *reason) {
         return;
     }
 
+    if (ur->drop_video_until_irap && ur->video_resync_requested) {
+        return;
+    }
+
     ur->drop_video_until_irap = TRUE;
     ur->video_resync_requested = TRUE;
     ur->video_discont_pending = TRUE;
@@ -863,6 +867,7 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     GstAppSrc *target_appsrc = NULL;
     RtpParseResult preview;
     gboolean have_preview = FALSE;
+    gboolean irap_detected = FALSE;
 
     g_mutex_lock(&ur->lock);
 
@@ -893,6 +898,7 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
         if (rtp_payload_contains_irap(payload, payload_len)) {
             ur->drop_video_until_irap = FALSE;
             ur->video_discont_pending = TRUE;
+            irap_detected = TRUE;
             LOGI("UDP receiver: IRAP detected while resyncing; resuming video forwarding");
         } else {
             drop_packet = TRUE;
@@ -929,7 +935,7 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     if (ur->video_resync_requested) {
         perform_video_resync = TRUE;
         ur->video_resync_requested = FALSE;
-        if (!is_audio) {
+        if (!is_audio && !(is_video && irap_detected)) {
             drop_packet = TRUE;
         }
     }
