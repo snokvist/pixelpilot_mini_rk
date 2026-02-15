@@ -77,6 +77,35 @@ static guint64 monotonic_time_ns(void) {
     return (guint64)g_get_monotonic_time() * 1000ull;
 }
 
+static gboolean h265_au_has_irap(const guint8 *data, gsize size) {
+    if (data == NULL || size < 5) {
+        return FALSE;
+    }
+
+    for (gsize i = 0; i + 4 < size; ++i) {
+        gsize nal_start = 0;
+        if (i + 3 < size && data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01) {
+            nal_start = i + 3;
+        } else if (i + 4 < size && data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x00 &&
+                   data[i + 3] == 0x01) {
+            nal_start = i + 4;
+        } else {
+            continue;
+        }
+
+        if (nal_start + 1 >= size) {
+            continue;
+        }
+
+        guint8 nal_type = (data[nal_start] >> 1) & 0x3f;
+        if (nal_type >= 16 && nal_type <= 21) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 /* Request an IDR frame on key recovery events (startup, recording start, warnings). */
 static void pipeline_request_idr(PipelineState *ps) {
     if (ps == NULL || ps->idr_requester == NULL) {
@@ -703,17 +732,23 @@ static gpointer appsink_thread_func(gpointer data) {
         GstBuffer *buffer = gst_sample_get_buffer(sample);
         if (buffer != NULL) {
             GstBufferFlags flags = GST_BUFFER_FLAGS(buffer);
-            if ((flags & GST_BUFFER_FLAG_CORRUPTED) != 0) {
-                if (ps->idr_requester != NULL) {
-                    LOGW("Pipeline: corrupted H.265 access unit detected; requesting IDR");
-                    idr_requester_handle_warning(ps->idr_requester);
-                }
-            } else if (ps->idr_requester != NULL) {
-                idr_requester_note_clean_frame(ps->idr_requester);
-            }
+            gboolean corrupted = (flags & GST_BUFFER_FLAG_CORRUPTED) != 0;
 
             GstMapInfo map;
             if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                if (ps->idr_requester != NULL && h265_au_has_irap(map.data, map.size)) {
+                    idr_requester_note_keyframe(ps->idr_requester);
+                }
+
+                if (corrupted) {
+                    if (ps->idr_requester != NULL) {
+                        LOGW("Pipeline: corrupted H.265 access unit detected; requesting IDR");
+                        idr_requester_handle_warning(ps->idr_requester);
+                    }
+                } else if (ps->idr_requester != NULL) {
+                    idr_requester_note_clean_frame(ps->idr_requester);
+                }
+
                 if (map.size > 0 && map.size <= max_packet) {
                     g_mutex_lock(&ps->recorder_lock);
                     VideoRecorder *recorder = ps->recorder;
