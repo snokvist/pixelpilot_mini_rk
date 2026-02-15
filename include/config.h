@@ -56,6 +56,7 @@ typedef struct {
     unsigned int loss_threshold;
     double jitter_threshold_ms;
     unsigned int jitter_cooldown_ms;
+    unsigned int recovery_heartbeat_ms;
 } IdrCfg;
 
 typedef struct {

@@ -41,7 +41,6 @@
 #define VIDEO_DECODER_MAX_PLANE_UPSCALE 4.0
 #define VIDEO_DECODER_RECOVERY_IDR_RETRY_MS 1000u
 #define VIDEO_DECODER_RECOVERY_STABLE_FRAMES 6u
-#define VIDEO_DECODER_RECOVERY_HEARTBEAT_MS 500u
 
 static gboolean create_test_nv12_fb(int fd, uint32_t width, uint32_t height, uint32_t *out_fb_id,
                                     uint32_t *out_handle) {
@@ -424,6 +423,7 @@ struct VideoDecoder {
     gboolean recovering_until_idr;
     guint recovery_probe_frames_remaining;
     guint64 last_recovery_idr_request_ms;
+    guint recovery_heartbeat_ms;
 
     VideoCtm ctm;
     uint32_t frame_fourcc;
@@ -1372,7 +1372,7 @@ static gpointer frame_thread_func(gpointer data) {
         MPP_RET ret = vd->mpi->decode_get_frame(vd->ctx, &frame);
         if (ret != MPP_OK || frame == NULL) {
             guint64 now_ms = get_time_ms();
-            video_decoder_maybe_request_recovery_idr(vd, now_ms, VIDEO_DECODER_RECOVERY_HEARTBEAT_MS);
+            video_decoder_maybe_request_recovery_idr(vd, now_ms, vd->recovery_heartbeat_ms);
             g_usleep(1000);
             continue;
         }
@@ -1559,6 +1559,7 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->frame_ver_stride = 0;
     vd->packet_buf_size = 0;
     vd->packet_buf = NULL;
+    vd->recovery_heartbeat_ms = cfg->idr.recovery_heartbeat_ms;
 
     uint32_t chosen_plane = 0;
     if (!video_decoder_select_plane(drm_fd, vd->crtc_id, (uint32_t)cfg->plane_id, &chosen_plane)) {

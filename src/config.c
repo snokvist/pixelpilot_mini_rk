@@ -55,6 +55,7 @@ static void usage(const char *prog) {
             "  --idr-loss-threshold N       (loss events inside window before triggering; default: 1)\n"
             "  --idr-jitter-threshold-ms N  (instant/avg jitter threshold before triggering; default: 25)\n"
             "  --idr-jitter-cooldown-ms N   (minimum spacing between jitter triggers; default: 750)\n"
+            "  --idr-recovery-heartbeat-ms N (decoder recovery IDR heartbeat; default: 500)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -243,6 +244,7 @@ void cfg_defaults(AppCfg *c) {
     c->idr.loss_threshold = 1;
     c->idr.jitter_threshold_ms = 25.0;
     c->idr.jitter_cooldown_ms = 750;
+    c->idr.recovery_heartbeat_ms = 500;
 
     c->video_ctm.enable = 0;
     for (int i = 0; i < 9; ++i) {
@@ -597,6 +599,13 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg->idr.jitter_cooldown_ms = (unsigned int)cooldown;
+        } else if (!strcmp(argv[i], "--idr-recovery-heartbeat-ms") && i + 1 < argc) {
+            int heartbeat = atoi(argv[++i]);
+            if (heartbeat < 0) {
+                LOGE("--idr-recovery-heartbeat-ms requires a non-negative value");
+                return -1;
+            }
+            cfg->idr.recovery_heartbeat_ms = (unsigned int)heartbeat;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {
