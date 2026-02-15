@@ -307,3 +307,7 @@ python tests/rtp_fault_injector.py
 The ncurses menu lets you switch between pass-through, packet drop, burst loss, packet delay/jitter, whole-frame drop, and whole-frame delay modes in real time.
 
 If your terminal is very small, the UI may be truncated to avoid curses drawing errors; resize the terminal for full controls.
+
+In pass-through and non-delay drop modes, the injector now forwards packets immediately (without queuing) to avoid adding artificial latency. Queue depth is primarily expected in delay/jitter modes.
+
+When using "drop every N frames", it is normal for H.265 decode to stall until the next IDR/CRA if a dropped frame was a reference frame; this often appears as repeated old output rather than green corruption on Rockchip MPP.

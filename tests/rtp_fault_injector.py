@@ -102,6 +102,10 @@ class Injector:
         self.sock_out = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.out_addr = (cfg.out_host, cfg.out_port)
 
+    def _send_now(self, payload: bytes) -> None:
+        self.sock_out.sendto(payload, self.out_addr)
+        self.stats.packets_out += 1
+
     def close(self) -> None:
         self.sock_in.close()
         self.sock_out.close()
@@ -164,7 +168,7 @@ class Injector:
         self._handle_frame_boundary(timestamp if is_rtp else None)
 
         if self.mode == FaultMode.PASSTHROUGH:
-            self._schedule(packet, 0)
+            self._send_now(packet)
             return
 
         if self.mode == FaultMode.DROP_EVERY_N_PACKETS:
@@ -172,7 +176,7 @@ class Injector:
             if self.packet_counter % n == 0:
                 self.stats.packets_dropped += 1
                 return
-            self._schedule(packet, 0)
+            self._send_now(packet)
             return
 
         if self.mode == FaultMode.DROP_RANDOM_PACKETS:
@@ -180,7 +184,7 @@ class Injector:
             if random.random() < prob:
                 self.stats.packets_dropped += 1
                 return
-            self._schedule(packet, 0)
+            self._send_now(packet)
             return
 
         if self.mode == FaultMode.FIXED_PACKET_DELAY:
@@ -200,21 +204,21 @@ class Injector:
             if idx < length:
                 self.stats.packets_dropped += 1
                 return
-            self._schedule(packet, 0)
+            self._send_now(packet)
             return
 
         if self.mode == FaultMode.DROP_EVERY_N_FRAMES:
             if self.drop_current_frame:
                 self.stats.packets_dropped += 1
                 return
-            self._schedule(packet, 0)
+            self._send_now(packet)
             return
 
         if self.mode == FaultMode.DELAY_WHOLE_FRAMES:
             self._schedule(packet, self.params.whole_frame_delay_ms)
             return
 
-        self._schedule(packet, 0)
+        self._send_now(packet)
 
     def flush_due(self) -> None:
         now = time.monotonic()
@@ -255,7 +259,7 @@ def draw_ui(stdscr: curses.window, injector: Injector) -> None:
     safe_add(row + 1, 2, f"packets in/out: {injector.stats.packets_in} / {injector.stats.packets_out}")
     safe_add(row + 2, 2, f"packets dropped: {injector.stats.packets_dropped}")
     safe_add(row + 3, 2, f"frames seen/dropped: {injector.stats.frames_seen} / {injector.stats.frames_dropped}")
-    safe_add(row + 4, 2, f"queue depth: {len(injector.queue)}")
+    safe_add(row + 4, 2, f"queue depth: {len(injector.queue)} (expected >0 in delay/jitter modes)")
 
     p = injector.params
     safe_add(row + 6, 0, "Current parameters:")
@@ -269,6 +273,7 @@ def draw_ui(stdscr: curses.window, injector: Injector) -> None:
 
     safe_add(row + 15, 0, "Keys: q quit | r reset stats | [ ] random-drop +/-0.5 | -/= delay -/+5ms")
     safe_add(row + 16, 0, "      ,/. frame-drop N -/+1 | ;/' drop-every-N-packets -/+1")
+    safe_add(row + 17, 0, "Note: dropping full frames can break reference chain until next IDR/CRA")
 
     if max_y < 32:
         safe_add(max_y - 1, 0, "[Terminal is small: UI truncated, injector still active]", curses.A_DIM)
@@ -312,7 +317,7 @@ def handle_key(key: int, injector: Injector) -> bool:
 def run_menu(stdscr: curses.window, injector: Injector) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
-    stdscr.timeout(50)
+    stdscr.timeout(5)
 
     keep_running = True
     while keep_running:
