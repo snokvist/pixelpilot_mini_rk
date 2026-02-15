@@ -127,9 +127,27 @@ class Injector:
         self.sock_in.close()
         self.sock_out.close()
 
+    def _purge_scheduled_packets(self) -> int:
+        purged = len(self.queue)
+        if purged:
+            self.queue.clear()
+            self.stats.packets_dropped += purged
+            self.current_frame_had_loss = True
+        return purged
+
     def set_mode(self, idx: int) -> None:
-        self.mode_index = max(0, min(len(MODE_LIST) - 1, idx))
+        next_index = max(0, min(len(MODE_LIST) - 1, idx))
+        if next_index == self.mode_index:
+            return
+
+        self._purge_scheduled_packets()
+        self.mode_index = next_index
         self.mode = MODE_LIST[self.mode_index]
+        self.drop_current_frame = False
+        self.current_frame_burst_delay_ms = 0
+        self.current_frame_burst_jitter_ms = 0
+        self.burst_delay_frames_left = 0
+        self.burst_jitter_frames_left = 0
 
     @staticmethod
     def _parse_rtp(packet: bytes) -> Tuple[bool, Optional[int], bool]:
@@ -337,7 +355,8 @@ def draw_ui(stdscr: curses.window, injector: Injector) -> None:
 
     safe_add(row + 17, 0, f"Active mode tuning with +/-: {active_parameter_summary(injector)}")
     safe_add(row + 18, 0, "Keys: q quit | r reset stats | +/- primary severity | {/} secondary knob")
-    safe_add(row + 19, 0, "Note: dropping full frames can break reference chain until next IDR/CRA")
+    safe_add(row + 19, 0, "Mode switch purges delayed queue immediately to resume fresh low-latency packets")
+    safe_add(row + 20, 0, "Note: dropping full frames can break reference chain until next IDR/CRA")
 
     if max_y < 36:
         safe_add(max_y - 1, 0, "[Terminal is small: UI truncated, injector still active]", curses.A_DIM)

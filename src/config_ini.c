@@ -912,22 +912,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg_apply_stream_profile(cfg, profile);
             return 0;
         }
-        if (strcasecmp(key, "depay-emit-partial-au") == 0) {
-            int v = 0;
-            if (parse_bool(value, &v) != 0) {
-                return -1;
-            }
-            cfg->depay_emit_partial_au = v;
-            return 0;
-        }
-        if (strcasecmp(key, "decoder-drop-error-frames") == 0) {
-            int v = 0;
-            if (parse_bool(value, &v) != 0) {
-                return -1;
-            }
-            cfg->decoder_drop_error_frames = v;
-            return 0;
-        }
         if (strcasecmp(key, "jitterbuffer-enable") == 0) {
             if (cfg->stream_profile_lock_controls) {
                 LOGW("config: ignoring pipeline.jitterbuffer-enable because pipeline.stream-profile controls jitter/IDR tuning");

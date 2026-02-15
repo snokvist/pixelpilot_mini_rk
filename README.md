@@ -67,8 +67,6 @@ to the defaults listed in `src/config.c` when omitted.
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
 | `[pipeline].stream-profile` | End-to-end recovery/latency preset: `low-latency` (120 fps, ~1-2 frame delay), `medium-latency` (60 fps), `high-latency` (30 fps, stability-first). |
-| `[pipeline].depay-emit-partial-au` | `true` (default) forwards damaged H.265 access units with `CORRUPTED`/`DISCONT` flags so display continuity is preserved; `false` drops damaged AUs before decode. |
-| `[pipeline].decoder-drop-error-frames` | `false` (default) keeps frames that the decoder marks with error metadata (still triggers IDR); set `true` to drop those frames for cleaner images at the cost of visible discontinuities. |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
 | `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
 | `[idr].enable` | `true` enables the automatic IDR requester that fires HTTP recovery bursts when decode warnings appear. |
@@ -277,7 +275,7 @@ Prefer the preset instead of tuning many independent knobs:
 
 Each profile coordinates jitterbuffer behavior plus IDR stats-driven thresholds/hysteresis so transient burst recovery is faster and IDR storms settle quickly once clean frames return.
 
-User-facing per-stream overrides are kept intentionally small: `depay-emit-partial-au` and `decoder-drop-error-frames` remain explicit user choices, while jitterbuffer and IDR stats-trigger tuning are controlled by `stream-profile`.
+All corruption/recovery behavior knobs (including depay damaged-AU policy, decoder error-frame policy, jitterbuffer behavior, and IDR stats-trigger tuning) are coordinated by `stream-profile` to keep runtime configuration simple and unambiguous.
 
 Manual restarts follow the same path. Send the process a `SIGHUP` (for example `kill -HUP $(cat /tmp/pixelpilot_mini_rk.pid)`) to force an immediate teardown/restart cycle without dropping other runtime toggles such as audio fallbacks or active OSD overlays.
 
