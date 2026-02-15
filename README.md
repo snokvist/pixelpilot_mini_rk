@@ -111,6 +111,55 @@ python3 tests/test_udp_osd_controls.py --host 127.0.0.1 --port 5005 --asset-id 0
 
 The harness sends disable, enable, and disable-with-TTL payloads with a 1s cooldown and prints the expected on-screen result for each step.
 
+For an interactive remote-driven menu that also toggles OSD assets, run:
+
+```sh
+python3 tests/osd_remote_menu.py --host 127.0.0.1 --port 5005
+```
+
+This opens a local ncurses menu and continuously publishes:
+
+* The ncurses interface mirrors the same 3-row window the OSD uses (`prev`, `current`, `next`).
+* `texts` using slots 6-8 (`{ext.text6}`, `{ext.text7}`, `{ext.text8}`), leaving slots `1..5` untouched.
+* The middle slot (`{ext.text7}`) is the active highlighted row prefixed with `>`.
+* The top/bottom slots (`{ext.text6}` and `{ext.text8}`) show previous/next rows for navigation context.
+* Root-level navigation is section-based: `[ASSETS]`, `[ZOOM]`, then INI sections such as `[SYSTEM]`, plus `EXIT`.
+* You must enter a section before seeing its items; submenu actions stay above `RETURN` (pinned at the bottom), while root-level `EXIT` stays last.
+* On startup, the configured menu asset id (`--menu-asset-id`, default `7`) is explicitly enabled.
+* Asset visibility starts as unknown (`ASSET n ?`); no `asset_updates` are sent for that id until you toggle it.
+* First toggle of an unknown asset sets it `ON`, then subsequent toggles flip `ON/OFF`.
+* `zoom` commands come from built-in `ZOOM IN` / `ZOOM OUT` rows inside `[ZOOM]`.
+* Asset ON/OFF toggles for ids `0..7` are inside `[ASSETS]`.
+* ext.text6/7/8 never wraps at list edges; only real previous/current/next rows are shown.
+* On exit (`EXIT`, `Q`, or `Ctrl+C`), current asset toggles remain as last sent; only the menu text asset id is forced OFF.
+
+To append local command actions (executed on Enter), provide an INI file:
+
+```sh
+python3 tests/osd_remote_menu.py --host 127.0.0.1 --port 5005 --actions-ini config/osd_menu_actions.ini
+```
+
+Example action file:
+
+```ini
+[SYSTEM]
+reboot = reboot
+
+[PIXELPILOT]
+record = kill -SIGUSR2 $(pidof pixelpilot_mini_rk)
+```
+
+Actions are executed via `--action-shell` (default: `$SHELL`, fallback `/bin/sh`).
+Each INI section becomes its own menu section (for example `[SYSTEM]`, `[PIXELPILOT]`).
+
+Recommended OSD setup for this script:
+
+* Add one text element with three lines:
+  `line = {ext.text6}`
+  `line = {ext.text7}`
+  `line = {ext.text8}`
+* Assign stable `id` values (`0..7`) to the widgets you want the menu to show/hide.
+
 ## CPU affinity control
 
 Use `--cpu-list` to provide a comma-separated list of CPU IDs that the process and its busy worker threads should run on. The main process mask is restricted to the specified CPUs and the UDP receiver and GStreamer bus threads are pinned in a round-robin fashion to spread the work across cores.
