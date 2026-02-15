@@ -288,3 +288,20 @@ For a stability-first profile (accepting extra delay to absorb reorder jitter), 
 - `pipeline.jitterbuffer-max-misorder = 128`
 
 Manual restarts follow the same path. Send the process a `SIGHUP` (for example `kill -HUP $(cat /tmp/pixelpilot_mini_rk.pid)`) to force an immediate teardown/restart cycle without dropping other runtime toggles such as audio fallbacks or active OSD overlays.
+
+## Manual fault-injection helper (packet/frame drop and delay)
+
+Use `tests/rtp_fault_injector.py` to proxy an RTP/UDP stream through interactive fault modes while watching output quality and recovery behavior.
+
+Default wiring is:
+
+- ingest on `0.0.0.0:5601`
+- forward to `127.0.0.1:5600`
+
+Run:
+
+```bash
+python tests/rtp_fault_injector.py
+```
+
+The ncurses menu lets you switch between pass-through, packet drop, burst loss, packet delay/jitter, whole-frame drop, and whole-frame delay modes in real time.
