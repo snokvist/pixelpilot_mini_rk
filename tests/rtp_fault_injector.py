@@ -225,35 +225,53 @@ class Injector:
 
 
 def draw_ui(stdscr: curses.window, injector: Injector) -> None:
-    stdscr.erase()
-    stdscr.addstr(0, 0, "RTP Fault Injector (manual visual test)", curses.A_BOLD)
-    stdscr.addstr(1, 0, f"In: 0.0.0.0:{injector.cfg.in_port}  ->  Out: {injector.cfg.out_host}:{injector.cfg.out_port}")
+    max_y, max_x = stdscr.getmaxyx()
 
-    stdscr.addstr(3, 0, "Modes (use Up/Down or number keys 1-8):")
+    def safe_add(row: int, col: int, text: str, attr: int = curses.A_NORMAL) -> None:
+        if row < 0 or row >= max_y or col >= max_x:
+            return
+        available = max_x - col
+        if available <= 0:
+            return
+        clipped = text[: max(0, available - 1)]
+        try:
+            stdscr.addstr(row, col, clipped, attr)
+        except curses.error:
+            # Terminals can still reject writes at lower-right corner.
+            pass
+
+    stdscr.erase()
+    safe_add(0, 0, "RTP Fault Injector (manual visual test)", curses.A_BOLD)
+    safe_add(1, 0, f"In: 0.0.0.0:{injector.cfg.in_port}  ->  Out: {injector.cfg.out_host}:{injector.cfg.out_port}")
+
+    safe_add(3, 0, "Modes (use Up/Down or number keys 1-8):")
     for idx, mode in enumerate(MODE_LIST):
         prefix = ">" if idx == injector.mode_index else " "
         attr = curses.A_REVERSE if idx == injector.mode_index else curses.A_NORMAL
-        stdscr.addstr(4 + idx, 0, f"{prefix} {idx + 1}. {mode.value}", attr)
+        safe_add(4 + idx, 0, f"{prefix} {idx + 1}. {mode.value}", attr)
 
     row = 14
-    stdscr.addstr(row, 0, "Stats:")
-    stdscr.addstr(row + 1, 2, f"packets in/out: {injector.stats.packets_in} / {injector.stats.packets_out}")
-    stdscr.addstr(row + 2, 2, f"packets dropped: {injector.stats.packets_dropped}")
-    stdscr.addstr(row + 3, 2, f"frames seen/dropped: {injector.stats.frames_seen} / {injector.stats.frames_dropped}")
-    stdscr.addstr(row + 4, 2, f"queue depth: {len(injector.queue)}")
+    safe_add(row, 0, "Stats:")
+    safe_add(row + 1, 2, f"packets in/out: {injector.stats.packets_in} / {injector.stats.packets_out}")
+    safe_add(row + 2, 2, f"packets dropped: {injector.stats.packets_dropped}")
+    safe_add(row + 3, 2, f"frames seen/dropped: {injector.stats.frames_seen} / {injector.stats.frames_dropped}")
+    safe_add(row + 4, 2, f"queue depth: {len(injector.queue)}")
 
     p = injector.params
-    stdscr.addstr(row + 6, 0, "Current parameters:")
-    stdscr.addstr(row + 7, 2, f"drop_every_n_packets={p.drop_every_n_packets}")
-    stdscr.addstr(row + 8, 2, f"random_drop_percent={p.random_drop_percent:.1f}")
-    stdscr.addstr(row + 9, 2, f"fixed_delay_ms={p.fixed_delay_ms}")
-    stdscr.addstr(row + 10, 2, f"jitter_base_delay_ms={p.jitter_base_delay_ms}, jitter_delta_ms={p.jitter_delta_ms}")
-    stdscr.addstr(row + 11, 2, f"burst_period_packets={p.burst_period_packets}, burst_length_packets={p.burst_length_packets}")
-    stdscr.addstr(row + 12, 2, f"drop_every_n_frames={p.drop_every_n_frames}")
-    stdscr.addstr(row + 13, 2, f"whole_frame_delay_ms={p.whole_frame_delay_ms}")
+    safe_add(row + 6, 0, "Current parameters:")
+    safe_add(row + 7, 2, f"drop_every_n_packets={p.drop_every_n_packets}")
+    safe_add(row + 8, 2, f"random_drop_percent={p.random_drop_percent:.1f}")
+    safe_add(row + 9, 2, f"fixed_delay_ms={p.fixed_delay_ms}")
+    safe_add(row + 10, 2, f"jitter_base_delay_ms={p.jitter_base_delay_ms}, jitter_delta_ms={p.jitter_delta_ms}")
+    safe_add(row + 11, 2, f"burst_period_packets={p.burst_period_packets}, burst_length_packets={p.burst_length_packets}")
+    safe_add(row + 12, 2, f"drop_every_n_frames={p.drop_every_n_frames}")
+    safe_add(row + 13, 2, f"whole_frame_delay_ms={p.whole_frame_delay_ms}")
 
-    stdscr.addstr(row + 15, 0, "Keys: q quit | r reset stats | [ ] random-drop +/-0.5 | -/= delay -/+5ms")
-    stdscr.addstr(row + 16, 0, "      ,/. frame-drop N -/+1 | ;/' drop-every-N-packets -/+1")
+    safe_add(row + 15, 0, "Keys: q quit | r reset stats | [ ] random-drop +/-0.5 | -/= delay -/+5ms")
+    safe_add(row + 16, 0, "      ,/. frame-drop N -/+1 | ;/' drop-every-N-packets -/+1")
+
+    if max_y < 32:
+        safe_add(max_y - 1, 0, "[Terminal is small: UI truncated, injector still active]", curses.A_DIM)
 
     stdscr.refresh()
 

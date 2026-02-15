@@ -305,3 +305,5 @@ python tests/rtp_fault_injector.py
 ```
 
 The ncurses menu lets you switch between pass-through, packet drop, burst loss, packet delay/jitter, whole-frame drop, and whole-frame delay modes in real time.
+
+If your terminal is very small, the UI may be truncated to avoid curses drawing errors; resize the terminal for full controls.
