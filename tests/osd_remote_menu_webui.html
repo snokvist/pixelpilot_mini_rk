@@ -18,7 +18,7 @@
     button.warn { background:#f59e0b; }
     button.danger { background:#ef4444; }
     .grid { display:grid; grid-template-columns:repeat(3,minmax(120px,1fr)); gap:10px; }
-    .state { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b1220; border-radius:10px; padding:10px; min-height:72px; }
+    .state { white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b1220; border-radius:10px; padding:10px; min-height:72px; }
     ul { margin:8px 0 0; padding-left:20px; }
     .asset-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:8px; }
   </style>
@@ -28,14 +28,8 @@
     <div class="card">
       <h1>PixelPilot OSD Menu Controller</h1>
       <div class="row">
-        <div>
-          <label>IP</label>
-          <input id="ip" value="192.168.2.20" />
-        </div>
-        <div>
-          <label>Port</label>
-          <input id="port" type="number" value="6666" />
-        </div>
+        <div><label>IP</label><input id="ip" value="192.168.2.20" /></div>
+        <div><label>Port</label><input id="port" type="number" value="6666" /></div>
         <button id="connect">Connect</button>
         <button id="disconnect" class="alt">Disconnect</button>
       </div>
@@ -67,41 +61,58 @@
   </div>
 
 <script>
-let ws = null;
-let latestState = null;
+let baseUrl = '';
+let pollTimer = null;
 
 function setStatus(text){ document.getElementById('status').textContent = text; }
-
-function connect(){
+function buildBaseUrl(){
   const ip = document.getElementById('ip').value.trim() || '192.168.2.20';
   const port = document.getElementById('port').value.trim() || '6666';
-  const url = `ws://${ip}:${port}`;
-  ws = new WebSocket(url);
-  setStatus(`Connecting to ${url} ...`);
-  ws.onopen = () => setStatus(`Connected to ${url}`);
-  ws.onclose = () => setStatus('Disconnected');
-  ws.onerror = () => setStatus('WebSocket error');
-  ws.onmessage = (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      if (msg.type === 'menu_state') {
-        latestState = msg;
-        renderState(msg);
-      }
-    } catch (err) {
-      console.warn('Bad message', err);
-    }
-  };
+  return `http://${ip}:${port}`;
 }
 
-function disconnect(){ if (ws) ws.close(); ws = null; }
-
-function send(obj){
-  if (!ws || ws.readyState !== WebSocket.OPEN) { setStatus('Not connected'); return; }
-  ws.send(JSON.stringify(obj));
+async function send(obj){
+  if (!baseUrl) { setStatus('Not connected'); return; }
+  try {
+    await fetch(`${baseUrl}/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj)
+    });
+  } catch (err) {
+    setStatus(`Command failed: ${err}`);
+  }
 }
 
 function sendKey(key){ send({ key }); }
+
+async function pollState(){
+  if (!baseUrl) return;
+  try {
+    const response = await fetch(`${baseUrl}/state`, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const state = await response.json();
+    renderState(state);
+    setStatus(`Connected to ${baseUrl}`);
+  } catch (err) {
+    setStatus(`Polling failed: ${err}`);
+  }
+}
+
+function connect(){
+  baseUrl = buildBaseUrl();
+  setStatus(`Connecting to ${baseUrl} ...`);
+  if (pollTimer) clearInterval(pollTimer);
+  pollState();
+  pollTimer = setInterval(pollState, 250);
+}
+
+function disconnect(){
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+  baseUrl = '';
+  setStatus('Disconnected');
+}
 
 function renderState(state){
   const lines = state.menu_window || [];

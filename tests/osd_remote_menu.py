@@ -4,17 +4,14 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import configparser
 import curses
-import hashlib
 import json
 import os
 import select
 import shutil
 import signal
 import socket
-import struct
 import subprocess
 import time
 from dataclasses import dataclass
@@ -30,7 +27,6 @@ SECTION_ZOOM = "ZOOM"
 RESERVED_SECTIONS = {SECTION_ASSETS, SECTION_ZOOM}
 
 STOP_REQUESTED = False
-WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 @dataclass
@@ -46,14 +42,6 @@ class MenuEntry:
     section: str = ""
     asset_id: int = -1
     action: Optional[MenuAction] = None
-
-
-@dataclass
-class WebSocketClient:
-    sock: socket.socket
-    handshake_done: bool = False
-    handshake_buffer: bytes = b""
-    frame_buffer: bytes = b""
 
 
 def _on_sigint(_signum: int, _frame) -> None:
@@ -245,192 +233,152 @@ def send_payload(sock: socket.socket, host: str, port: int, payload: dict) -> No
 
 
 class WebUiBridge:
-    """Small non-blocking WebSocket server for browser control."""
+    """Small non-blocking HTTP JSON server for browser control."""
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, ui_html_path: str) -> None:
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._server.bind((host, port))
         self._server.listen()
         self._server.setblocking(False)
-        self._clients: List[WebSocketClient] = []
+        self._clients: List[socket.socket] = []
+        self._buffers: Dict[socket.socket, bytes] = {}
+        self._pending_commands: List[dict] = []
+        self._latest_state: dict = {"type": "menu_state", "status": "starting"}
+        self._ui_html = self._read_ui_html(ui_html_path)
+
+    def _read_ui_html(self, path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read()
+        except OSError:
+            return "<html><body><h1>WebUI not found</h1></body></html>"
 
     def close(self) -> None:
         for client in self._clients:
             try:
-                client.sock.close()
+                client.close()
             except OSError:
                 pass
         self._clients.clear()
+        self._buffers.clear()
         self._server.close()
 
     def poll_messages(self) -> List[dict]:
-        messages: List[dict] = []
         self._accept_new_clients()
-        if not self._clients:
-            return messages
-
-        readable, _, _ = select.select([client.sock for client in self._clients], [], [], 0)
-        for sock_obj in readable:
-            client = self._find_client(sock_obj)
-            if client is None:
-                continue
-            try:
-                chunk = sock_obj.recv(4096)
-            except OSError:
-                chunk = b""
-            if not chunk:
-                self._drop_client(client)
-                continue
-
-            if not client.handshake_done:
-                client.handshake_buffer += chunk
-                if b"\r\n\r\n" in client.handshake_buffer:
-                    if not self._finish_handshake(client):
-                        self._drop_client(client)
-                continue
-
-            client.frame_buffer += chunk
-            frame_messages, remainder, should_close = self._decode_frames(client.frame_buffer)
-            client.frame_buffer = remainder
-            for frame_text in frame_messages:
+        if self._clients:
+            readable, _, _ = select.select(self._clients, [], [], 0)
+            for client in readable:
                 try:
-                    payload = json.loads(frame_text)
-                except json.JSONDecodeError:
+                    chunk = client.recv(4096)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    self._drop_client(client)
                     continue
-                if isinstance(payload, dict):
-                    messages.append(payload)
-            if should_close:
+                pending = self._buffers.get(client, b"") + chunk
+                request, remainder = self._extract_request(pending)
+                if request is None:
+                    self._buffers[client] = pending
+                    continue
+                self._buffers[client] = remainder
+                self._handle_request(client, request)
                 self._drop_client(client)
-        return messages
+
+        commands = self._pending_commands
+        self._pending_commands = []
+        return commands
 
     def broadcast(self, payload: dict) -> None:
-        if not self._clients:
-            return
-        encoded = json.dumps(payload, separators=(",", ":"))
-        frame = self._encode_text_frame(encoded)
-        for client in list(self._clients):
-            if not client.handshake_done:
-                continue
-            try:
-                client.sock.sendall(frame)
-            except OSError:
-                self._drop_client(client)
+        self._latest_state = payload
 
     def _accept_new_clients(self) -> None:
         while True:
             try:
-                sock_obj, _addr = self._server.accept()
+                client, _addr = self._server.accept()
             except BlockingIOError:
                 break
-            sock_obj.setblocking(False)
-            self._clients.append(WebSocketClient(sock=sock_obj))
+            client.setblocking(False)
+            self._clients.append(client)
+            self._buffers[client] = b""
 
-    def _find_client(self, sock_obj: socket.socket) -> Optional[WebSocketClient]:
-        for client in self._clients:
-            if client.sock is sock_obj:
-                return client
-        return None
-
-    def _drop_client(self, client: WebSocketClient) -> None:
+    def _drop_client(self, client: socket.socket) -> None:
         try:
-            client.sock.close()
+            client.close()
         except OSError:
             pass
         if client in self._clients:
             self._clients.remove(client)
+        self._buffers.pop(client, None)
 
-    def _finish_handshake(self, client: WebSocketClient) -> bool:
+    def _extract_request(self, data: bytes) -> Tuple[Optional[bytes], bytes]:
+        header_end = data.find(b"\r\n\r\n")
+        if header_end < 0:
+            return None, data
+        headers = data[:header_end].decode("utf-8", errors="replace")
+        content_length = 0
+        for line in headers.split("\r\n")[1:]:
+            if line.lower().startswith("content-length:"):
+                try:
+                    content_length = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    content_length = 0
+                break
+        total_len = header_end + 4 + content_length
+        if len(data) < total_len:
+            return None, data
+        return data[:total_len], data[total_len:]
+
+    def _send_response(self, client: socket.socket, status: str, content_type: str, body: bytes) -> None:
+        response = (
+            f"HTTP/1.1 {status}\r\n"
+            f"Content-Type: {content_type}\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("utf-8") + body
         try:
-            request = client.handshake_buffer.decode("utf-8", errors="replace")
-            header_block = request.split("\r\n\r\n", 1)[0]
-            headers = {}
-            for line in header_block.split("\r\n")[1:]:
-                if ":" not in line:
-                    continue
-                key, value = line.split(":", 1)
-                headers[key.strip().lower()] = value.strip()
-            key = headers.get("sec-websocket-key", "")
-            if not key:
-                return False
-            accept_raw = hashlib.sha1((key + WS_GUID).encode("utf-8")).digest()
-            accept_value = base64.b64encode(accept_raw).decode("ascii")
-            response = (
-                "HTTP/1.1 101 Switching Protocols\r\n"
-                "Upgrade: websocket\r\n"
-                "Connection: Upgrade\r\n"
-                f"Sec-WebSocket-Accept: {accept_value}\r\n\r\n"
-            )
-            client.sock.sendall(response.encode("utf-8"))
-            client.handshake_done = True
-            client.handshake_buffer = b""
-            return True
+            client.sendall(response)
         except OSError:
-            return False
+            pass
 
-    def _decode_frames(self, data: bytes) -> Tuple[List[str], bytes, bool]:
-        messages: List[str] = []
-        idx = 0
-        should_close = False
-        total = len(data)
+    def _handle_request(self, client: socket.socket, request: bytes) -> None:
+        header_part, body_part = request.split(b"\r\n\r\n", 1)
+        lines = header_part.decode("utf-8", errors="replace").split("\r\n")
+        request_line = lines[0] if lines else ""
+        parts = request_line.split()
+        if len(parts) < 2:
+            self._send_response(client, "400 Bad Request", "application/json", b'{"error":"bad request"}')
+            return
+        method, path = parts[0].upper(), parts[1]
 
-        while idx + 2 <= total:
-            b1 = data[idx]
-            b2 = data[idx + 1]
-            opcode = b1 & 0x0F
-            masked = (b2 & 0x80) != 0
-            payload_len = b2 & 0x7F
-            idx += 2
+        if method == "OPTIONS":
+            self._send_response(client, "204 No Content", "text/plain", b"")
+            return
 
-            if payload_len == 126:
-                if idx + 2 > total:
-                    idx -= 2
-                    break
-                payload_len = struct.unpack("!H", data[idx : idx + 2])[0]
-                idx += 2
-            elif payload_len == 127:
-                if idx + 8 > total:
-                    idx -= 2
-                    break
-                payload_len = struct.unpack("!Q", data[idx : idx + 8])[0]
-                idx += 8
+        if method == "GET" and path in ("/", "/index.html"):
+            self._send_response(client, "200 OK", "text/html; charset=utf-8", self._ui_html.encode("utf-8"))
+            return
 
-            if not masked:
-                should_close = True
-                break
+        if method == "GET" and path == "/state":
+            payload = json.dumps(self._latest_state, separators=(",", ":")).encode("utf-8")
+            self._send_response(client, "200 OK", "application/json", payload)
+            return
 
-            if idx + 4 + payload_len > total:
-                idx -= 2
-                if payload_len == 126:
-                    idx -= 2
-                elif payload_len == 127:
-                    idx -= 8
-                break
+        if method == "POST" and path == "/command":
+            try:
+                payload = json.loads(body_part.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                self._send_response(client, "400 Bad Request", "application/json", b'{"error":"invalid json"}')
+                return
+            if isinstance(payload, dict):
+                self._pending_commands.append(payload)
+                self._send_response(client, "200 OK", "application/json", b'{"ok":true}')
+            else:
+                self._send_response(client, "400 Bad Request", "application/json", b'{"error":"object required"}')
+            return
 
-            mask = data[idx : idx + 4]
-            idx += 4
-            payload = data[idx : idx + payload_len]
-            idx += payload_len
-            decoded = bytes(payload[i] ^ mask[i % 4] for i in range(payload_len))
-
-            if opcode == 0x8:
-                should_close = True
-                break
-            if opcode == 0x1:
-                messages.append(decoded.decode("utf-8", errors="replace"))
-
-        return messages, data[idx:], should_close
-
-    def _encode_text_frame(self, text: str) -> bytes:
-        payload = text.encode("utf-8")
-        length = len(payload)
-        if length <= 125:
-            header = bytes([0x81, length])
-        elif length <= 65535:
-            header = bytes([0x81, 126]) + struct.pack("!H", length)
-        else:
-            header = bytes([0x81, 127]) + struct.pack("!Q", length)
-        return header + payload
+        self._send_response(client, "404 Not Found", "application/json", b'{"error":"not found"}')
 
 
 def parse_zoom_command(command: str) -> Tuple[bool, int]:
@@ -588,12 +536,13 @@ def run_controller(
         current_section = ""
         entries = top_entries
         selected = 0
-        status = f"Ready (WebUI ws://{webui_host}:{webui_port})"
+        status = f"Ready (WebUI http://{webui_host}:{webui_port})"
         dirty = True
         last_send_monotonic = 0.0
         remote_keys: List[int] = []
 
-        webui_bridge = WebUiBridge(webui_host, webui_port)
+        ui_html_path = os.path.join(os.path.dirname(__file__), "osd_remote_menu_webui.html")
+        webui_bridge = WebUiBridge(webui_host, webui_port, ui_html_path)
 
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             try:
@@ -808,7 +757,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Remote menu that sends PixelPilot external OSD texts + asset updates over UDP, "
-            "and always hosts a WebSocket WebUI control endpoint"
+            "and always hosts an HTTP JSON WebUI control endpoint"
         )
     )
     parser.add_argument("--host", default="127.0.0.1", help="Target host running pixelpilot_mini_rk")
@@ -822,7 +771,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-shell", default="", help="Shell executable for actions (default: $SHELL, fallback /bin/sh)")
     parser.add_argument("--menu-asset-id", type=int, default=7, help="Asset id of menu widget to force-disable on exit (default: 7)")
     parser.add_argument("--webui-host", default="0.0.0.0", help="WebUI bind host (default: 0.0.0.0)")
-    parser.add_argument("--webui-port", type=int, default=6666, help="WebUI WebSocket bind port (default: 6666)")
+    parser.add_argument("--webui-port", type=int, default=6666, help="WebUI HTTP bind port (default: 6666)")
     parser.add_argument("--webui-only", action="store_true", help="Run without ncurses and serve as WebUI-driven background daemon")
     return parser.parse_args()
 
