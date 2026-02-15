@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Ncurses remote menu driver for PixelPilot OSD external UDP control.
-
-This script simulates a simple on-screen menu locally in ncurses and sends
-menu rows + asset visibility states to PixelPilot's external OSD UDP port.
-
-It supports optional INI-driven command actions that execute locally when
-selected and activated.
-"""
+"""Ncurses + WebUI remote menu driver for PixelPilot OSD external UDP control."""
 
 from __future__ import annotations
 
@@ -15,6 +8,7 @@ import configparser
 import curses
 import json
 import os
+import select
 import shutil
 import signal
 import socket
@@ -78,7 +72,7 @@ def load_actions(path: str) -> Tuple[List[str], Dict[str, List[MenuAction]]]:
         return [], {}
 
     parser = configparser.ConfigParser(interpolation=None)
-    parser.optionxform = str  # Preserve key casing for display.
+    parser.optionxform = str
     loaded = parser.read(path)
     if not loaded:
         raise ValueError(f"failed to read actions ini: {path}")
@@ -130,10 +124,7 @@ def build_top_entries(action_sections: Sequence[str]) -> List[MenuEntry]:
     return entries
 
 
-def build_submenu_entries(
-    current_section: str,
-    actions_by_section: Mapping[str, List[MenuAction]],
-) -> List[MenuEntry]:
+def build_submenu_entries(current_section: str, actions_by_section: Mapping[str, List[MenuAction]]) -> List[MenuEntry]:
     entries: List[MenuEntry] = []
 
     if current_section == SECTION_ASSETS:
@@ -166,12 +157,7 @@ def build_submenu_table(
     return submenu_table
 
 
-def display_entry(
-    entry: MenuEntry,
-    asset_enabled: Sequence[Optional[bool]],
-    zoom_enabled: bool,
-    zoom_percent: int,
-) -> str:
+def display_entry(entry: MenuEntry, asset_enabled: Sequence[Optional[bool]], zoom_enabled: bool, zoom_percent: int) -> str:
     if entry.kind == "section":
         return f"[{entry.section}]"
     if entry.kind == "exit":
@@ -180,10 +166,7 @@ def display_entry(
         return "RETURN"
     if entry.kind == "asset" and entry.asset_id >= 0:
         asset_state = asset_enabled[entry.asset_id]
-        if asset_state is None:
-            state = "?"
-        else:
-            state = "ON" if asset_state else "OFF"
+        state = "?" if asset_state is None else ("ON" if asset_state else "OFF")
         return f"ASSET {entry.asset_id} {state}"
     if entry.kind == "zoom_in":
         return f"ZOOM IN ({zoom_state_text(zoom_enabled, zoom_percent)})"
@@ -204,22 +187,21 @@ def build_three_slot_menu_texts(
     if not entries:
         return "", "", ""
 
-    prev_line = ""
-    next_line = ""
     count = len(entries)
-    prev_idx = selected - 1
-    next_idx = selected + 1
-    if prev_idx >= 0:
-        prev_line = clamp_text(
-            f"  {display_entry(entries[prev_idx], asset_enabled, zoom_enabled, zoom_percent)}"
-        )
-    if next_idx < count:
-        next_line = clamp_text(
-            f"  {display_entry(entries[next_idx], asset_enabled, zoom_enabled, zoom_percent)}"
-        )
+    if count >= 3:
+        window_start = min(max(0, selected - 1), count - 3)
+        visible_indices = [window_start, window_start + 1, window_start + 2]
+    else:
+        visible_indices = list(range(count))
 
-    current_line = clamp_text(f"> {display_entry(entries[selected], asset_enabled, zoom_enabled, zoom_percent)}")
-    return prev_line, current_line, next_line
+    lines: List[str] = []
+    for idx in visible_indices:
+        prefix = "> " if idx == selected else "  "
+        lines.append(clamp_text(f"{prefix}{display_entry(entries[idx], asset_enabled, zoom_enabled, zoom_percent)}"))
+
+    while len(lines) < 3:
+        lines.append("")
+    return lines[0], lines[1], lines[2]
 
 
 def current_zoom_command(zoom_enabled: bool, zoom_percent: int) -> str:
@@ -228,12 +210,7 @@ def current_zoom_command(zoom_enabled: bool, zoom_percent: int) -> str:
     return f"{zoom_percent},{zoom_percent},50,50"
 
 
-def build_payload(
-    menu_window: Tuple[str, str, str],
-    asset_enabled: Sequence[Optional[bool]],
-    zoom_enabled: bool,
-    zoom_percent: int,
-) -> dict:
+def build_payload(menu_window: Tuple[str, str, str], asset_enabled: Sequence[Optional[bool]], zoom_enabled: bool, zoom_percent: int) -> dict:
     texts: List[Optional[str]] = [None] * MAX_OSD_SLOTS
     texts[MENU_TEXT_SLOT_START + 0] = clamp_text(menu_window[0])
     texts[MENU_TEXT_SLOT_START + 1] = clamp_text(menu_window[1])
@@ -245,18 +222,197 @@ def build_payload(
         if asset_enabled[asset_id] is not None
     ]
 
-    payload = {
-        "texts": texts,
-        "zoom": current_zoom_command(zoom_enabled, zoom_percent),
-    }
+    payload = {"texts": texts, "zoom": current_zoom_command(zoom_enabled, zoom_percent)}
     if asset_updates:
         payload["asset_updates"] = asset_updates
     return payload
 
 
 def send_payload(sock: socket.socket, host: str, port: int, payload: dict) -> None:
-    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    sock.sendto(encoded, (host, port))
+    sock.sendto(json.dumps(payload, separators=(",", ":")).encode("utf-8"), (host, port))
+
+
+class WebUiBridge:
+    """Small non-blocking HTTP JSON server for browser control."""
+
+    def __init__(self, host: str, port: int, ui_html_path: str) -> None:
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server.bind((host, port))
+        self._server.listen()
+        self._server.setblocking(False)
+        self._clients: List[socket.socket] = []
+        self._buffers: Dict[socket.socket, bytes] = {}
+        self._pending_commands: List[dict] = []
+        self._latest_state: dict = {"type": "menu_state", "status": "starting"}
+        self._ui_html = self._read_ui_html(ui_html_path)
+
+    def _read_ui_html(self, path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                return handle.read()
+        except OSError:
+            return "<html><body><h1>WebUI not found</h1></body></html>"
+
+    def close(self) -> None:
+        for client in self._clients:
+            try:
+                client.close()
+            except OSError:
+                pass
+        self._clients.clear()
+        self._buffers.clear()
+        self._server.close()
+
+    def poll_messages(self) -> List[dict]:
+        self._accept_new_clients()
+        if self._clients:
+            readable, _, _ = select.select(self._clients, [], [], 0)
+            for client in readable:
+                try:
+                    chunk = client.recv(4096)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    self._drop_client(client)
+                    continue
+                pending = self._buffers.get(client, b"") + chunk
+                request, remainder = self._extract_request(pending)
+                if request is None:
+                    self._buffers[client] = pending
+                    continue
+                self._buffers[client] = remainder
+                self._handle_request(client, request)
+                self._drop_client(client)
+
+        commands = self._pending_commands
+        self._pending_commands = []
+        return commands
+
+    def broadcast(self, payload: dict) -> None:
+        self._latest_state = payload
+
+    def _accept_new_clients(self) -> None:
+        while True:
+            try:
+                client, _addr = self._server.accept()
+            except BlockingIOError:
+                break
+            client.setblocking(False)
+            self._clients.append(client)
+            self._buffers[client] = b""
+
+    def _drop_client(self, client: socket.socket) -> None:
+        try:
+            client.close()
+        except OSError:
+            pass
+        if client in self._clients:
+            self._clients.remove(client)
+        self._buffers.pop(client, None)
+
+    def _extract_request(self, data: bytes) -> Tuple[Optional[bytes], bytes]:
+        header_end = data.find(b"\r\n\r\n")
+        if header_end < 0:
+            return None, data
+        headers = data[:header_end].decode("utf-8", errors="replace")
+        content_length = 0
+        for line in headers.split("\r\n")[1:]:
+            if line.lower().startswith("content-length:"):
+                try:
+                    content_length = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    content_length = 0
+                break
+        total_len = header_end + 4 + content_length
+        if len(data) < total_len:
+            return None, data
+        return data[:total_len], data[total_len:]
+
+    def _send_response(self, client: socket.socket, status: str, content_type: str, body: bytes) -> None:
+        response = (
+            f"HTTP/1.1 {status}\r\n"
+            f"Content-Type: {content_type}\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("utf-8") + body
+        try:
+            client.sendall(response)
+        except OSError:
+            pass
+
+    def _handle_request(self, client: socket.socket, request: bytes) -> None:
+        header_part, body_part = request.split(b"\r\n\r\n", 1)
+        lines = header_part.decode("utf-8", errors="replace").split("\r\n")
+        request_line = lines[0] if lines else ""
+        parts = request_line.split()
+        if len(parts) < 2:
+            self._send_response(client, "400 Bad Request", "application/json", b'{"error":"bad request"}')
+            return
+        method, path = parts[0].upper(), parts[1]
+
+        if method == "OPTIONS":
+            self._send_response(client, "204 No Content", "text/plain", b"")
+            return
+
+        if method == "GET" and path in ("/", "/index.html"):
+            self._send_response(client, "200 OK", "text/html; charset=utf-8", self._ui_html.encode("utf-8"))
+            return
+
+        if method == "GET" and path == "/state":
+            payload = json.dumps(self._latest_state, separators=(",", ":")).encode("utf-8")
+            self._send_response(client, "200 OK", "application/json", payload)
+            return
+
+        if method == "POST" and path == "/command":
+            try:
+                payload = json.loads(body_part.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                self._send_response(client, "400 Bad Request", "application/json", b'{"error":"invalid json"}')
+                return
+            if isinstance(payload, dict):
+                self._pending_commands.append(payload)
+                self._send_response(client, "200 OK", "application/json", b'{"ok":true}')
+            else:
+                self._send_response(client, "400 Bad Request", "application/json", b'{"error":"object required"}')
+            return
+
+        self._send_response(client, "404 Not Found", "application/json", b'{"error":"not found"}')
+
+
+def parse_zoom_command(command: str) -> Tuple[bool, int]:
+    value = command.strip().lower()
+    if not value or value == "off":
+        return False, 100
+    zoom_percent = int(value.split(",", 1)[0].strip())
+    if zoom_percent <= 100:
+        return False, 100
+    return True, zoom_percent
+
+
+def build_webui_state(
+    menu_window: Tuple[str, str, str],
+    entries: Sequence[MenuEntry],
+    selected: int,
+    current_section: str,
+    status: str,
+    asset_enabled: Sequence[Optional[bool]],
+    zoom_enabled: bool,
+    zoom_percent: int,
+) -> dict:
+    return {
+        "type": "menu_state",
+        "section": current_section or "ROOT",
+        "selected": selected,
+        "entries": [display_entry(entry, asset_enabled, zoom_enabled, zoom_percent) for entry in entries],
+        "menu_window": list(menu_window),
+        "status": status,
+        "asset_enabled": list(asset_enabled),
+        "zoom": current_zoom_command(zoom_enabled, zoom_percent),
+    }
 
 
 def condense_output(text: str) -> str:
@@ -268,13 +424,7 @@ def condense_output(text: str) -> str:
 
 
 def resolve_action_shell(preferred: str) -> str:
-    candidate = preferred.strip()
-    if not candidate:
-        candidate = os.environ.get("SHELL", "").strip()
-    if not candidate:
-        candidate = "/bin/sh"
-
-    # Allow passing names such as "bash" and resolve them via PATH.
+    candidate = preferred.strip() or os.environ.get("SHELL", "").strip() or "/bin/sh"
     if os.path.sep not in candidate:
         resolved = shutil.which(candidate)
         if resolved:
@@ -301,12 +451,8 @@ def execute_action(action: MenuAction, timeout_ms: int, action_shell: str) -> st
 
     message = condense_output(result.stdout) or condense_output(result.stderr)
     if result.returncode == 0:
-        if message:
-            return f"OK [{action.section}] {action.name}: {message}"
-        return f"OK [{action.section}] {action.name}"
-    if message:
-        return f"ERR {result.returncode} [{action.section}] {action.name}: {message}"
-    return f"ERR {result.returncode} [{action.section}] {action.name}"
+        return f"OK [{action.section}] {action.name}: {message}" if message else f"OK [{action.section}] {action.name}"
+    return f"ERR {result.returncode} [{action.section}] {action.name}: {message}" if message else f"ERR {result.returncode} [{action.section}] {action.name}"
 
 
 def draw_ui(
@@ -348,8 +494,8 @@ def draw_ui(
     stdscr.refresh()
 
 
-def run_menu(
-    stdscr: "curses._CursesWindow",
+def run_controller(
+    stdscr: Optional["curses._CursesWindow"],
     host: str,
     port: int,
     interval_ms: int,
@@ -361,6 +507,8 @@ def run_menu(
     action_timeout_ms: int,
     action_shell: str,
     menu_asset_id: int,
+    webui_host: str,
+    webui_port: int,
 ) -> int:
     global STOP_REQUESTED
     STOP_REQUESTED = False
@@ -369,66 +517,108 @@ def run_menu(
     signal.signal(signal.SIGINT, _on_sigint)
 
     try:
-        try:
-            curses.curs_set(0)
-        except curses.error:
-            pass
-        stdscr.nodelay(True)
-        stdscr.timeout(50)
+        if stdscr is not None:
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            stdscr.nodelay(True)
+            stdscr.timeout(50)
 
         asset_enabled: List[Optional[bool]] = [None] * ASSET_COUNT
         for asset_id in initial_off:
             asset_enabled[asset_id] = False
-        # Ensure the menu widget is visible when the controller starts.
         asset_enabled[menu_asset_id] = True
 
         zoom_enabled = False
         zoom_percent = 100
-
         top_entries = build_top_entries(action_sections)
         submenu_table = build_submenu_table(action_sections, actions_by_section)
         fallback_entries = [MenuEntry(kind="return")]
         current_section = ""
         entries = top_entries
-
         selected = 0
-
-        status = "Ready"
+        status = f"Ready (WebUI http://{webui_host}:{webui_port})"
         dirty = True
         last_send_monotonic = 0.0
+        remote_keys: List[int] = []
+
+        ui_html_path = os.path.join(os.path.dirname(__file__), "osd_remote_menu_webui.html")
+        webui_bridge = WebUiBridge(webui_host, webui_port, ui_html_path)
 
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             try:
                 while not STOP_REQUESTED:
-                    if current_section == "":
-                        entries = top_entries
-                    else:
-                        entries = submenu_table.get(current_section, fallback_entries)
+                    entries = top_entries if current_section == "" else submenu_table.get(current_section, fallback_entries)
+                    selected = min(max(selected, 0), max(0, len(entries) - 1))
 
-                    if selected >= len(entries):
-                        selected = max(0, len(entries) - 1)
-                    if selected < 0:
-                        selected = 0
+                    menu_window = build_three_slot_menu_texts(entries, selected, asset_enabled, zoom_enabled, zoom_percent)
 
-                    menu_window = build_three_slot_menu_texts(
-                        entries,
-                        selected,
-                        asset_enabled,
-                        zoom_enabled,
-                        zoom_percent,
-                    )
+                    if stdscr is not None:
+                        draw_ui(
+                            stdscr,
+                            menu_window,
+                            status,
+                            host,
+                            port,
+                            interval_ms,
+                            zoom_enabled,
+                            zoom_percent,
+                            len(top_entries),
+                            current_section,
+                        )
 
-                    draw_ui(
-                        stdscr,
-                        menu_window,
-                        status,
-                        host,
-                        port,
-                        interval_ms,
-                        zoom_enabled,
-                        zoom_percent,
-                        len(top_entries),
-                        current_section,
+                    for message in webui_bridge.poll_messages():
+                        key_map = {
+                            "up": curses.KEY_UP,
+                            "down": curses.KEY_DOWN,
+                            "select": 10,
+                            "enter": 10,
+                            "quit": ord("q"),
+                            "all_on": ord("a"),
+                            "all_off": ord("z"),
+                        }
+                        key_name = str(message.get("key", "")).strip().lower()
+                        if key_name in key_map:
+                            remote_keys.append(key_map[key_name])
+
+                        selected_value = message.get("selected")
+                        if isinstance(selected_value, int):
+                            selected = min(max(selected_value, 0), max(0, len(entries) - 1))
+                            dirty = True
+
+                        if isinstance(message.get("asset_updates"), list):
+                            for update in message["asset_updates"]:
+                                if not isinstance(update, dict):
+                                    continue
+                                asset_id = update.get("id")
+                                enabled = update.get("enabled")
+                                if isinstance(asset_id, int) and 0 <= asset_id < ASSET_COUNT and isinstance(enabled, bool):
+                                    asset_enabled[asset_id] = enabled
+                                    dirty = True
+
+                        zoom_command = message.get("zoom")
+                        if isinstance(zoom_command, str):
+                            try:
+                                parsed_enabled, parsed_percent = parse_zoom_command(zoom_command)
+                            except ValueError:
+                                pass
+                            else:
+                                zoom_enabled = parsed_enabled
+                                zoom_percent = max(100, min(zoom_max, parsed_percent))
+                                dirty = True
+
+                    webui_bridge.broadcast(
+                        build_webui_state(
+                            menu_window,
+                            entries,
+                            selected,
+                            current_section,
+                            status,
+                            asset_enabled,
+                            zoom_enabled,
+                            zoom_percent,
+                        )
                     )
 
                     now = time.monotonic()
@@ -442,7 +632,14 @@ def run_menu(
                             status = f"Send failed: {exc}"
                             last_send_monotonic = now
 
-                    key = stdscr.getch()
+                    if remote_keys:
+                        key = remote_keys.pop(0)
+                    elif stdscr is not None:
+                        key = stdscr.getch()
+                    else:
+                        time.sleep(0.05)
+                        continue
+
                     if key < 0:
                         continue
 
@@ -511,13 +708,9 @@ def run_menu(
 
                         if entry.kind == "asset" and entry.asset_id >= 0:
                             current_state = asset_enabled[entry.asset_id]
-                            if current_state is None:
-                                next_state = True
-                            else:
-                                next_state = not current_state
+                            next_state = True if current_state is None else (not current_state)
                             asset_enabled[entry.asset_id] = next_state
-                            state = "ON" if next_state else "OFF"
-                            status = f"Asset {entry.asset_id} {state}"
+                            status = f"Asset {entry.asset_id} {'ON' if next_state else 'OFF'}"
                             dirty = True
                             continue
 
@@ -546,19 +739,16 @@ def run_menu(
                     clear_texts[MENU_TEXT_SLOT_START + 0] = ""
                     clear_texts[MENU_TEXT_SLOT_START + 1] = ""
                     clear_texts[MENU_TEXT_SLOT_START + 2] = ""
-                    clear_payload = {"texts": clear_texts}
-                    send_payload(sock, host, port, clear_payload)
+                    send_payload(sock, host, port, {"texts": clear_texts})
                 except OSError:
                     pass
 
-                # Always hide the menu widget itself on exit.
                 try:
-                    hide_menu_payload = {
-                        "asset_updates": [{"id": menu_asset_id, "enabled": False}],
-                    }
-                    send_payload(sock, host, port, hide_menu_payload)
+                    send_payload(sock, host, port, {"asset_updates": [{"id": menu_asset_id, "enabled": False}]})
                 except OSError:
                     pass
+
+                webui_bridge.close()
 
         return 0
     finally:
@@ -568,57 +758,23 @@ def run_menu(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Ncurses remote menu that sends PixelPilot external OSD texts + "
-            "asset_updates over UDP"
+            "Remote menu that sends PixelPilot external OSD texts + asset updates over UDP, "
+            "and always hosts an HTTP JSON WebUI control endpoint"
         )
     )
     parser.add_argument("--host", default="127.0.0.1", help="Target host running pixelpilot_mini_rk")
     parser.add_argument("--port", type=int, default=5005, help="External OSD UDP port (default: 5005)")
-    parser.add_argument(
-        "--interval-ms",
-        type=int,
-        default=400,
-        help="Re-send interval in milliseconds to refresh OSD state (default: 400)",
-    )
-    parser.add_argument(
-        "--initial-off",
-        default="",
-        help="Comma-separated list of asset ids to start OFF (for example '2,5,7')",
-    )
-    parser.add_argument(
-        "--zoom-step",
-        type=int,
-        default=25,
-        help="Zoom percentage step for the menu Zoom In/Out rows (default: 25)",
-    )
-    parser.add_argument(
-        "--zoom-max",
-        type=int,
-        default=300,
-        help="Maximum zoom percentage allowed by the menu (default: 300)",
-    )
-    parser.add_argument(
-        "--actions-ini",
-        default="",
-        help="Optional INI file of local command actions exposed as submenu sections",
-    )
-    parser.add_argument(
-        "--action-timeout-ms",
-        type=int,
-        default=5000,
-        help="Timeout for each action command execution (default: 5000)",
-    )
-    parser.add_argument(
-        "--action-shell",
-        default="",
-        help="Shell executable for actions (default: $SHELL, fallback /bin/sh)",
-    )
-    parser.add_argument(
-        "--menu-asset-id",
-        type=int,
-        default=7,
-        help="Asset id of the menu widget to force-disable on exit (default: 7)",
-    )
+    parser.add_argument("--interval-ms", type=int, default=400, help="Re-send interval in milliseconds (default: 400)")
+    parser.add_argument("--initial-off", default="", help="Comma-separated asset ids to start OFF (example: '2,5,7')")
+    parser.add_argument("--zoom-step", type=int, default=25, help="Zoom percentage step (default: 25)")
+    parser.add_argument("--zoom-max", type=int, default=300, help="Maximum zoom percentage (default: 300)")
+    parser.add_argument("--actions-ini", default="", help="Optional INI file of local command actions")
+    parser.add_argument("--action-timeout-ms", type=int, default=5000, help="Action command timeout in ms (default: 5000)")
+    parser.add_argument("--action-shell", default="", help="Shell executable for actions (default: $SHELL, fallback /bin/sh)")
+    parser.add_argument("--menu-asset-id", type=int, default=7, help="Asset id of menu widget to force-disable on exit (default: 7)")
+    parser.add_argument("--webui-host", default="0.0.0.0", help="WebUI bind host (default: 0.0.0.0)")
+    parser.add_argument("--webui-port", type=int, default=6666, help="WebUI HTTP bind port (default: 6666)")
+    parser.add_argument("--webui-only", action="store_true", help="Run without ncurses and serve as WebUI-driven background daemon")
     return parser.parse_args()
 
 
@@ -636,6 +792,8 @@ def main() -> int:
         raise SystemExit("--action-timeout-ms must be > 0")
     if args.menu_asset_id < 0 or args.menu_asset_id >= ASSET_COUNT:
         raise SystemExit(f"--menu-asset-id must be in range 0..{ASSET_COUNT - 1}")
+    if args.webui_port <= 0 or args.webui_port > 65535:
+        raise SystemExit("--webui-port must be in range 1..65535")
 
     try:
         initial_off = parse_asset_id_list(args.initial_off)
@@ -653,8 +811,26 @@ def main() -> int:
     if not os.access(action_shell, os.X_OK):
         raise SystemExit(f"action shell is not executable: {action_shell}")
 
+    if args.webui_only:
+        return run_controller(
+            None,
+            args.host,
+            args.port,
+            args.interval_ms,
+            initial_off,
+            args.zoom_step,
+            args.zoom_max,
+            action_sections,
+            actions_by_section,
+            args.action_timeout_ms,
+            action_shell,
+            args.menu_asset_id,
+            args.webui_host,
+            args.webui_port,
+        )
+
     return curses.wrapper(
-        run_menu,
+        run_controller,
         args.host,
         args.port,
         args.interval_ms,
@@ -666,6 +842,8 @@ def main() -> int:
         args.action_timeout_ms,
         action_shell,
         args.menu_asset_id,
+        args.webui_host,
+        args.webui_port,
     )
 
 
