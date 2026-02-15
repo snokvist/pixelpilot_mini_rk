@@ -53,6 +53,11 @@ struct IdrRequester {
 
     guint64 total_requests;
 
+    guint recovery_holdoff_ms;
+    guint clean_frames_for_recovery;
+    guint clean_streak;
+    guint64 recovery_suppress_until_ms;
+
     IdrReinitCallback reinit_cb;
     gpointer reinit_user_data;
     gboolean reinit_pending;
@@ -274,6 +279,10 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
     req->request_in_flight = FALSE;
     req->shutting_down = FALSE;
     req->total_requests = 0;
+    req->recovery_holdoff_ms = (cfg != NULL) ? cfg->recovery_holdoff_ms : 0u;
+    req->clean_frames_for_recovery = (cfg != NULL) ? cfg->clean_frames_for_recovery : 0u;
+    req->clean_streak = 0;
+    req->recovery_suppress_until_ms = 0;
     req->reinit_cb = NULL;
     req->reinit_user_data = NULL;
     req->reinit_pending = FALSE;
@@ -384,6 +393,12 @@ void idr_requester_handle_warning(IdrRequester *req) {
 
     g_mutex_lock(&req->lock);
     if (req->shutting_down || !req->enabled || !req->have_source) {
+        g_mutex_unlock(&req->lock);
+        return;
+    }
+
+    req->clean_streak = 0;
+    if (req->recovery_suppress_until_ms != 0 && now_ms < req->recovery_suppress_until_ms) {
         g_mutex_unlock(&req->lock);
         return;
     }
@@ -546,6 +561,39 @@ void idr_requester_handle_warning(IdrRequester *req) {
     g_thread_unref(thread);
 }
 
+void idr_requester_note_clean_frame(IdrRequester *req) {
+    if (req == NULL) {
+        return;
+    }
+
+    guint64 now_ms = monotonic_ms();
+    g_mutex_lock(&req->lock);
+    if (req->shutting_down || !req->enabled) {
+        g_mutex_unlock(&req->lock);
+        return;
+    }
+
+    guint threshold = req->clean_frames_for_recovery;
+    if (threshold == 0) {
+        threshold = 10;
+    }
+
+    if (req->clean_streak < threshold) {
+        req->clean_streak++;
+    }
+
+    if (req->clean_streak >= threshold) {
+        req->active = FALSE;
+        req->attempt_count = 0;
+        req->next_interval_ms = 0;
+        req->last_request_ms = 0;
+        req->reinit_pending = FALSE;
+        req->clean_streak = 0;
+        req->recovery_suppress_until_ms = now_ms + req->recovery_holdoff_ms;
+    }
+    g_mutex_unlock(&req->lock);
+}
+
 guint64 idr_requester_get_request_count(const IdrRequester *req) {
     if (req == NULL) {
         return 0;
@@ -569,4 +617,3 @@ void idr_requester_set_reinit_callback(IdrRequester *req, IdrReinitCallback cb, 
     req->reinit_user_data = user_data;
     g_mutex_unlock(&req->lock);
 }
-

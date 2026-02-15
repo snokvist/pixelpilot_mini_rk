@@ -24,6 +24,7 @@ static void usage(const char *prog) {
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --appsink-max-buffers N      (default: 4)\n"
+            "  --stream-profile PROFILE     (low-latency|medium-latency|high-latency)\n"
             "  --depay-emit-partial-au      (forward corrupted access units to decoder; default on)\n"
             "  --depay-drop-corrupt-au      (drop corrupted access units before decoder)\n"
             "  --decoder-drop-error-frames  (drop frames flagged with decoder errors)\n"
@@ -74,6 +75,11 @@ typedef struct {
     CustomSinkMode mode;
 } CustomSinkAlias;
 
+typedef struct {
+    const char *name;
+    StreamProfile profile;
+} StreamProfileAlias;
+
 static const CustomSinkAlias kCustomSinkAliases[] = {
     {"receiver", CUSTOM_SINK_RECEIVER},
     {"udp-receiver", CUSTOM_SINK_RECEIVER},
@@ -81,6 +87,18 @@ static const CustomSinkAlias kCustomSinkAliases[] = {
     {"udpsrc", CUSTOM_SINK_UDPSRC},
     {"gst-udpsrc", CUSTOM_SINK_UDPSRC},
     {"gst", CUSTOM_SINK_UDPSRC},
+};
+
+static const StreamProfileAlias kStreamProfileAliases[] = {
+    {"low", STREAM_PROFILE_LOW_LATENCY},
+    {"low-latency", STREAM_PROFILE_LOW_LATENCY},
+    {"120fps", STREAM_PROFILE_LOW_LATENCY},
+    {"medium", STREAM_PROFILE_MEDIUM_LATENCY},
+    {"medium-latency", STREAM_PROFILE_MEDIUM_LATENCY},
+    {"60fps", STREAM_PROFILE_MEDIUM_LATENCY},
+    {"high", STREAM_PROFILE_HIGH_LATENCY},
+    {"high-latency", STREAM_PROFILE_HIGH_LATENCY},
+    {"30fps", STREAM_PROFILE_HIGH_LATENCY},
 };
 
 typedef struct {
@@ -120,6 +138,82 @@ const char *cfg_custom_sink_mode_name(CustomSinkMode mode) {
         return "udpsrc";
     default:
         return "unknown";
+    }
+}
+
+int cfg_parse_stream_profile(const char *value, StreamProfile *profile_out) {
+    if (value == NULL || profile_out == NULL) {
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(kStreamProfileAliases) / sizeof(kStreamProfileAliases[0]); ++i) {
+        if (strcasecmp(value, kStreamProfileAliases[i].name) == 0) {
+            *profile_out = kStreamProfileAliases[i].profile;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *cfg_stream_profile_name(StreamProfile profile) {
+    switch (profile) {
+    case STREAM_PROFILE_LOW_LATENCY:
+        return "low-latency";
+    case STREAM_PROFILE_MEDIUM_LATENCY:
+        return "medium-latency";
+    case STREAM_PROFILE_HIGH_LATENCY:
+        return "high-latency";
+    default:
+        return "unknown";
+    }
+}
+
+void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
+    if (cfg == NULL) {
+        return;
+    }
+
+    cfg->stream_profile = profile;
+
+    switch (profile) {
+    case STREAM_PROFILE_LOW_LATENCY:
+        cfg->depay_emit_partial_au = 1;
+        cfg->decoder_drop_error_frames = 0;
+        cfg->jitterbuffer_enable = 0;
+        cfg->jitterbuffer_latency_ms = 4;
+        cfg->jitterbuffer_max_misorder = 16;
+        cfg->idr.loss_window_ms = 120;
+        cfg->idr.loss_threshold = 1;
+        cfg->idr.jitter_threshold_ms = 15.0;
+        cfg->idr.jitter_cooldown_ms = 300;
+        cfg->idr.recovery_holdoff_ms = 350;
+        cfg->idr.clean_frames_for_recovery = 12;
+        break;
+    case STREAM_PROFILE_MEDIUM_LATENCY:
+        cfg->depay_emit_partial_au = 1;
+        cfg->decoder_drop_error_frames = 0;
+        cfg->jitterbuffer_enable = 1;
+        cfg->jitterbuffer_latency_ms = 12;
+        cfg->jitterbuffer_max_misorder = 64;
+        cfg->idr.loss_window_ms = 200;
+        cfg->idr.loss_threshold = 1;
+        cfg->idr.jitter_threshold_ms = 25.0;
+        cfg->idr.jitter_cooldown_ms = 600;
+        cfg->idr.recovery_holdoff_ms = 700;
+        cfg->idr.clean_frames_for_recovery = 12;
+        break;
+    case STREAM_PROFILE_HIGH_LATENCY:
+        cfg->depay_emit_partial_au = 1;
+        cfg->decoder_drop_error_frames = 0;
+        cfg->jitterbuffer_enable = 1;
+        cfg->jitterbuffer_latency_ms = 25;
+        cfg->jitterbuffer_max_misorder = 128;
+        cfg->idr.loss_window_ms = 400;
+        cfg->idr.loss_threshold = 2;
+        cfg->idr.jitter_threshold_ms = 35.0;
+        cfg->idr.jitter_cooldown_ms = 1000;
+        cfg->idr.recovery_holdoff_ms = 1200;
+        cfg->idr.clean_frames_for_recovery = 8;
+        break;
     }
 }
 
@@ -197,11 +291,7 @@ void cfg_defaults(AppCfg *c) {
     c->vid_pt = 97;
     c->aud_pt = 98;
     c->appsink_max_buffers = 4;
-    c->depay_emit_partial_au = 1;
-    c->decoder_drop_error_frames = 0;
-    c->jitterbuffer_enable = 0;
-    c->jitterbuffer_latency_ms = 8;
-    c->jitterbuffer_max_misorder = 64;
+    c->stream_profile = STREAM_PROFILE_LOW_LATENCY;
     c->udpsrc_pt97_filter = 1;
     c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
@@ -252,15 +342,19 @@ void cfg_defaults(AppCfg *c) {
     c->idr.endpoint_host[0] = '\0';
     c->idr.endpoint_port = 0;
     c->idr.stats_trigger = 1;
-    c->idr.loss_window_ms = 200;
+    c->idr.loss_window_ms = 120;
     c->idr.loss_threshold = 1;
-    c->idr.jitter_threshold_ms = 25.0;
-    c->idr.jitter_cooldown_ms = 750;
+    c->idr.jitter_threshold_ms = 15.0;
+    c->idr.jitter_cooldown_ms = 300;
+    c->idr.recovery_holdoff_ms = 350;
+    c->idr.clean_frames_for_recovery = 12;
 
     c->video_ctm.enable = 0;
     for (int i = 0; i < 9; ++i) {
         c->video_ctm.matrix[i] = (i % 4 == 0) ? 1.0 : 0.0;
     }
+
+    cfg_apply_stream_profile(c, c->stream_profile);
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -446,6 +540,13 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 LOGW("--appsink-max-buffers must be positive; clamping to 1");
                 cfg->appsink_max_buffers = 1;
             }
+        } else if (!strcmp(argv[i], "--stream-profile") && i + 1 < argc) {
+            StreamProfile profile;
+            if (cfg_parse_stream_profile(argv[++i], &profile) != 0) {
+                LOGE("Unknown stream profile '%s'", argv[i]);
+                return -1;
+            }
+            cfg_apply_stream_profile(cfg, profile);
         } else if (!strcmp(argv[i], "--depay-emit-partial-au")) {
             cfg->depay_emit_partial_au = 1;
         } else if (!strcmp(argv[i], "--depay-drop-corrupt-au")) {

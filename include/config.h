@@ -20,6 +20,12 @@ typedef enum {
 } CustomSinkMode;
 
 typedef enum {
+    STREAM_PROFILE_LOW_LATENCY = 0,
+    STREAM_PROFILE_MEDIUM_LATENCY,
+    STREAM_PROFILE_HIGH_LATENCY,
+} StreamProfile;
+
+typedef enum {
     RECORD_MODE_STANDARD = 0,
     RECORD_MODE_SEQUENTIAL,
     RECORD_MODE_FRAGMENTED,
@@ -56,6 +62,8 @@ typedef struct {
     unsigned int loss_threshold;
     double jitter_threshold_ms;
     unsigned int jitter_cooldown_ms;
+    unsigned int recovery_holdoff_ms;
+    unsigned int clean_frames_for_recovery;
 } IdrCfg;
 
 typedef struct {
@@ -72,6 +80,7 @@ typedef struct {
     int vid_pt;
     int aud_pt;
     int appsink_max_buffers;
+    StreamProfile stream_profile;
     int depay_emit_partial_au;
     int decoder_drop_error_frames;
     int jitterbuffer_enable;
@@ -128,6 +137,9 @@ void cfg_get_process_affinity(const AppCfg *cfg, cpu_set_t *set_out);
 int cfg_get_thread_affinity(const AppCfg *cfg, int slot, cpu_set_t *set_out);
 int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out);
 const char *cfg_custom_sink_mode_name(CustomSinkMode mode);
+int cfg_parse_stream_profile(const char *value, StreamProfile *profile_out);
+const char *cfg_stream_profile_name(StreamProfile profile);
+void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile);
 int cfg_parse_record_mode(const char *value, RecordMode *mode_out);
 const char *cfg_record_mode_name(RecordMode mode);
 int cfg_parse_host_and_port(const char *value, char *host_out, size_t host_len, int *port_out);

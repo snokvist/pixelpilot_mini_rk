@@ -903,6 +903,15 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             }
             return 0;
         }
+        if (strcasecmp(key, "stream-profile") == 0) {
+            StreamProfile profile;
+            if (cfg_parse_stream_profile(value, &profile) != 0) {
+                LOGE("config: invalid pipeline.stream-profile '%s'", value);
+                return -1;
+            }
+            cfg_apply_stream_profile(cfg, profile);
+            return 0;
+        }
         if (strcasecmp(key, "depay-emit-partial-au") == 0) {
             int v = 0;
             if (parse_bool(value, &v) != 0) {

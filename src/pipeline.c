@@ -709,6 +709,8 @@ static gpointer appsink_thread_func(gpointer data) {
                     LOGW("Pipeline: corrupted H.265 access unit detected; requesting IDR");
                     idr_requester_handle_warning(ps->idr_requester);
                 }
+            } else if (ps->idr_requester != NULL) {
+                idr_requester_note_clean_frame(ps->idr_requester);
             }
 
             GstMapInfo map;

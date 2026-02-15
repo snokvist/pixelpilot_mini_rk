@@ -66,6 +66,7 @@ to the defaults listed in `src/config.c` when omitted.
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
+| `[pipeline].stream-profile` | End-to-end recovery/latency preset: `low-latency` (120 fps, ~1-2 frame delay), `medium-latency` (60 fps), `high-latency` (30 fps, stability-first). |
 | `[pipeline].depay-emit-partial-au` | `true` (default) forwards damaged H.265 access units with `CORRUPTED`/`DISCONT` flags so display continuity is preserved; `false` drops damaged AUs before decode. |
 | `[pipeline].decoder-drop-error-frames` | `false` (default) keeps frames that the decoder marks with error metadata (still triggers IDR); set `true` to drop those frames for cleaner images at the cost of visible discontinuities. |
 | `[pipeline].jitterbuffer-enable` | `false` (default) bypasses RTP reordering; set `true` to enable the in-process `sstarrtpjitterbuffer` for stability-first playback under packet reordering. |
@@ -269,23 +270,17 @@ Tune the behaviour through `[idr]` in the INI (or the matching `--idr-*` CLI fla
 
 When 64 consecutive HTTP bursts fail to clear the decoder warnings, the requester now gives up on further IDR spam and tells the main loop to rebuild the entire pipeline. This mirrors a manual restart: the pipeline tears down the UDP receiver, decoder, and sinks before bringing them back up with the existing configuration. The strategy avoids endless HTTP loops when the camera ignores triggers or the stream never delivers a usable key frame.
 
-## Low-latency corruption handling profile (120 fps target)
+## Stream profiles (recommended)
 
-For streams where end-to-end delay should stay near a single frame, start with:
+Prefer the preset instead of tuning many independent knobs:
 
-- `pipeline.appsink-max-buffers = 1`
-- `pipeline.depay-emit-partial-au = true`
-- `pipeline.decoder-drop-error-frames = false`
-- `pipeline.jitterbuffer-enable = false`
-- keep `[idr].enable = true` and `[idr].stats-trigger = true`
+- `pipeline.stream-profile = low-latency` for 120 fps links where max latency target is roughly 1-2 frames.
+- `pipeline.stream-profile = medium-latency` for 60 fps links with moderate jitter tolerance.
+- `pipeline.stream-profile = high-latency` for 30 fps links where stability is prioritized over immediacy.
 
-This profile prefers showing partially damaged frames over freezing on old frames while still forcing fast IDR-based recovery when corruption is detected.
+Each profile coordinates depay partial-frame behavior, decoder error-frame handling, jitterbuffer behavior, and IDR hysteresis controls so transient burst recovery is faster and IDR storms settle quickly once clean frames return.
 
-For a stability-first profile (accepting extra delay to absorb reorder jitter), set:
-
-- `pipeline.jitterbuffer-enable = true`
-- `pipeline.jitterbuffer-latency-ms = 20` (or approximately 2-3 frame times)
-- `pipeline.jitterbuffer-max-misorder = 128`
+Advanced keys (`depay-emit-partial-au`, `decoder-drop-error-frames`, `jitterbuffer-*`, and `[idr]` thresholds) are still available for expert overrides.
 
 Manual restarts follow the same path. Send the process a `SIGHUP` (for example `kill -HUP $(cat /tmp/pixelpilot_mini_rk.pid)`) to force an immediate teardown/restart cycle without dropping other runtime toggles such as audio fallbacks or active OSD overlays.
 
@@ -310,6 +305,6 @@ If your terminal is very small, the UI may be truncated to avoid curses drawing 
 
 In pass-through and non-delay drop modes, the injector now forwards packets immediately (without queuing) to avoid adding artificial latency. Queue depth is primarily expected in delay/jitter modes.
 
-Use `+` / `-` to adjust the active mode severity directly (instead of mode-specific increase/decrease key pairs).
+Use `+` / `-` to adjust the active mode severity directly, and `{` / `}` to adjust the secondary burst-period knob on burst modes.
 
 When using "drop every N frames", it is normal for H.265 decode to stall until the next IDR/CRA if a dropped frame was a reference frame; this often appears as repeated old output rather than green corruption on Rockchip MPP.
