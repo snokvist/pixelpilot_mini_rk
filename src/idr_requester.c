@@ -583,13 +583,16 @@ void idr_requester_note_clean_frame(IdrRequester *req) {
     }
 
     if (req->clean_streak >= threshold) {
+        gboolean had_active_recovery = req->active || req->attempt_count > 0 || req->last_request_ms != 0;
         req->active = FALSE;
         req->attempt_count = 0;
         req->next_interval_ms = 0;
         req->last_request_ms = 0;
         req->reinit_pending = FALSE;
         req->clean_streak = 0;
-        req->recovery_suppress_until_ms = now_ms + req->recovery_holdoff_ms;
+        if (had_active_recovery) {
+            req->recovery_suppress_until_ms = now_ms + req->recovery_holdoff_ms;
+        }
     }
     g_mutex_unlock(&req->lock);
 }
