@@ -912,44 +912,6 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             cfg_apply_stream_profile(cfg, profile);
             return 0;
         }
-        if (strcasecmp(key, "jitterbuffer-enable") == 0) {
-            if (cfg->stream_profile_lock_controls) {
-                LOGW("config: ignoring pipeline.jitterbuffer-enable because pipeline.stream-profile controls jitter/IDR tuning");
-                return 0;
-            }
-            int v = 0;
-            if (parse_bool(value, &v) != 0) {
-                return -1;
-            }
-            cfg->jitterbuffer_enable = v;
-            return 0;
-        }
-        if (strcasecmp(key, "jitterbuffer-latency-ms") == 0) {
-            if (cfg->stream_profile_lock_controls) {
-                LOGW("config: ignoring pipeline.jitterbuffer-latency-ms because pipeline.stream-profile controls jitter/IDR tuning");
-                return 0;
-            }
-            int v = atoi(value);
-            if (v < 0) {
-                LOGE("config: pipeline.jitterbuffer-latency-ms '%s' must be >= 0", value);
-                v = 0;
-            }
-            cfg->jitterbuffer_latency_ms = (unsigned int)v;
-            return 0;
-        }
-        if (strcasecmp(key, "jitterbuffer-max-misorder") == 0) {
-            if (cfg->stream_profile_lock_controls) {
-                LOGW("config: ignoring pipeline.jitterbuffer-max-misorder because pipeline.stream-profile controls jitter/IDR tuning");
-                return 0;
-            }
-            int v = atoi(value);
-            if (v < 0) {
-                LOGE("config: pipeline.jitterbuffer-max-misorder '%s' must be >= 0", value);
-                v = 0;
-            }
-            cfg->jitterbuffer_max_misorder = (unsigned int)v;
-            return 0;
-        }
         if (strcasecmp(key, "custom-sink") == 0) {
             CustomSinkMode mode;
             if (cfg_parse_custom_sink_mode(value, &mode) != 0) {

@@ -25,10 +25,6 @@ static void usage(const char *prog) {
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --appsink-max-buffers N      (default: 4)\n"
             "  --stream-profile PROFILE     (low-latency|medium-latency|high-latency)\n"
-            "  --jitterbuffer-enable        (enable in-pipeline RTP reorder buffer)\n"
-            "  --jitterbuffer-disable       (disable in-pipeline RTP reorder buffer; default)\n"
-            "  --jitterbuffer-latency-ms N  (wait budget before skipping gaps; default: 8)\n"
-            "  --jitterbuffer-max-misorder N (max RTP sequence distance to reorder; default: 64)\n"
             "  --custom-sink MODE           (receiver|udpsrc; default: receiver)\n"
             "  --aud-dev STR                (default: plughw:CARD=rockchiphdmi0,DEV=0)\n"
             "  --no-audio                   (drop audio branch entirely)\n"
@@ -173,7 +169,7 @@ void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
 
     switch (profile) {
     case STREAM_PROFILE_LOW_LATENCY:
-        cfg->depay_emit_partial_au = 1;
+        cfg->depay_emit_partial_au = 0;
         cfg->decoder_drop_error_frames = 0;
         cfg->jitterbuffer_enable = 0;
         cfg->jitterbuffer_latency_ms = 4;
@@ -186,7 +182,7 @@ void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
         cfg->idr.clean_frames_for_recovery = 12;
         break;
     case STREAM_PROFILE_MEDIUM_LATENCY:
-        cfg->depay_emit_partial_au = 1;
+        cfg->depay_emit_partial_au = 0;
         cfg->decoder_drop_error_frames = 0;
         cfg->jitterbuffer_enable = 1;
         cfg->jitterbuffer_latency_ms = 12;
@@ -199,7 +195,7 @@ void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
         cfg->idr.clean_frames_for_recovery = 12;
         break;
     case STREAM_PROFILE_HIGH_LATENCY:
-        cfg->depay_emit_partial_au = 1;
+        cfg->depay_emit_partial_au = 0;
         cfg->decoder_drop_error_frames = 0;
         cfg->jitterbuffer_enable = 1;
         cfg->jitterbuffer_latency_ms = 25;
@@ -545,42 +541,6 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg_apply_stream_profile(cfg, profile);
-        } else if (!strcmp(argv[i], "--jitterbuffer-enable")) {
-            if (cfg->stream_profile_lock_controls) {
-                LOGW("Ignoring --jitterbuffer-enable because --stream-profile controls jitter/IDR tuning");
-                continue;
-            }
-            cfg->jitterbuffer_enable = 1;
-        } else if (!strcmp(argv[i], "--jitterbuffer-disable")) {
-            if (cfg->stream_profile_lock_controls) {
-                LOGW("Ignoring --jitterbuffer-disable because --stream-profile controls jitter/IDR tuning");
-                continue;
-            }
-            cfg->jitterbuffer_enable = 0;
-        } else if (!strcmp(argv[i], "--jitterbuffer-latency-ms") && i + 1 < argc) {
-            if (cfg->stream_profile_lock_controls) {
-                LOGW("Ignoring --jitterbuffer-latency-ms because --stream-profile controls jitter/IDR tuning");
-                ++i;
-                continue;
-            }
-            int latency = atoi(argv[++i]);
-            if (latency < 0) {
-                LOGW("--jitterbuffer-latency-ms must be >= 0; clamping to 0");
-                latency = 0;
-            }
-            cfg->jitterbuffer_latency_ms = (unsigned int)latency;
-        } else if (!strcmp(argv[i], "--jitterbuffer-max-misorder") && i + 1 < argc) {
-            if (cfg->stream_profile_lock_controls) {
-                LOGW("Ignoring --jitterbuffer-max-misorder because --stream-profile controls jitter/IDR tuning");
-                ++i;
-                continue;
-            }
-            int misorder = atoi(argv[++i]);
-            if (misorder < 0) {
-                LOGW("--jitterbuffer-max-misorder must be >= 0; clamping to 0");
-                misorder = 0;
-            }
-            cfg->jitterbuffer_max_misorder = (unsigned int)misorder;
         } else if (!strcmp(argv[i], "--custom-sink") && i + 1 < argc) {
             const char *mode_str = argv[++i];
             CustomSinkMode mode;
