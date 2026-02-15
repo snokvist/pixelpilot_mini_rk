@@ -18,6 +18,7 @@
 #define IDR_MAX_INTERVAL_MS 500u
 #define IDR_QUIET_RESET_MS 750u
 #define IDR_REINIT_THRESHOLD 64u
+#define IDR_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD 5u
 
 typedef struct {
     IdrRequester *owner;
@@ -52,6 +53,7 @@ struct IdrRequester {
     gboolean shutting_down;
 
     guint64 total_requests;
+    guint consecutive_failures;
 
     IdrReinitCallback reinit_cb;
     gpointer reinit_user_data;
@@ -60,6 +62,32 @@ struct IdrRequester {
 
 static guint64 monotonic_ms(void) {
     return (guint64)g_get_monotonic_time() / 1000ull;
+}
+
+static void idr_requester_reset_backoff_locked(IdrRequester *req) {
+    if (req == NULL) {
+        return;
+    }
+    req->active = FALSE;
+    req->attempt_count = 0;
+    req->next_interval_ms = 0;
+    req->last_request_ms = 0;
+    req->reinit_pending = FALSE;
+}
+
+static void idr_requester_reset_failure_streak_locked(IdrRequester *req) {
+    if (req == NULL) {
+        return;
+    }
+    req->consecutive_failures = 0;
+}
+
+static void idr_requester_disable_locked(IdrRequester *req) {
+    if (req == NULL) {
+        return;
+    }
+    req->enabled = FALSE;
+    idr_requester_reset_backoff_locked(req);
 }
 
 static void sanitize_path(const char *src, char *dst, size_t dst_sz) {
@@ -202,6 +230,8 @@ static gpointer idr_requester_http_worker(gpointer data) {
     }
 
     gboolean ok = send_http_request(task);
+    gboolean disable_due_to_errors = FALSE;
+    guint failure_count = 0;
     if (!ok) {
         LOGW("IDR requester: HTTP request to %s:%u%s did not succeed",
              task->host,
@@ -210,11 +240,25 @@ static gpointer idr_requester_http_worker(gpointer data) {
     }
 
     g_mutex_lock(&task->owner->lock);
+    if (ok) {
+        idr_requester_reset_failure_streak_locked(task->owner);
+    } else if (task->owner->consecutive_failures < G_MAXUINT) {
+        task->owner->consecutive_failures++;
+        failure_count = task->owner->consecutive_failures;
+        if (task->owner->consecutive_failures >= IDR_CONSECUTIVE_FAILURE_DISABLE_THRESHOLD) {
+            idr_requester_disable_locked(task->owner);
+            disable_due_to_errors = TRUE;
+        }
+    }
     task->owner->request_in_flight = FALSE;
     if (task->owner->cond_initialized) {
         g_cond_broadcast(&task->owner->cond);
     }
     g_mutex_unlock(&task->owner->lock);
+
+    if (disable_due_to_errors) {
+        LOGW("IDR requester: disabled after %u consecutive request failures", failure_count);
+    }
 
     g_free(task);
     return NULL;
@@ -274,6 +318,7 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
     req->request_in_flight = FALSE;
     req->shutting_down = FALSE;
     req->total_requests = 0;
+    req->consecutive_failures = 0;
     req->reinit_cb = NULL;
     req->reinit_user_data = NULL;
     req->reinit_pending = FALSE;
@@ -312,13 +357,8 @@ void idr_requester_set_enabled(IdrRequester *req, gboolean enabled) {
     }
     g_mutex_lock(&req->lock);
     req->enabled = enabled ? TRUE : FALSE;
-    if (!req->enabled) {
-        req->active = FALSE;
-        req->attempt_count = 0;
-        req->next_interval_ms = 0;
-        req->last_request_ms = 0;
-        req->reinit_pending = FALSE;
-    }
+    idr_requester_reset_backoff_locked(req);
+    idr_requester_reset_failure_streak_locked(req);
     g_mutex_unlock(&req->lock);
 }
 
@@ -352,17 +392,15 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
         req->source_addr = sin->sin_addr;
         g_strlcpy(req->source_host, host, sizeof(req->source_host));
         req->have_source = TRUE;
-        req->active = FALSE;
-        req->attempt_count = 0;
-        req->next_interval_ms = 0;
-        req->last_request_ms = 0;
-        req->reinit_pending = FALSE;
+        idr_requester_reset_backoff_locked(req);
+        idr_requester_reset_failure_streak_locked(req);
         changed = TRUE;
     }
     g_mutex_unlock(&req->lock);
 
     if (changed) {
         LOGI("IDR requester: tracking source %s", host);
+        idr_requester_handle_warning(req);
     }
 }
 
@@ -397,10 +435,7 @@ void idr_requester_handle_warning(IdrRequester *req) {
     if (req->active && req->last_warning_ms != 0 && now_ms > req->last_warning_ms) {
         guint64 quiet = now_ms - req->last_warning_ms;
         if (quiet > IDR_QUIET_RESET_MS) {
-            req->active = FALSE;
-            req->attempt_count = 0;
-            req->next_interval_ms = 0;
-            req->last_request_ms = 0;
+            idr_requester_reset_backoff_locked(req);
         }
     }
 
@@ -434,10 +469,8 @@ void idr_requester_handle_warning(IdrRequester *req) {
             reinit_data = req->reinit_user_data;
             req->reinit_pending = TRUE;
             req->request_in_flight = FALSE;
-            req->active = FALSE;
-            req->attempt_count = 0;
-            req->next_interval_ms = 0;
-            req->last_request_ms = 0;
+            idr_requester_reset_backoff_locked(req);
+            req->reinit_pending = TRUE;
             g_strlcpy(host_copy, req->source_host, sizeof(host_copy));
             g_strlcpy(path_copy, req->http_path, sizeof(path_copy));
             port_copy = req->http_port;
@@ -569,4 +602,3 @@ void idr_requester_set_reinit_callback(IdrRequester *req, IdrReinitCallback cb, 
     req->reinit_user_data = user_data;
     g_mutex_unlock(&req->lock);
 }
-

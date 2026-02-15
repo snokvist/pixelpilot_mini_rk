@@ -428,9 +428,9 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
 
     ps->pipeline = pipeline;
     ps->video_sink = appsink;
-    ps->video_depay = depay;
-    ps->video_parser = parser;
-    ps->video_capsfilter = capsfilter;
+    ps->video_depay = gst_object_ref(depay);
+    ps->video_parser = gst_object_ref(parser);
+    ps->video_capsfilter = gst_object_ref(capsfilter);
     ps->udp_receiver = receiver;
     return TRUE;
 
@@ -904,6 +904,7 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     }
     if (ps->idr_requester != NULL) {
         idr_requester_set_reinit_callback(ps->idr_requester, idr_requester_reinit_callback, ps);
+        idr_requester_handle_warning(ps->idr_requester);
     }
 
     GstElement *pipeline = NULL;
