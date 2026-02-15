@@ -40,6 +40,7 @@
 #define DECODER_MAX_FRAMES 24
 #define VIDEO_DECODER_MAX_PLANE_UPSCALE 4.0
 #define VIDEO_DECODER_RECOVERY_IDR_RETRY_MS 1000u
+#define VIDEO_DECODER_RECOVERY_STABLE_FRAMES 6u
 
 static gboolean create_test_nv12_fb(int fd, uint32_t width, uint32_t height, uint32_t *out_fb_id,
                                     uint32_t *out_handle) {
@@ -420,6 +421,7 @@ struct VideoDecoder {
 
     IdrRequester *idr_requester;
     gboolean recovering_until_idr;
+    guint recovery_probe_frames_remaining;
     guint64 last_recovery_idr_request_ms;
 
     VideoCtm ctm;
@@ -1364,6 +1366,7 @@ static gpointer frame_thread_func(gpointer data) {
                 if (!vd->recovering_until_idr) {
                     LOGW("MPP: decode error detected; dropping until recovery point NAL");
                     vd->recovering_until_idr = TRUE;
+                    vd->recovery_probe_frames_remaining = 0;
                     should_request_idr = TRUE;
                 } else if (now_ms - vd->last_recovery_idr_request_ms >= VIDEO_DECODER_RECOVERY_IDR_RETRY_MS) {
                     should_request_idr = TRUE;
@@ -1386,6 +1389,21 @@ static gpointer frame_thread_func(gpointer data) {
                 }
                 continue;
             }
+
+            g_mutex_lock(&vd->lock);
+            if (vd->recovery_probe_frames_remaining > 0) {
+                vd->recovery_probe_frames_remaining--;
+                if (vd->recovery_probe_frames_remaining == 0) {
+                    g_mutex_unlock(&vd->lock);
+                    if (vd->idr_requester != NULL) {
+                        idr_requester_note_keyframe(vd->idr_requester);
+                    }
+                    LOGI("Video decoder: recovery stabilized after %u frames",
+                         (unsigned int)VIDEO_DECODER_RECOVERY_STABLE_FRAMES);
+                    g_mutex_lock(&vd->lock);
+                }
+            }
+            g_mutex_unlock(&vd->lock);
 
             MppBuffer buffer = mpp_frame_get_buffer(frame);
             if (buffer != NULL) {
@@ -1689,6 +1707,7 @@ int video_decoder_start(VideoDecoder *vd) {
     vd->running = TRUE;
     vd->eos_received = FALSE;
     vd->recovering_until_idr = FALSE;
+    vd->recovery_probe_frames_remaining = 0;
     vd->last_recovery_idr_request_ms = 0;
 
     vd->frame_thread = g_thread_new("mpp-frame", frame_thread_func, vd);
@@ -1766,6 +1785,7 @@ int video_decoder_feed(VideoDecoder *vd, const guint8 *data, size_t size) {
             allow_packet = FALSE;
         } else {
             vd->recovering_until_idr = FALSE;
+            vd->recovery_probe_frames_remaining = VIDEO_DECODER_RECOVERY_STABLE_FRAMES;
             vd->last_recovery_idr_request_ms = 0;
         }
     }
@@ -1775,10 +1795,7 @@ int video_decoder_feed(VideoDecoder *vd, const guint8 *data, size_t size) {
         return 0;
     }
     if (recovery_point) {
-        if (vd->idr_requester != NULL) {
-            idr_requester_note_keyframe(vd->idr_requester);
-        }
-        LOGI("Video decoder: recovery point received; resuming decode feed");
+        LOGI("Video decoder: recovery point received; probing stream stability");
     }
 
     copy_packet_data(vd->packet_buf, data, size);
