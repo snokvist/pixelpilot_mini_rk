@@ -61,6 +61,7 @@ struct IdrRequester {
     IdrReinitCallback reinit_cb;
     gpointer reinit_user_data;
     gboolean reinit_pending;
+    gboolean startup_request_pending;
 };
 
 static guint64 monotonic_ms(void) {
@@ -330,6 +331,7 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
     req->reinit_cb = NULL;
     req->reinit_user_data = NULL;
     req->reinit_pending = FALSE;
+    req->startup_request_pending = req->enabled ? TRUE : FALSE;
 
     return req;
 }
@@ -365,6 +367,7 @@ void idr_requester_set_enabled(IdrRequester *req, gboolean enabled) {
     }
     g_mutex_lock(&req->lock);
     req->enabled = enabled ? TRUE : FALSE;
+    req->startup_request_pending = req->enabled ? TRUE : FALSE;
     idr_requester_reset_backoff_locked(req);
     idr_requester_reset_failure_streak_locked(req);
     g_mutex_unlock(&req->lock);
@@ -400,6 +403,7 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
         req->source_addr = sin->sin_addr;
         g_strlcpy(req->source_host, host, sizeof(req->source_host));
         req->have_source = TRUE;
+        req->startup_request_pending = TRUE;
         idr_requester_reset_backoff_locked(req);
         idr_requester_reset_failure_streak_locked(req);
         changed = TRUE;
@@ -408,6 +412,24 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
 
     if (changed) {
         LOGI("IDR requester: tracking source %s", host);
+    }
+}
+
+void idr_requester_trigger_startup(IdrRequester *req) {
+    if (req == NULL) {
+        return;
+    }
+
+    gboolean should_trigger = FALSE;
+
+    g_mutex_lock(&req->lock);
+    if (!req->shutting_down && req->enabled && req->have_source && req->startup_request_pending) {
+        req->startup_request_pending = FALSE;
+        should_trigger = TRUE;
+    }
+    g_mutex_unlock(&req->lock);
+
+    if (should_trigger) {
         idr_requester_handle_warning(req);
     }
 }

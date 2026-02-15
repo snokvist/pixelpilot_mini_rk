@@ -30,8 +30,6 @@
         }                                                                                           \
     } while (0)
 
-#define PIPELINE_STARTUP_IDR_DELAY_MS 300u
-
 // Simple context for filtering RTP payload types when udpsrc is active. Any
 // packet whose payload type does not match the configured video PT is dropped
 // before it reaches the depayloader so audio bursts do not flood the log.
@@ -1017,13 +1015,6 @@ int pipeline_start(const AppCfg *cfg, const ModesetResult *ms, int drm_fd, int a
     }
 
     ps->state = PIPELINE_RUNNING;
-
-    if (ps->idr_requester != NULL && cfg->idr.enable) {
-        /* Give the pipeline and sender a short warm-up window before the
-         * startup IDR request to avoid a too-early request being ignored. */
-        g_usleep((gulong)PIPELINE_STARTUP_IDR_DELAY_MS * 1000ul);
-        idr_requester_handle_warning(ps->idr_requester);
-    }
 
     if (pipeline_is_recording(ps)) {
         pipeline_request_idr(ps);

@@ -1005,6 +1005,7 @@ static gpointer receiver_thread(gpointer data) {
                 idr_requester_note_source(ur->idr,
                                           (const struct sockaddr *)msgs[i].msg_hdr.msg_name,
                                           msgs[i].msg_hdr.msg_namelen);
+                idr_requester_trigger_startup(ur->idr);
             }
 
             if (msgs[i].msg_hdr.msg_flags & MSG_TRUNC) {
