@@ -63,6 +63,8 @@
 <script>
 let baseUrl = '';
 let pollTimer = null;
+let pollInFlight = false;
+let connected = false;
 
 function setStatus(text){ document.getElementById('status').textContent = text; }
 function buildBaseUrl(){
@@ -72,13 +74,15 @@ function buildBaseUrl(){
 }
 
 async function send(obj){
-  if (!baseUrl) { setStatus('Not connected'); return; }
+  if (!connected || !baseUrl) { setStatus('Not connected'); return; }
   try {
-    await fetch(`${baseUrl}/command`, {
+    const response = await fetch(`${baseUrl}/command`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(obj)
     });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    await pollState();
   } catch (err) {
     setStatus(`Command failed: ${err}`);
   }
@@ -87,30 +91,47 @@ async function send(obj){
 function sendKey(key){ send({ key }); }
 
 async function pollState(){
-  if (!baseUrl) return;
+  if (!baseUrl || pollInFlight) return;
+  pollInFlight = true;
   try {
     const response = await fetch(`${baseUrl}/state`, { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const state = await response.json();
     renderState(state);
+    connected = true;
     setStatus(`Connected to ${baseUrl}`);
   } catch (err) {
+    connected = false;
     setStatus(`Polling failed: ${err}`);
+  } finally {
+    pollInFlight = false;
   }
+}
+
+function schedulePoll(){
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    await pollState();
+    if (baseUrl) {
+      schedulePoll();
+    }
+  }, 350);
 }
 
 function connect(){
   baseUrl = buildBaseUrl();
+  connected = false;
   setStatus(`Connecting to ${baseUrl} ...`);
-  if (pollTimer) clearInterval(pollTimer);
+  if (pollTimer) clearTimeout(pollTimer);
   pollState();
-  pollTimer = setInterval(pollState, 250);
+  schedulePoll();
 }
 
 function disconnect(){
-  if (pollTimer) clearInterval(pollTimer);
+  if (pollTimer) clearTimeout(pollTimer);
   pollTimer = null;
   baseUrl = '';
+  connected = false;
   setStatus('Disconnected');
 }
 
