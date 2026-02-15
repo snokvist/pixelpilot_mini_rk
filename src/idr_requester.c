@@ -682,6 +682,22 @@ void idr_requester_handle_warning(IdrRequester *req) {
     g_thread_unref(thread);
 }
 
+gboolean idr_requester_request_recent(const IdrRequester *req, guint within_ms) {
+    if (req == NULL || within_ms == 0) {
+        return FALSE;
+    }
+
+    guint64 now_ms = monotonic_ms();
+    gboolean recent = FALSE;
+    GMutex *lock = (GMutex *)&req->lock;
+    g_mutex_lock(lock);
+    if (req->last_request_ms != 0 && now_ms >= req->last_request_ms) {
+        recent = (now_ms - req->last_request_ms) <= within_ms;
+    }
+    g_mutex_unlock(lock);
+    return recent;
+}
+
 guint64 idr_requester_get_request_count(const IdrRequester *req) {
     if (req == NULL) {
         return 0;
