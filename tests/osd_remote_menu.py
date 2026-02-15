@@ -335,6 +335,8 @@ class WebUiBridge:
             f"Content-Type: {content_type}\r\n"
             f"Content-Length: {len(body)}\r\n"
             "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type\r\n"
             "Connection: close\r\n\r\n"
         ).encode("utf-8") + body
         try:
