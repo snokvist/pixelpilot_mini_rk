@@ -21,6 +21,7 @@
 #define IDR_REINIT_THRESHOLD 64u
 #define IDR_MIN_REQUEST_GAP_MS 250u
 #define IDR_POST_KEYFRAME_COOLDOWN_MS 500u
+#define IDR_REFUSED_DISABLE_THRESHOLD 5u
 
 typedef struct {
     IdrRequester *owner;
@@ -29,6 +30,12 @@ typedef struct {
     char path[IDR_PATH_MAX];
     guint timeout_ms;
 } IdrHttpTask;
+
+typedef enum {
+    IDR_HTTP_OK = 0,
+    IDR_HTTP_FAILED,
+    IDR_HTTP_REFUSED,
+} IdrHttpResult;
 
 struct IdrRequester {
     GMutex lock;
@@ -60,6 +67,7 @@ struct IdrRequester {
     gpointer reinit_user_data;
     gboolean reinit_pending;
     guint64 suppress_until_ms;
+    guint consecutive_refused;
 };
 
 static guint64 monotonic_ms(void) {
@@ -98,7 +106,6 @@ static gboolean configure_timeout(int fd, guint timeout_ms) {
     }
     return TRUE;
 }
-
 
 static gboolean wait_for_socket_connect(int fd, guint timeout_ms, int *out_error) {
     if (out_error != NULL) {
@@ -141,18 +148,19 @@ static gboolean wait_for_socket_connect(int fd, guint timeout_ms, int *out_error
     return so_error == 0;
 }
 
-static gboolean send_http_request(const IdrHttpTask *task) {
+static IdrHttpResult send_http_request(const IdrHttpTask *task) {
     if (task == NULL) {
-        return FALSE;
+        return IDR_HTTP_FAILED;
     }
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         LOGW("IDR requester: failed to create TCP socket: %s", g_strerror(errno));
-        return FALSE;
+        return IDR_HTTP_FAILED;
     }
 
     gboolean success = FALSE;
+    gboolean refused = FALSE;
 
     do {
         if (!configure_timeout(fd, task->timeout_ms)) {
@@ -169,6 +177,9 @@ static gboolean send_http_request(const IdrHttpTask *task) {
                          task->host,
                          (unsigned int)ntohs(task->addr.sin_port),
                          g_strerror(wait_error));
+                    if (wait_error == ECONNREFUSED) {
+                        refused = TRUE;
+                    }
                     break;
                 }
             } else {
@@ -176,6 +187,9 @@ static gboolean send_http_request(const IdrHttpTask *task) {
                      task->host,
                      (unsigned int)ntohs(task->addr.sin_port),
                      g_strerror(err));
+                if (err == ECONNREFUSED) {
+                    refused = TRUE;
+                }
                 break;
             }
         }
@@ -247,7 +261,10 @@ static gboolean send_http_request(const IdrHttpTask *task) {
     } while (0);
 
     close(fd);
-    return success;
+    if (success) {
+        return IDR_HTTP_OK;
+    }
+    return refused ? IDR_HTTP_REFUSED : IDR_HTTP_FAILED;
 }
 
 static gpointer idr_requester_http_worker(gpointer data) {
@@ -259,20 +276,44 @@ static gpointer idr_requester_http_worker(gpointer data) {
         return NULL;
     }
 
-    gboolean ok = send_http_request(task);
-    if (!ok) {
+    IdrHttpResult result = send_http_request(task);
+    if (result != IDR_HTTP_OK) {
         LOGW("IDR requester: HTTP request to %s:%u%s did not succeed",
              task->host,
              (unsigned int)ntohs(task->addr.sin_port),
              task->path);
     }
 
+    gboolean disable_due_to_refused = FALSE;
+
     g_mutex_lock(&task->owner->lock);
+    if (result == IDR_HTTP_REFUSED) {
+        if (task->owner->consecutive_refused < G_MAXUINT) {
+            task->owner->consecutive_refused++;
+        }
+        if (task->owner->consecutive_refused >= IDR_REFUSED_DISABLE_THRESHOLD) {
+            task->owner->enabled = FALSE;
+            task->owner->active = FALSE;
+            task->owner->attempt_count = 0;
+            task->owner->next_interval_ms = 0;
+            task->owner->last_request_ms = 0;
+            task->owner->reinit_pending = FALSE;
+            disable_due_to_refused = TRUE;
+        }
+    } else {
+        task->owner->consecutive_refused = 0;
+    }
+
     task->owner->request_in_flight = FALSE;
     if (task->owner->cond_initialized) {
         g_cond_broadcast(&task->owner->cond);
     }
     g_mutex_unlock(&task->owner->lock);
+
+    if (disable_due_to_refused) {
+        LOGW("IDR requester: disabling automatic IDR after %u consecutive connection refusals",
+             (unsigned int)IDR_REFUSED_DISABLE_THRESHOLD);
+    }
 
     g_free(task);
     return NULL;
@@ -336,6 +377,7 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
     req->reinit_user_data = NULL;
     req->reinit_pending = FALSE;
     req->suppress_until_ms = 0;
+    req->consecutive_refused = 0;
 
     return req;
 }
@@ -371,6 +413,7 @@ void idr_requester_set_enabled(IdrRequester *req, gboolean enabled) {
     }
     g_mutex_lock(&req->lock);
     req->enabled = enabled ? TRUE : FALSE;
+    req->consecutive_refused = 0;
     if (!req->enabled) {
         req->active = FALSE;
         req->attempt_count = 0;
@@ -418,6 +461,7 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
         req->last_request_ms = 0;
         req->reinit_pending = FALSE;
         req->suppress_until_ms = 0;
+        req->consecutive_refused = 0;
         changed = TRUE;
     }
     g_mutex_unlock(&req->lock);
@@ -442,6 +486,7 @@ void idr_requester_note_keyframe(IdrRequester *req) {
     req->last_request_ms = 0;
     req->reinit_pending = FALSE;
     req->suppress_until_ms = now_ms + IDR_POST_KEYFRAME_COOLDOWN_MS;
+    req->consecutive_refused = 0;
     g_mutex_unlock(&req->lock);
 }
 
