@@ -418,6 +418,7 @@ struct VideoDecoder {
     GThread *display_thread;
 
     IdrRequester *idr_requester;
+    gboolean drop_error_frames;
 
     VideoCtm ctm;
     uint32_t frame_fourcc;
@@ -1315,16 +1316,22 @@ static gpointer frame_thread_func(gpointer data) {
             RK_U32 errinfo = mpp_frame_get_errinfo(frame);
             RK_U32 discard = mpp_frame_get_discard(frame);
             if (G_UNLIKELY(errinfo || discard)) {
-                LOGW("MPP: dropping frame errinfo=%u discard=%u", errinfo, discard);
+                if (vd->drop_error_frames) {
+                    LOGW("MPP: dropping frame errinfo=%u discard=%u", errinfo, discard);
+                } else {
+                    LOGW("MPP: keeping frame despite errinfo=%u discard=%u for continuity", errinfo, discard);
+                }
                 if (vd->idr_requester != NULL) {
                     idr_requester_handle_warning(vd->idr_requester);
                 }
-                vd->eos_received = mpp_frame_get_eos(frame) ? TRUE : FALSE;
-                mpp_frame_deinit(&frame);
-                if (vd->eos_received) {
-                    break;
+                if (vd->drop_error_frames) {
+                    vd->eos_received = mpp_frame_get_eos(frame) ? TRUE : FALSE;
+                    mpp_frame_deinit(&frame);
+                    if (vd->eos_received) {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
             }
 
             MppBuffer buffer = mpp_frame_get_buffer(frame);
@@ -1461,6 +1468,7 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->frame_ver_stride = 0;
     vd->packet_buf_size = 0;
     vd->packet_buf = NULL;
+    vd->drop_error_frames = cfg->decoder_drop_error_frames ? TRUE : FALSE;
 
     uint32_t chosen_plane = 0;
     if (!video_decoder_select_plane(drm_fd, vd->crtc_id, (uint32_t)cfg->plane_id, &chosen_plane)) {

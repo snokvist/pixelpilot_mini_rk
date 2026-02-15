@@ -72,6 +72,11 @@ typedef struct {
     int vid_pt;
     int aud_pt;
     int appsink_max_buffers;
+    int depay_emit_partial_au;
+    int decoder_drop_error_frames;
+    int jitterbuffer_enable;
+    unsigned int jitterbuffer_latency_ms;
+    unsigned int jitterbuffer_max_misorder;
     int udpsrc_pt97_filter;
     CustomSinkMode custom_sink;
     char aud_dev[128];

@@ -903,6 +903,48 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             }
             return 0;
         }
+        if (strcasecmp(key, "depay-emit-partial-au") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->depay_emit_partial_au = v;
+            return 0;
+        }
+        if (strcasecmp(key, "decoder-drop-error-frames") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->decoder_drop_error_frames = v;
+            return 0;
+        }
+        if (strcasecmp(key, "jitterbuffer-enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->jitterbuffer_enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "jitterbuffer-latency-ms") == 0) {
+            int v = atoi(value);
+            if (v < 0) {
+                LOGE("config: pipeline.jitterbuffer-latency-ms '%s' must be >= 0", value);
+                v = 0;
+            }
+            cfg->jitterbuffer_latency_ms = (unsigned int)v;
+            return 0;
+        }
+        if (strcasecmp(key, "jitterbuffer-max-misorder") == 0) {
+            int v = atoi(value);
+            if (v < 0) {
+                LOGE("config: pipeline.jitterbuffer-max-misorder '%s' must be >= 0", value);
+                v = 0;
+            }
+            cfg->jitterbuffer_max_misorder = (unsigned int)v;
+            return 0;
+        }
         if (strcasecmp(key, "custom-sink") == 0) {
             CustomSinkMode mode;
             if (cfg_parse_custom_sink_mode(value, &mode) != 0) {

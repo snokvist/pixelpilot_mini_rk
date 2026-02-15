@@ -24,6 +24,14 @@ static void usage(const char *prog) {
             "  --vid-pt N                   (default: 97 H265)\n"
             "  --aud-pt N                   (default: 98 Opus)\n"
             "  --appsink-max-buffers N      (default: 4)\n"
+            "  --depay-emit-partial-au      (forward corrupted access units to decoder; default on)\n"
+            "  --depay-drop-corrupt-au      (drop corrupted access units before decoder)\n"
+            "  --decoder-drop-error-frames  (drop frames flagged with decoder errors)\n"
+            "  --decoder-keep-error-frames  (display frames flagged with decoder errors; default)\n"
+            "  --jitterbuffer-enable        (enable in-pipeline RTP reorder buffer)\n"
+            "  --jitterbuffer-disable       (disable in-pipeline RTP reorder buffer; default)\n"
+            "  --jitterbuffer-latency-ms N  (wait budget before skipping gaps; default: 8)\n"
+            "  --jitterbuffer-max-misorder N (max RTP sequence distance to reorder; default: 64)\n"
             "  --custom-sink MODE           (receiver|udpsrc; default: receiver)\n"
             "  --aud-dev STR                (default: plughw:CARD=rockchiphdmi0,DEV=0)\n"
             "  --no-audio                   (drop audio branch entirely)\n"
@@ -189,6 +197,11 @@ void cfg_defaults(AppCfg *c) {
     c->vid_pt = 97;
     c->aud_pt = 98;
     c->appsink_max_buffers = 4;
+    c->depay_emit_partial_au = 1;
+    c->decoder_drop_error_frames = 0;
+    c->jitterbuffer_enable = 0;
+    c->jitterbuffer_latency_ms = 8;
+    c->jitterbuffer_max_misorder = 64;
     c->udpsrc_pt97_filter = 1;
     c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
@@ -433,6 +446,32 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 LOGW("--appsink-max-buffers must be positive; clamping to 1");
                 cfg->appsink_max_buffers = 1;
             }
+        } else if (!strcmp(argv[i], "--depay-emit-partial-au")) {
+            cfg->depay_emit_partial_au = 1;
+        } else if (!strcmp(argv[i], "--depay-drop-corrupt-au")) {
+            cfg->depay_emit_partial_au = 0;
+        } else if (!strcmp(argv[i], "--decoder-drop-error-frames")) {
+            cfg->decoder_drop_error_frames = 1;
+        } else if (!strcmp(argv[i], "--decoder-keep-error-frames")) {
+            cfg->decoder_drop_error_frames = 0;
+        } else if (!strcmp(argv[i], "--jitterbuffer-enable")) {
+            cfg->jitterbuffer_enable = 1;
+        } else if (!strcmp(argv[i], "--jitterbuffer-disable")) {
+            cfg->jitterbuffer_enable = 0;
+        } else if (!strcmp(argv[i], "--jitterbuffer-latency-ms") && i + 1 < argc) {
+            int latency = atoi(argv[++i]);
+            if (latency < 0) {
+                LOGW("--jitterbuffer-latency-ms must be >= 0; clamping to 0");
+                latency = 0;
+            }
+            cfg->jitterbuffer_latency_ms = (unsigned int)latency;
+        } else if (!strcmp(argv[i], "--jitterbuffer-max-misorder") && i + 1 < argc) {
+            int misorder = atoi(argv[++i]);
+            if (misorder < 0) {
+                LOGW("--jitterbuffer-max-misorder must be >= 0; clamping to 0");
+                misorder = 0;
+            }
+            cfg->jitterbuffer_max_misorder = (unsigned int)misorder;
         } else if (!strcmp(argv[i], "--custom-sink") && i + 1 < argc) {
             const char *mode_str = argv[++i];
             CustomSinkMode mode;

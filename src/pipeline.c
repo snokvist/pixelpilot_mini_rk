@@ -4,6 +4,7 @@
 #include "h265_depay.h"
 #include "h265_parse.h"
 #include "logging.h"
+#include "rtp_jitterbuffer.h"
 #include "video_recorder.h"
 
 #ifndef GST_USE_UNSTABLE_API
@@ -146,6 +147,9 @@ static void ensure_gst_initialized(const AppCfg *cfg) {
         if (!sstar_h265_parse_register()) {
             LOGW("Failed to register sstarh265parse; falling back to system plugin if available");
         }
+        if (!sstar_rtp_jitterbuffer_register()) {
+            LOGW("Failed to register sstarrtpjitterbuffer; falling back to no reorder stage");
+        }
         g_once_init_leave(&inited, 1);
     }
 }
@@ -245,6 +249,7 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     GstElement *pipeline = NULL;
     GstElement *appsrc = NULL;
     GstElement *depay = NULL;
+    GstElement *jitterbuffer = NULL;
     GstElement *udp_queue = NULL;
     GstElement *parser = NULL;
     GstElement *capsfilter = NULL;
@@ -280,6 +285,8 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
 
     depay = gst_element_factory_make("sstarh265depay", "video_depay");
     CHECK_ELEM(depay, "sstarh265depay");
+    jitterbuffer = gst_element_factory_make("sstarrtpjitterbuffer", "video_jitterbuffer");
+    CHECK_ELEM(jitterbuffer, "sstarrtpjitterbuffer");
     udp_queue = gst_element_factory_make("queue", "udp_queue");
     CHECK_ELEM(udp_queue, "queue");
     parser = gst_element_factory_make("sstarh265parse", "video_parser");
@@ -295,7 +302,15 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     g_object_set(appsink, "sync", FALSE, NULL);
 
     if (cfg != NULL) {
-        g_object_set(depay, "payload-type", cfg->vid_pt, NULL);
+        g_object_set(depay,
+                     "payload-type", cfg->vid_pt,
+                     "emit-partial-au", cfg->depay_emit_partial_au ? TRUE : FALSE,
+                     NULL);
+        g_object_set(jitterbuffer,
+                     "enabled", cfg->jitterbuffer_enable ? TRUE : FALSE,
+                     "latency-ms", cfg->jitterbuffer_latency_ms,
+                     "max-misorder", cfg->jitterbuffer_max_misorder,
+                     NULL);
     }
 
     raw_caps = gst_caps_new_simple("video/x-h265", "stream-format", G_TYPE_STRING, "byte-stream",
@@ -312,8 +327,8 @@ static gboolean setup_udp_receiver_passthrough(PipelineState *ps, const AppCfg *
     g_object_set(udp_queue, "leaky", 2, "max-size-time", (guint64)0, "max-size-bytes", (guint64)0,
                  "max-size-buffers", 16, NULL);
 
-    gst_bin_add_many(GST_BIN(pipeline), appsrc, depay, udp_queue, parser, capsfilter, appsink, NULL);
-    if (!gst_element_link_many(appsrc, depay, udp_queue, NULL)) {
+    gst_bin_add_many(GST_BIN(pipeline), appsrc, jitterbuffer, depay, udp_queue, parser, capsfilter, appsink, NULL);
+    if (!gst_element_link_many(appsrc, jitterbuffer, depay, udp_queue, NULL)) {
         LOGE("Failed to link UDP receiver passthrough source chain");
         goto fail;
     }
@@ -504,6 +519,9 @@ fail:
     if (parser != NULL && GST_OBJECT_PARENT(parser) == NULL) {
         gst_object_unref(parser);
     }
+    if (jitterbuffer != NULL && GST_OBJECT_PARENT(jitterbuffer) == NULL) {
+        gst_object_unref(jitterbuffer);
+    }
     if (udp_queue != NULL && GST_OBJECT_PARENT(udp_queue) == NULL) {
         gst_object_unref(udp_queue);
     }
@@ -542,11 +560,17 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
 
     gchar *desc = g_strdup_printf(
         "udpsrc name=udp_source port=%d caps=\"%s\" ! "
+        "sstarrtpjitterbuffer name=video_jitterbuffer enabled=%s latency-ms=%u max-misorder=%u ! "
         "sstarh265depay name=video_depay payload-type=%d ! "
         "sstarh265parse name=video_parser ! "
         "capsfilter name=video_capsfilter caps=\"video/x-h265, stream-format=(string)byte-stream\" ! "
         "appsink drop=true name=out_appsink",
-        cfg->udp_port, caps_desc, cfg->vid_pt);
+        cfg->udp_port,
+        caps_desc,
+        cfg->jitterbuffer_enable ? "true" : "false",
+        cfg->jitterbuffer_latency_ms,
+        cfg->jitterbuffer_max_misorder,
+        cfg->vid_pt);
     g_free(caps_desc);
 
     if (desc == NULL) {
@@ -575,6 +599,12 @@ static gboolean setup_gst_udpsrc_pipeline(PipelineState *ps, const AppCfg *cfg) 
         LOGE("Failed to find appsink in udpsrc pipeline");
         gst_object_unref(pipeline);
         return FALSE;
+    }
+
+    GstElement *depay = gst_bin_get_by_name(GST_BIN(pipeline), "video_depay");
+    if (depay != NULL) {
+        g_object_set(depay, "emit-partial-au", cfg->depay_emit_partial_au ? TRUE : FALSE, NULL);
+        gst_object_unref(depay);
     }
 
     guint max_buffers = (cfg && cfg->appsink_max_buffers > 0) ? (guint)cfg->appsink_max_buffers : 4u;
@@ -673,6 +703,14 @@ static gpointer appsink_thread_func(gpointer data) {
 
         GstBuffer *buffer = gst_sample_get_buffer(sample);
         if (buffer != NULL) {
+            GstBufferFlags flags = GST_BUFFER_FLAGS(buffer);
+            if ((flags & GST_BUFFER_FLAG_CORRUPTED) != 0) {
+                if (ps->idr_requester != NULL) {
+                    LOGW("Pipeline: corrupted H.265 access unit detected; requesting IDR");
+                    idr_requester_handle_warning(ps->idr_requester);
+                }
+            }
+
             GstMapInfo map;
             if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
                 if (map.size > 0 && map.size <= max_packet) {

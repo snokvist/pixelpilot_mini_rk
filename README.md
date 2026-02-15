@@ -66,6 +66,11 @@ to the defaults listed in `src/config.c` when omitted.
 | `[udp].port` | UDP port that the RTP stream arrives on. |
 | `[udp].video-pt` / `[udp].audio-pt` | Payload types for the video (default 97/H.265) and audio (default 98/Opus) streams. |
 | `[pipeline].appsink-max-buffers` | Maximum number of buffers queued on the appsink before older frames are dropped. Exposed via the OSD token `{pipeline.appsink_max_buffers}`. |
+| `[pipeline].depay-emit-partial-au` | `true` (default) forwards damaged H.265 access units with `CORRUPTED`/`DISCONT` flags so display continuity is preserved; `false` drops damaged AUs before decode. |
+| `[pipeline].decoder-drop-error-frames` | `false` (default) keeps frames that the decoder marks with error metadata (still triggers IDR); set `true` to drop those frames for cleaner images at the cost of visible discontinuities. |
+| `[pipeline].jitterbuffer-enable` | `false` (default) bypasses RTP reordering; set `true` to enable the in-process `sstarrtpjitterbuffer` for stability-first playback under packet reordering. |
+| `[pipeline].jitterbuffer-latency-ms` | Gap wait budget before the jitterbuffer skips missing RTP sequence numbers (default `8`). Increase to favor stability over latency. |
+| `[pipeline].jitterbuffer-max-misorder` | Maximum RTP sequence distance the jitterbuffer will hold for reordering (default `64`). |
 | `[pipeline].custom-sink` | `receiver` to use the custom UDP receiver, or `udpsrc` for the bare GStreamer `udpsrc` pipeline. |
 | `[pipeline].pt97-filter` | `true` (default) keeps the RTP payload-type filter on `udpsrc`; set `false` to accept all payload types when CPU headroom is limited. |
 | `[idr].enable` | `true` enables the automatic IDR requester that fires HTTP recovery bursts when decode warnings appear. |
@@ -263,5 +268,23 @@ Packet loss or corruption around an IDR frame leaves the decoder without valid r
 Tune the behaviour through `[idr]` in the INI (or the matching `--idr-*` CLI flags): disable it entirely with `idr.enable = false`, override the port or path to match the camera firmware, or extend the timeout when proxies or long RTT links sit between the devices. Every trigger is logged with the cumulative total, and the `udp.idr_requests` counter exposes the same total in OSD templates, SSE payloads, and other telemetry sinks.
 
 When 64 consecutive HTTP bursts fail to clear the decoder warnings, the requester now gives up on further IDR spam and tells the main loop to rebuild the entire pipeline. This mirrors a manual restart: the pipeline tears down the UDP receiver, decoder, and sinks before bringing them back up with the existing configuration. The strategy avoids endless HTTP loops when the camera ignores triggers or the stream never delivers a usable key frame.
+
+## Low-latency corruption handling profile (120 fps target)
+
+For streams where end-to-end delay should stay near a single frame, start with:
+
+- `pipeline.appsink-max-buffers = 1`
+- `pipeline.depay-emit-partial-au = true`
+- `pipeline.decoder-drop-error-frames = false`
+- `pipeline.jitterbuffer-enable = false`
+- keep `[idr].enable = true` and `[idr].stats-trigger = true`
+
+This profile prefers showing partially damaged frames over freezing on old frames while still forcing fast IDR-based recovery when corruption is detected.
+
+For a stability-first profile (accepting extra delay to absorb reorder jitter), set:
+
+- `pipeline.jitterbuffer-enable = true`
+- `pipeline.jitterbuffer-latency-ms = 20` (or approximately 2-3 frame times)
+- `pipeline.jitterbuffer-max-misorder = 128`
 
 Manual restarts follow the same path. Send the process a `SIGHUP` (for example `kill -HUP $(cat /tmp/pixelpilot_mini_rk.pid)`) to force an immediate teardown/restart cycle without dropping other runtime toggles such as audio fallbacks or active OSD overlays.
