@@ -503,7 +503,6 @@ static void finalize_frame(struct UdpReceiver *ur, guint64 arrival_ns) {
     }
     if (ur->frame_missing) {
         ur->stats.incomplete_frames++;
-        maybe_trigger_idr_loss(ur, arrival_ns);
     }
     maybe_trigger_idr_jitter(ur, arrival_ns);
     ur->frame_active = FALSE;
@@ -596,6 +595,9 @@ static void process_rtp(struct UdpReceiver *ur,
         } else if (delta > 0) {
             ur->stats.lost_packets += delta;
             ur->expected_seq = seq_next(parsed->sequence);
+            if (!ur->frame_missing) {
+                maybe_trigger_idr_loss(ur, arrival_ns);
+            }
             ur->frame_missing = TRUE;
             sample.flags |= UDP_SAMPLE_FLAG_LOSS;
         } else { // delta < 0

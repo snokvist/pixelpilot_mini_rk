@@ -201,7 +201,7 @@ void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
         cfg->jitterbuffer_latency_ms = 25;
         cfg->jitterbuffer_max_misorder = 128;
         cfg->idr.loss_window_ms = 400;
-        cfg->idr.loss_threshold = 2;
+        cfg->idr.loss_threshold = 1;
         cfg->idr.jitter_threshold_ms = 35.0;
         cfg->idr.jitter_cooldown_ms = 1000;
         cfg->idr.recovery_holdoff_ms = 1200;
