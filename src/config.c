@@ -170,7 +170,7 @@ void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
     switch (profile) {
     case STREAM_PROFILE_LOW_LATENCY:
         cfg->depay_emit_partial_au = 0;
-        cfg->decoder_drop_error_frames = 0;
+        cfg->decoder_drop_error_frames = 1;
         cfg->jitterbuffer_enable = 0;
         cfg->jitterbuffer_latency_ms = 4;
         cfg->jitterbuffer_max_misorder = 16;
@@ -183,7 +183,7 @@ void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
         break;
     case STREAM_PROFILE_MEDIUM_LATENCY:
         cfg->depay_emit_partial_au = 0;
-        cfg->decoder_drop_error_frames = 0;
+        cfg->decoder_drop_error_frames = 1;
         cfg->jitterbuffer_enable = 1;
         cfg->jitterbuffer_latency_ms = 12;
         cfg->jitterbuffer_max_misorder = 64;
@@ -196,7 +196,7 @@ void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
         break;
     case STREAM_PROFILE_HIGH_LATENCY:
         cfg->depay_emit_partial_au = 0;
-        cfg->decoder_drop_error_frames = 0;
+        cfg->decoder_drop_error_frames = 1;
         cfg->jitterbuffer_enable = 1;
         cfg->jitterbuffer_latency_ms = 25;
         cfg->jitterbuffer_max_misorder = 128;

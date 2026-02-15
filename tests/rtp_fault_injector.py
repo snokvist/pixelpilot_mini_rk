@@ -111,6 +111,7 @@ class Injector:
 
         self.queue: List[ScheduledPacket] = []
         self._serial = 0
+        self._last_scheduled_send_at = 0.0
 
         self.sock_in = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock_in.bind(("0.0.0.0", cfg.in_port))
@@ -148,6 +149,7 @@ class Injector:
         self.current_frame_burst_jitter_ms = 0
         self.burst_delay_frames_left = 0
         self.burst_jitter_frames_left = 0
+        self._last_scheduled_send_at = 0.0
 
     @staticmethod
     def _parse_rtp(packet: bytes) -> Tuple[bool, Optional[int], bool]:
@@ -176,8 +178,11 @@ class Injector:
 
         return True, timestamp, marker
 
-    def _schedule(self, payload: bytes, delay_ms: int = 0) -> None:
+    def _schedule(self, payload: bytes, delay_ms: int = 0, preserve_order: bool = False) -> None:
         send_at = time.monotonic() + max(0, delay_ms) / 1000.0
+        if preserve_order and send_at < self._last_scheduled_send_at:
+            send_at = self._last_scheduled_send_at
+        self._last_scheduled_send_at = send_at
         self._serial += 1
         heapq.heappush(self.queue, ScheduledPacket(send_at=send_at, serial=self._serial, payload=payload))
 
@@ -264,7 +269,7 @@ class Injector:
         if self.mode == FaultMode.PACKET_JITTER:
             base = self.params.jitter_base_delay_ms
             delta = self.params.jitter_delta_ms
-            self._schedule(packet, base + random.randint(-delta, delta))
+            self._schedule(packet, base + random.randint(-delta, delta), preserve_order=True)
             return
 
         if self.mode == FaultMode.BURST_PACKET_LOSS:
@@ -356,7 +361,8 @@ def draw_ui(stdscr: curses.window, injector: Injector) -> None:
     safe_add(row + 17, 0, f"Active mode tuning with +/-: {active_parameter_summary(injector)}")
     safe_add(row + 18, 0, "Keys: q quit | r reset stats | +/- primary severity | {/} secondary knob")
     safe_add(row + 19, 0, "Mode switch purges delayed queue immediately to resume fresh low-latency packets")
-    safe_add(row + 20, 0, "Note: dropping full frames can break reference chain until next IDR/CRA")
+    safe_add(row + 20, 0, "Packet jitter mode preserves packet order to avoid synthetic loss storms at low jitter")
+    safe_add(row + 21, 0, "Note: dropping full frames can break reference chain until next IDR/CRA")
 
     if max_y < 36:
         safe_add(max_y - 1, 0, "[Terminal is small: UI truncated, injector still active]", curses.A_DIM)
