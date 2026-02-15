@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -98,6 +99,48 @@ static gboolean configure_timeout(int fd, guint timeout_ms) {
     return TRUE;
 }
 
+
+static gboolean wait_for_socket_connect(int fd, guint timeout_ms, int *out_error) {
+    if (out_error != NULL) {
+        *out_error = 0;
+    }
+
+    struct pollfd pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.fd = fd;
+    pfd.events = POLLOUT;
+
+    int timeout = (timeout_ms > (guint)G_MAXINT) ? G_MAXINT : (int)timeout_ms;
+    int rc = poll(&pfd, 1, timeout);
+    if (rc < 0) {
+        if (out_error != NULL) {
+            *out_error = errno;
+        }
+        return FALSE;
+    }
+    if (rc == 0) {
+        if (out_error != NULL) {
+            *out_error = ETIMEDOUT;
+        }
+        return FALSE;
+    }
+
+    int so_error = 0;
+    socklen_t so_len = sizeof(so_error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_error, &so_len) != 0) {
+        if (out_error != NULL) {
+            *out_error = errno;
+        }
+        return FALSE;
+    }
+
+    if (out_error != NULL) {
+        *out_error = so_error;
+    }
+
+    return so_error == 0;
+}
+
 static gboolean send_http_request(const IdrHttpTask *task) {
     if (task == NULL) {
         return FALSE;
@@ -118,11 +161,23 @@ static gboolean send_http_request(const IdrHttpTask *task) {
         }
 
         if (connect(fd, (const struct sockaddr *)&task->addr, sizeof(task->addr)) != 0) {
-            LOGW("IDR requester: connect to %s:%u failed: %s",
-                 task->host,
-                 (unsigned int)ntohs(task->addr.sin_port),
-                 g_strerror(errno));
-            break;
+            int err = errno;
+            if (err == EINPROGRESS || err == EALREADY || err == EWOULDBLOCK) {
+                int wait_error = 0;
+                if (!wait_for_socket_connect(fd, task->timeout_ms, &wait_error)) {
+                    LOGW("IDR requester: connect to %s:%u failed: %s",
+                         task->host,
+                         (unsigned int)ntohs(task->addr.sin_port),
+                         g_strerror(wait_error));
+                    break;
+                }
+            } else {
+                LOGW("IDR requester: connect to %s:%u failed: %s",
+                     task->host,
+                     (unsigned int)ntohs(task->addr.sin_port),
+                     g_strerror(err));
+                break;
+            }
         }
 
         char request[256];
