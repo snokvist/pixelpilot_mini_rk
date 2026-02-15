@@ -248,53 +248,6 @@ static void maybe_trigger_startup_idr(struct UdpReceiver *ur, gboolean is_video_
     idr_requester_handle_warning(ur->idr);
 }
 
-static gboolean h265_nal_is_idr(guint8 nal_type) {
-    return nal_type == 19u || nal_type == 20u;
-}
-
-static gboolean rtp_payload_contains_idr(const guint8 *packet_data, gsize packet_len, const RtpParseResult *parsed) {
-    if (packet_data == NULL || parsed == NULL || parsed->payload_size < 2 ||
-        parsed->payload_offset >= packet_len || parsed->payload_offset + parsed->payload_size > packet_len) {
-        return FALSE;
-    }
-
-    const guint8 *payload = packet_data + parsed->payload_offset;
-    gsize payload_size = parsed->payload_size;
-    guint8 nal_type = (payload[0] >> 1) & 0x3Fu;
-
-    if (h265_nal_is_idr(nal_type)) {
-        return TRUE;
-    }
-
-    if (nal_type == 49u) {
-        if (payload_size < 3) {
-            return FALSE;
-        }
-        guint8 fu_header = payload[2];
-        gboolean is_start = (fu_header & 0x80u) != 0;
-        guint8 fu_type = fu_header & 0x3Fu;
-        return is_start && h265_nal_is_idr(fu_type);
-    }
-
-    if (nal_type == 48u) {
-        gsize offset = 2;
-        while (offset + 2 <= payload_size) {
-            guint16 nal_size = ((guint16)payload[offset] << 8) | payload[offset + 1];
-            offset += 2;
-            if (nal_size == 0 || offset + nal_size > payload_size) {
-                break;
-            }
-            guint8 ap_nal_type = (payload[offset] >> 1) & 0x3Fu;
-            if (h265_nal_is_idr(ap_nal_type)) {
-                return TRUE;
-            }
-            offset += nal_size;
-        }
-    }
-
-    return FALSE;
-}
-
 static void reset_rtp_timeline(struct UdpReceiver *ur, gboolean audio) {
     if (audio) {
         ur->audio_ts_initialized = FALSE;
@@ -737,9 +690,6 @@ static gboolean handle_received_packet_fastpath(struct UdpReceiver *ur,
     }
 
     maybe_trigger_startup_idr(ur, is_video);
-    if (is_video && ur->idr != NULL && rtp_payload_contains_idr(map->data, (gsize)bytes_read, &preview)) {
-        idr_requester_note_keyframe(ur->idr);
-    }
 
     gboolean mark_discont = g_atomic_int_compare_and_exchange((gint *)&ur->video_discont_pending, TRUE, FALSE);
 
@@ -797,7 +747,6 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     gboolean target_is_audio = FALSE;
     gboolean reset_audio_ts = FALSE;
     gboolean reset_video_ts = FALSE;
-    gboolean packet_has_idr = FALSE;
     GstAppSrc *target_appsrc = NULL;
     RtpParseResult preview;
     gboolean have_preview = FALSE;
@@ -852,10 +801,6 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
         }
     }
 
-    if (!drop_packet && target_appsrc != NULL && !target_is_audio && parsed != NULL && ur->idr != NULL) {
-        packet_has_idr = rtp_payload_contains_idr(map->data, (gsize)bytes_read, parsed);
-    }
-
     g_mutex_unlock(&ur->lock);
 
     gst_buffer_unmap(gstbuf, map);
@@ -866,10 +811,6 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     }
 
     maybe_trigger_startup_idr(ur, !target_is_audio);
-    if (packet_has_idr) {
-        idr_requester_note_keyframe(ur->idr);
-    }
-
     if (reset_audio_ts) {
         reset_rtp_timeline(ur, TRUE);
     } else if (reset_video_ts) {
