@@ -18,6 +18,8 @@
 #define IDR_MAX_INTERVAL_MS 500u
 #define IDR_QUIET_RESET_MS 750u
 #define IDR_REINIT_THRESHOLD 64u
+#define IDR_MIN_REQUEST_GAP_MS 250u
+#define IDR_POST_KEYFRAME_COOLDOWN_MS 500u
 
 typedef struct {
     IdrRequester *owner;
@@ -56,6 +58,7 @@ struct IdrRequester {
     IdrReinitCallback reinit_cb;
     gpointer reinit_user_data;
     gboolean reinit_pending;
+    guint64 suppress_until_ms;
 };
 
 static guint64 monotonic_ms(void) {
@@ -277,6 +280,7 @@ IdrRequester *idr_requester_new(const IdrCfg *cfg) {
     req->reinit_cb = NULL;
     req->reinit_user_data = NULL;
     req->reinit_pending = FALSE;
+    req->suppress_until_ms = 0;
 
     return req;
 }
@@ -318,6 +322,7 @@ void idr_requester_set_enabled(IdrRequester *req, gboolean enabled) {
         req->next_interval_ms = 0;
         req->last_request_ms = 0;
         req->reinit_pending = FALSE;
+        req->suppress_until_ms = 0;
     }
     g_mutex_unlock(&req->lock);
 }
@@ -357,6 +362,7 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
         req->next_interval_ms = 0;
         req->last_request_ms = 0;
         req->reinit_pending = FALSE;
+        req->suppress_until_ms = 0;
         changed = TRUE;
     }
     g_mutex_unlock(&req->lock);
@@ -364,6 +370,24 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
     if (changed) {
         LOGI("IDR requester: tracking source %s", host);
     }
+}
+
+
+void idr_requester_note_keyframe(IdrRequester *req) {
+    if (req == NULL) {
+        return;
+    }
+
+    guint64 now_ms = monotonic_ms();
+
+    g_mutex_lock(&req->lock);
+    req->active = FALSE;
+    req->attempt_count = 0;
+    req->next_interval_ms = 0;
+    req->last_request_ms = 0;
+    req->reinit_pending = FALSE;
+    req->suppress_until_ms = now_ms + IDR_POST_KEYFRAME_COOLDOWN_MS;
+    g_mutex_unlock(&req->lock);
 }
 
 void idr_requester_handle_warning(IdrRequester *req) {
@@ -384,6 +408,12 @@ void idr_requester_handle_warning(IdrRequester *req) {
 
     g_mutex_lock(&req->lock);
     if (req->shutting_down || !req->enabled || !req->have_source) {
+        g_mutex_unlock(&req->lock);
+        return;
+    }
+
+    if (req->suppress_until_ms != 0 && now_ms < req->suppress_until_ms) {
+        req->last_warning_ms = now_ms;
         g_mutex_unlock(&req->lock);
         return;
     }
@@ -411,15 +441,21 @@ void idr_requester_handle_warning(IdrRequester *req) {
         req->last_request_ms = 0;
     }
 
-        req->last_warning_ms = now_ms;
+    req->last_warning_ms = now_ms;
 
     gboolean time_ready = FALSE;
     if (req->attempt_count == 0) {
         time_ready = TRUE;
     } else if (req->last_request_ms == 0) {
         time_ready = TRUE;
-    } else if (now_ms >= req->last_request_ms + req->next_interval_ms) {
-        time_ready = TRUE;
+    } else {
+        guint interval_ms = req->next_interval_ms;
+        if (interval_ms < IDR_MIN_REQUEST_GAP_MS) {
+            interval_ms = IDR_MIN_REQUEST_GAP_MS;
+        }
+        if (now_ms >= req->last_request_ms + interval_ms) {
+            time_ready = TRUE;
+        }
     }
 
     if (time_ready && !req->request_in_flight) {
