@@ -52,6 +52,10 @@
 #define UDP_AUDIO_SEQ_MAX_ADVANCE 8192
 #define NS_PER_MS 1000000ULL
 #define IDR_TRIGGER_MIN_GAP_DEFAULT_NS (100ull * NS_PER_MS)
+#define H265_AP_NAL_TYPE 48
+#define H265_FU_NAL_TYPE 49
+#define H265_IRAP_MIN_NAL_TYPE 16
+#define H265_IRAP_MAX_NAL_TYPE 23
 
 typedef struct {
     guint16 sequence;
@@ -129,6 +133,8 @@ struct UdpReceiver {
     guint64 idr_jitter_last_ns;
     guint64 idr_last_trigger_ns;
     guint64 idr_trigger_min_gap_ns;
+    gboolean drop_video_until_irap;
+    gboolean video_resync_requested;
 };
 
 // Helpers to update/read last_packet_ns without assuming 64-bit GLib atomics
@@ -385,6 +391,8 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->idr_loss_events = 0;
     ur->idr_jitter_last_ns = 0;
     ur->idr_last_trigger_ns = 0;
+    ur->drop_video_until_irap = FALSE;
+    ur->video_resync_requested = FALSE;
     memset(&ur->stats, 0, sizeof(ur->stats));
     memset(ur->history, 0, sizeof(ur->history));
 }
@@ -424,6 +432,85 @@ static void update_bitrate(struct UdpReceiver *ur, guint64 arrival_ns, guint32 b
 
 static inline double jitter_to_ms(double jitter) {
     return jitter / 90.0;
+}
+
+static gboolean h265_nal_is_irap(guint8 nal_type) {
+    return nal_type >= H265_IRAP_MIN_NAL_TYPE && nal_type <= H265_IRAP_MAX_NAL_TYPE;
+}
+
+static gboolean rtp_payload_contains_irap(const guint8 *payload, gsize payload_len) {
+    if (payload == NULL || payload_len < 2) {
+        return FALSE;
+    }
+
+    guint8 nal_type = (payload[0] >> 1) & 0x3fu;
+    if (h265_nal_is_irap(nal_type)) {
+        return TRUE;
+    }
+
+    if (nal_type == H265_FU_NAL_TYPE) {
+        if (payload_len < 3) {
+            return FALSE;
+        }
+        gboolean start = (payload[2] & 0x80u) != 0;
+        guint8 fu_type = payload[2] & 0x3fu;
+        return start && h265_nal_is_irap(fu_type);
+    }
+
+    if (nal_type == H265_AP_NAL_TYPE) {
+        gsize offset = 2;
+        while (offset + 2 <= payload_len) {
+            guint16 nal_size = ((guint16)payload[offset] << 8) | payload[offset + 1];
+            offset += 2;
+            if (offset + nal_size > payload_len) {
+                return FALSE;
+            }
+            if (nal_size >= 2) {
+                guint8 ap_nal_type = (payload[offset] >> 1) & 0x3fu;
+                if (h265_nal_is_irap(ap_nal_type)) {
+                    return TRUE;
+                }
+            }
+            offset += nal_size;
+        }
+    }
+
+    return FALSE;
+}
+
+static void flush_video_appsrc(UdpReceiver *ur) {
+    if (ur == NULL || ur->video_appsrc == NULL) {
+        return;
+    }
+
+    GstPad *srcpad = gst_element_get_static_pad(GST_ELEMENT(ur->video_appsrc), "src");
+    if (srcpad == NULL) {
+        return;
+    }
+
+    gst_pad_push_event(srcpad, gst_event_new_flush_start());
+    gst_pad_push_event(srcpad, gst_event_new_flush_stop(TRUE));
+    gst_object_unref(srcpad);
+}
+
+static void schedule_video_resync_locked(UdpReceiver *ur, const char *reason) {
+    if (ur == NULL) {
+        return;
+    }
+
+    ur->drop_video_until_irap = TRUE;
+    ur->video_resync_requested = TRUE;
+    ur->video_discont_pending = TRUE;
+    ur->frame_active = FALSE;
+    ur->frame_bytes = 0;
+    ur->frame_missing = FALSE;
+    ur->frame_last_arrival_ns = 0;
+    ur->seq_initialized = FALSE;
+    ur->have_last_seq = FALSE;
+
+    if (reason != NULL) {
+        LOGW("UDP receiver: entering resync mode (%s); dropping video until next IRAP", reason);
+    }
 }
 
 static gboolean idr_stats_triggers_enabled(const UdpReceiver *ur) {
@@ -477,6 +564,7 @@ static gboolean maybe_trigger_idr_loss(struct UdpReceiver *ur, guint64 arrival_n
         if (!idr_trigger_allowed(ur, arrival_ns)) {
             return FALSE;
         }
+        schedule_video_resync_locked(ur, "packet loss");
         idr_requester_handle_warning(ur->idr);
         return TRUE;
     }
@@ -516,6 +604,7 @@ static gboolean maybe_trigger_idr_jitter(struct UdpReceiver *ur, guint64 arrival
          jitter_ms,
          jitter_avg_ms,
          threshold);
+    schedule_video_resync_locked(ur, "jitter spike");
     idr_requester_handle_warning(ur->idr);
     return TRUE;
 }
@@ -588,6 +677,8 @@ static void process_rtp(struct UdpReceiver *ur,
         ur->idr_loss_events = 0;
         ur->idr_jitter_last_ns = 0;
         ur->idr_last_trigger_ns = 0;
+        ur->drop_video_until_irap = FALSE;
+        ur->video_resync_requested = FALSE;
     }
 
     ur->stats.total_packets++;
@@ -768,6 +859,7 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
     gboolean target_is_audio = FALSE;
     gboolean reset_audio_ts = FALSE;
     gboolean reset_video_ts = FALSE;
+    gboolean perform_video_resync = FALSE;
     GstAppSrc *target_appsrc = NULL;
     RtpParseResult preview;
     gboolean have_preview = FALSE;
@@ -794,6 +886,18 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
 
     gboolean is_video = have_preview && preview.payload_type == ur->vid_pt;
     gboolean is_audio = have_preview && preview.payload_type == ur->aud_pt;
+
+    if (is_video && ur->drop_video_until_irap) {
+        const guint8 *payload = map->data + preview.payload_offset;
+        gsize payload_len = preview.payload_size;
+        if (rtp_payload_contains_irap(payload, payload_len)) {
+            ur->drop_video_until_irap = FALSE;
+            ur->video_discont_pending = TRUE;
+            LOGI("UDP receiver: IRAP detected while resyncing; resuming video forwarding");
+        } else {
+            drop_packet = TRUE;
+        }
+    }
 
     const RtpParseResult *parsed = have_preview ? &preview : NULL;
     if (ur->stats_enabled) {
@@ -822,13 +926,30 @@ static gboolean handle_received_packet(struct UdpReceiver *ur,
         }
     }
 
+    if (ur->video_resync_requested) {
+        perform_video_resync = TRUE;
+        ur->video_resync_requested = FALSE;
+        if (!is_audio) {
+            drop_packet = TRUE;
+        }
+    }
+
     g_mutex_unlock(&ur->lock);
 
     gst_buffer_unmap(gstbuf, map);
 
     if (drop_packet || target_appsrc == NULL) {
         gst_buffer_unref(gstbuf);
+        if (perform_video_resync) {
+            flush_video_appsrc(ur);
+            reset_rtp_timeline(ur, FALSE);
+        }
         return TRUE;
+    }
+
+    if (perform_video_resync) {
+        flush_video_appsrc(ur);
+        reset_rtp_timeline(ur, FALSE);
     }
 
     if (reset_audio_ts) {
@@ -1090,6 +1211,8 @@ UdpReceiver *udp_receiver_create(int udp_port,
     ur->last_packet_ns = 0;
     ur->idr = requester;
     ur->idr_trigger_min_gap_ns = IDR_TRIGGER_MIN_GAP_DEFAULT_NS;
+    ur->drop_video_until_irap = FALSE;
+    ur->video_resync_requested = FALSE;
     return ur;
 }
 
