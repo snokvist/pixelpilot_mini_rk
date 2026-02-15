@@ -41,6 +41,7 @@
 #define VIDEO_DECODER_MAX_PLANE_UPSCALE 4.0
 #define VIDEO_DECODER_RECOVERY_IDR_RETRY_MS 1000u
 #define VIDEO_DECODER_RECOVERY_STABLE_FRAMES 6u
+#define VIDEO_DECODER_RECOVERY_HEARTBEAT_MS 500u
 
 static gboolean create_test_nv12_fb(int fd, uint32_t width, uint32_t height, uint32_t *out_fb_id,
                                     uint32_t *out_handle) {
@@ -1339,6 +1340,27 @@ static int setup_external_buffers(VideoDecoder *vd, MppFrame frame) {
     return 0;
 }
 
+static void video_decoder_maybe_request_recovery_idr(VideoDecoder *vd, guint64 now_ms, guint interval_ms) {
+    if (vd == NULL || interval_ms == 0) {
+        return;
+    }
+
+    gboolean should_request_idr = FALSE;
+
+    g_mutex_lock(&vd->lock);
+    if (vd->recovering_until_idr) {
+        if (vd->last_recovery_idr_request_ms == 0 || now_ms - vd->last_recovery_idr_request_ms >= interval_ms) {
+            vd->last_recovery_idr_request_ms = now_ms;
+            should_request_idr = TRUE;
+        }
+    }
+    g_mutex_unlock(&vd->lock);
+
+    if (should_request_idr && vd->idr_requester != NULL) {
+        idr_requester_handle_warning(vd->idr_requester);
+    }
+}
+
 static gpointer frame_thread_func(gpointer data) {
     VideoDecoder *vd = (VideoDecoder *)data;
     vd->frame_thread_running = TRUE;
@@ -1349,6 +1371,8 @@ static gpointer frame_thread_func(gpointer data) {
         MppFrame frame = NULL;
         MPP_RET ret = vd->mpi->decode_get_frame(vd->ctx, &frame);
         if (ret != MPP_OK || frame == NULL) {
+            guint64 now_ms = get_time_ms();
+            video_decoder_maybe_request_recovery_idr(vd, now_ms, VIDEO_DECODER_RECOVERY_HEARTBEAT_MS);
             g_usleep(1000);
             continue;
         }
@@ -1360,25 +1384,21 @@ static gpointer frame_thread_func(gpointer data) {
             RK_U32 discard = mpp_frame_get_discard(frame);
             if (G_UNLIKELY(errinfo || discard)) {
                 guint64 now_ms = get_time_ms();
-                gboolean should_request_idr = FALSE;
+                gboolean entered_recovery = FALSE;
 
                 g_mutex_lock(&vd->lock);
                 if (!vd->recovering_until_idr) {
                     LOGW("MPP: decode error detected; dropping until recovery point NAL");
                     vd->recovering_until_idr = TRUE;
                     vd->recovery_probe_frames_remaining = 0;
-                    should_request_idr = TRUE;
-                } else if (now_ms - vd->last_recovery_idr_request_ms >= VIDEO_DECODER_RECOVERY_IDR_RETRY_MS) {
-                    should_request_idr = TRUE;
-                }
-
-                if (should_request_idr) {
-                    vd->last_recovery_idr_request_ms = now_ms;
+                    entered_recovery = TRUE;
                 }
                 g_mutex_unlock(&vd->lock);
 
-                if (should_request_idr && vd->idr_requester != NULL) {
-                    idr_requester_handle_warning(vd->idr_requester);
+                if (entered_recovery) {
+                    video_decoder_maybe_request_recovery_idr(vd, now_ms, 1);
+                } else {
+                    video_decoder_maybe_request_recovery_idr(vd, now_ms, VIDEO_DECODER_RECOVERY_IDR_RETRY_MS);
                 }
 
                 LOGW("MPP: dropping frame errinfo=%u discard=%u", errinfo, discard);
