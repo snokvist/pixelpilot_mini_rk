@@ -546,6 +546,23 @@ void idr_requester_handle_warning(IdrRequester *req) {
     g_thread_unref(thread);
 }
 
+void idr_requester_note_recovery(IdrRequester *req) {
+    if (req == NULL) {
+        return;
+    }
+
+    g_mutex_lock(&req->lock);
+    if (req->active || req->attempt_count > 0 || req->reinit_pending) {
+        req->active = FALSE;
+        req->attempt_count = 0;
+        req->next_interval_ms = 0;
+        req->last_request_ms = 0;
+        req->last_warning_ms = 0;
+        req->reinit_pending = FALSE;
+    }
+    g_mutex_unlock(&req->lock);
+}
+
 guint64 idr_requester_get_request_count(const IdrRequester *req) {
     if (req == NULL) {
         return 0;
@@ -569,4 +586,3 @@ void idr_requester_set_reinit_callback(IdrRequester *req, IdrReinitCallback cb, 
     req->reinit_user_data = user_data;
     g_mutex_unlock(&req->lock);
 }
-

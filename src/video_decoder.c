@@ -1327,6 +1327,10 @@ static gpointer frame_thread_func(gpointer data) {
                 continue;
             }
 
+            if (vd->idr_requester != NULL) {
+                idr_requester_note_recovery(vd->idr_requester);
+            }
+
             MppBuffer buffer = mpp_frame_get_buffer(frame);
             if (buffer != NULL) {
                 MppBufferInfo info;

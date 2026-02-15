@@ -9,6 +9,8 @@ GST_DEBUG_CATEGORY_STATIC(sstar_h265_depay_debug);
 #define RTP_MIN_HEADER 12
 #define H265_AP_NAL_TYPE 48
 #define H265_FU_NAL_TYPE 49
+#define H265_IRAP_MIN_NAL_TYPE 16
+#define H265_IRAP_MAX_NAL_TYPE 23
 #define RTP_CLOCK_RATE 90000
 
 struct _SstarH265Depay {
@@ -22,6 +24,7 @@ struct _SstarH265Depay {
     GByteArray *current_au;
     GByteArray *current_fu;
     gboolean au_corrupted;
+    gboolean waiting_for_irap;
 
     gboolean have_au;
     gboolean have_last_ts;
@@ -56,6 +59,7 @@ static GstFlowReturn sstar_h265_depay_chain(GstPad *pad, GstObject *parent, GstB
 static gboolean sstar_h265_depay_sink_event(GstPad *pad, GstObject *parent, GstEvent *event);
 static GstCaps *sstar_h265_depay_build_src_caps(void);
 static void sstar_h265_depay_mark_corruption(SstarH265Depay *self);
+static gboolean access_unit_contains_irap(const guint8 *data, gsize size);
 
 typedef enum {
     SEQ_STATUS_OK,
@@ -246,9 +250,20 @@ static GstFlowReturn finish_current_au(SstarH265Depay *self, gboolean drop) {
         drop_current_fu(self);
     }
 
+    if (corrupted) {
+        self->waiting_for_irap = TRUE;
+    }
+
     self->have_au = FALSE;
 
-    gboolean should_drop = (drop && !self->emit_partial_au) || self->current_au == NULL || self->current_au->len == 0;
+    gboolean has_irap =
+        (self->current_au != NULL) && access_unit_contains_irap(self->current_au->data, self->current_au->len);
+    if (self->waiting_for_irap && has_irap) {
+        self->waiting_for_irap = FALSE;
+    }
+
+    gboolean should_drop = (drop && !self->emit_partial_au) || self->current_au == NULL || self->current_au->len == 0 ||
+                           (self->waiting_for_irap && !has_irap);
 
     if (should_drop) {
         self->au_corrupted = FALSE;
@@ -530,6 +545,7 @@ static void sstar_h265_depay_reset_state(SstarH265Depay *self) {
     }
 
     self->au_corrupted = FALSE;
+    self->waiting_for_irap = FALSE;
     self->have_au = FALSE;
     self->have_last_ts = FALSE;
     self->have_base_ts = FALSE;
@@ -603,6 +619,7 @@ static void sstar_h265_depay_init(SstarH265Depay *self) {
     self->current_au = NULL;
     self->current_fu = NULL;
     self->au_corrupted = FALSE;
+    self->waiting_for_irap = FALSE;
     self->have_au = FALSE;
     self->have_last_ts = FALSE;
     self->have_base_ts = FALSE;
@@ -626,6 +643,43 @@ gboolean sstar_h265_depay_register(void) {
     }
 
     return registered;
+}
+
+static gboolean access_unit_contains_irap(const guint8 *data, gsize size) {
+    if (data == NULL || size < 5) {
+        return FALSE;
+    }
+
+    gsize i = 0;
+    while (i + 4 < size) {
+        if (data[i] != 0x00 || data[i + 1] != 0x00) {
+            ++i;
+            continue;
+        }
+
+        gsize nal_offset = 0;
+        if (data[i + 2] == 0x01) {
+            nal_offset = i + 3;
+        } else if (i + 3 < size && data[i + 2] == 0x00 && data[i + 3] == 0x01) {
+            nal_offset = i + 4;
+        } else {
+            ++i;
+            continue;
+        }
+
+        if (nal_offset + 1 >= size) {
+            return FALSE;
+        }
+
+        guint8 nal_type = (data[nal_offset] >> 1) & 0x3fu;
+        if (nal_type >= H265_IRAP_MIN_NAL_TYPE && nal_type <= H265_IRAP_MAX_NAL_TYPE) {
+            return TRUE;
+        }
+
+        i = nal_offset + 2;
+    }
+
+    return FALSE;
 }
 
 static void sstar_h265_depay_mark_corruption(SstarH265Depay *self) {
