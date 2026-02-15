@@ -42,6 +42,7 @@
 #define VIDEO_DECODER_RECOVERY_IDR_RETRY_MS 1000u
 #define VIDEO_DECODER_RECOVERY_STABLE_FRAMES 6u
 #define VIDEO_DECODER_RECOVERY_FAST_STABLE_FRAMES 1u
+#define VIDEO_DECODER_RECOVERY_RECENT_REQUEST_SUPPRESS_MS 1000u
 
 static gboolean create_test_nv12_fb(int fd, uint32_t width, uint32_t height, uint32_t *out_fb_id,
                                     uint32_t *out_handle) {
@@ -1359,6 +1360,9 @@ static void video_decoder_maybe_request_recovery_idr(VideoDecoder *vd, guint64 n
         }
         if (recent_window_ms < vd->recovery_heartbeat_ms) {
             recent_window_ms = vd->recovery_heartbeat_ms;
+        }
+        if (recent_window_ms < VIDEO_DECODER_RECOVERY_RECENT_REQUEST_SUPPRESS_MS) {
+            recent_window_ms = VIDEO_DECODER_RECOVERY_RECENT_REQUEST_SUPPRESS_MS;
         }
     }
     g_mutex_unlock(&vd->lock);
