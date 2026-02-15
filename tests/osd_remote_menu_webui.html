@@ -65,6 +65,7 @@ let baseUrl = '';
 let pollTimer = null;
 let pollInFlight = false;
 let connected = false;
+let latestState = null;
 
 function setStatus(text){ document.getElementById('status').textContent = text; }
 function buildBaseUrl(){
@@ -74,7 +75,7 @@ function buildBaseUrl(){
 }
 
 async function send(obj){
-  if (!connected || !baseUrl) { setStatus('Not connected'); return; }
+  if (!baseUrl) { setStatus('Not connected'); return; }
   try {
     const response = await fetch(`${baseUrl}/command`, {
       method: 'POST',
@@ -101,7 +102,6 @@ async function pollState(){
     connected = true;
     setStatus(`Connected to ${baseUrl}`);
   } catch (err) {
-    connected = false;
     setStatus(`Polling failed: ${err}`);
   } finally {
     pollInFlight = false;
@@ -135,7 +135,17 @@ function disconnect(){
   setStatus('Disconnected');
 }
 
+
+
+function toggleAsset(assetId, currentIsOn){
+  if (latestState && Array.isArray(latestState.asset_enabled)) {
+    latestState.asset_enabled[assetId] = !currentIsOn;
+    renderState(latestState);
+  }
+  send({ asset_updates: [{ id: assetId, enabled: !currentIsOn }] });
+}
 function renderState(state){
+  latestState = state;
   const lines = state.menu_window || [];
   document.getElementById('window').textContent = `${lines[0]||''}\n${lines[1]||''}\n${lines[2]||''}`;
 
@@ -156,7 +166,7 @@ function renderState(state){
     const isOn = enabled === true;
     btn.className = isOn ? '' : 'alt';
     btn.textContent = `Asset ${idx}: ${isOn ? 'ON' : (enabled === false ? 'OFF' : '?')}`;
-    btn.onclick = () => send({ asset_updates: [{ id: idx, enabled: !isOn }] });
+    btn.onclick = () => toggleAsset(idx, isOn);
     assets.appendChild(btn);
   });
 }
