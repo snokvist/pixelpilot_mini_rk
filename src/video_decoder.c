@@ -39,6 +39,7 @@
 #define DECODER_READ_BUF_SIZE (1024 * 1024)
 #define DECODER_MAX_FRAMES 24
 #define VIDEO_DECODER_MAX_PLANE_UPSCALE 4.0
+#define VIDEO_DECODER_RECOVERY_IDR_RETRY_MS 1000u
 
 static gboolean create_test_nv12_fb(int fd, uint32_t width, uint32_t height, uint32_t *out_fb_id,
                                     uint32_t *out_handle) {
@@ -418,6 +419,8 @@ struct VideoDecoder {
     GThread *display_thread;
 
     IdrRequester *idr_requester;
+    gboolean recovering_until_idr;
+    guint64 last_recovery_idr_request_ms;
 
     VideoCtm ctm;
     uint32_t frame_fourcc;
@@ -441,6 +444,45 @@ static inline guint64 get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (guint64)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
+}
+
+static gboolean h265_nal_is_recovery_point(guint8 nal_type) {
+    return nal_type == 19u || nal_type == 20u || nal_type == 21u;
+}
+
+static gboolean h265_annexb_contains_recovery_point(const guint8 *data, size_t size) {
+    if (data == NULL || size < 5) {
+        return FALSE;
+    }
+
+    size_t i = 0;
+    while (i + 4 <= size) {
+        size_t start_code_len = 0;
+        if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1) {
+            start_code_len = 3;
+        } else if (i + 4 <= size && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1) {
+            start_code_len = 4;
+        }
+
+        if (start_code_len == 0) {
+            i++;
+            continue;
+        }
+
+        size_t nal_header_index = i + start_code_len;
+        if (nal_header_index >= size) {
+            break;
+        }
+
+        guint8 nal_type = (data[nal_header_index] >> 1) & 0x3Fu;
+        if (h265_nal_is_recovery_point(nal_type)) {
+            return TRUE;
+        }
+
+        i = nal_header_index + 1;
+    }
+
+    return FALSE;
 }
 
 static inline void copy_packet_data(guint8 *dst, const guint8 *src, size_t size) {
@@ -1315,10 +1357,28 @@ static gpointer frame_thread_func(gpointer data) {
             RK_U32 errinfo = mpp_frame_get_errinfo(frame);
             RK_U32 discard = mpp_frame_get_discard(frame);
             if (G_UNLIKELY(errinfo || discard)) {
-                LOGW("MPP: dropping frame errinfo=%u discard=%u", errinfo, discard);
-                if (vd->idr_requester != NULL) {
+                guint64 now_ms = get_time_ms();
+                gboolean should_request_idr = FALSE;
+
+                g_mutex_lock(&vd->lock);
+                if (!vd->recovering_until_idr) {
+                    LOGW("MPP: decode error detected; dropping until recovery point NAL");
+                    vd->recovering_until_idr = TRUE;
+                    should_request_idr = TRUE;
+                } else if (now_ms - vd->last_recovery_idr_request_ms >= VIDEO_DECODER_RECOVERY_IDR_RETRY_MS) {
+                    should_request_idr = TRUE;
+                }
+
+                if (should_request_idr) {
+                    vd->last_recovery_idr_request_ms = now_ms;
+                }
+                g_mutex_unlock(&vd->lock);
+
+                if (should_request_idr && vd->idr_requester != NULL) {
                     idr_requester_handle_warning(vd->idr_requester);
                 }
+
+                LOGW("MPP: dropping frame errinfo=%u discard=%u", errinfo, discard);
                 vd->eos_received = mpp_frame_get_eos(frame) ? TRUE : FALSE;
                 mpp_frame_deinit(&frame);
                 if (vd->eos_received) {
@@ -1628,6 +1688,8 @@ int video_decoder_start(VideoDecoder *vd) {
 
     vd->running = TRUE;
     vd->eos_received = FALSE;
+    vd->recovering_until_idr = FALSE;
+    vd->last_recovery_idr_request_ms = 0;
 
     vd->frame_thread = g_thread_new("mpp-frame", frame_thread_func, vd);
     if (vd->frame_thread == NULL) {
@@ -1692,6 +1754,31 @@ int video_decoder_feed(VideoDecoder *vd, const guint8 *data, size_t size) {
     }
     if (size == 0 || size > vd->packet_buf_size) {
         return -1;
+    }
+
+    gboolean allow_packet = TRUE;
+    gboolean recovery_point = FALSE;
+
+    g_mutex_lock(&vd->lock);
+    if (vd->recovering_until_idr) {
+        recovery_point = h265_annexb_contains_recovery_point(data, size);
+        if (!recovery_point) {
+            allow_packet = FALSE;
+        } else {
+            vd->recovering_until_idr = FALSE;
+            vd->last_recovery_idr_request_ms = 0;
+        }
+    }
+    g_mutex_unlock(&vd->lock);
+
+    if (!allow_packet) {
+        return 0;
+    }
+    if (recovery_point) {
+        if (vd->idr_requester != NULL) {
+            idr_requester_note_keyframe(vd->idr_requester);
+        }
+        LOGI("Video decoder: recovery point received; resuming decode feed");
     }
 
     copy_packet_data(vd->packet_buf, data, size);
