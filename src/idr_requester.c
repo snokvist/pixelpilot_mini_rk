@@ -107,6 +107,27 @@ static gboolean configure_timeout(int fd, guint timeout_ms) {
     return TRUE;
 }
 
+static void idr_requester_reset_request_state_locked(IdrRequester *req,
+                                                   gboolean clear_suppress_window,
+                                                   gboolean clear_refused_streak) {
+    if (req == NULL) {
+        return;
+    }
+
+    req->active = FALSE;
+    req->attempt_count = 0;
+    req->next_interval_ms = 0;
+    req->last_request_ms = 0;
+    req->reinit_pending = FALSE;
+
+    if (clear_suppress_window) {
+        req->suppress_until_ms = 0;
+    }
+    if (clear_refused_streak) {
+        req->consecutive_refused = 0;
+    }
+}
+
 static gboolean wait_for_socket_connect(int fd, guint timeout_ms, int *out_error) {
     if (out_error != NULL) {
         *out_error = 0;
@@ -293,11 +314,7 @@ static gpointer idr_requester_http_worker(gpointer data) {
         }
         if (task->owner->consecutive_refused >= IDR_REFUSED_DISABLE_THRESHOLD) {
             task->owner->enabled = FALSE;
-            task->owner->active = FALSE;
-            task->owner->attempt_count = 0;
-            task->owner->next_interval_ms = 0;
-            task->owner->last_request_ms = 0;
-            task->owner->reinit_pending = FALSE;
+            idr_requester_reset_request_state_locked(task->owner, FALSE, FALSE);
             disable_due_to_refused = TRUE;
         }
     } else {
@@ -415,12 +432,7 @@ void idr_requester_set_enabled(IdrRequester *req, gboolean enabled) {
     req->enabled = enabled ? TRUE : FALSE;
     req->consecutive_refused = 0;
     if (!req->enabled) {
-        req->active = FALSE;
-        req->attempt_count = 0;
-        req->next_interval_ms = 0;
-        req->last_request_ms = 0;
-        req->reinit_pending = FALSE;
-        req->suppress_until_ms = 0;
+        idr_requester_reset_request_state_locked(req, TRUE, FALSE);
     }
     g_mutex_unlock(&req->lock);
 }
@@ -455,13 +467,7 @@ void idr_requester_note_source(IdrRequester *req, const struct sockaddr *addr, s
         req->source_addr = sin->sin_addr;
         g_strlcpy(req->source_host, host, sizeof(req->source_host));
         req->have_source = TRUE;
-        req->active = FALSE;
-        req->attempt_count = 0;
-        req->next_interval_ms = 0;
-        req->last_request_ms = 0;
-        req->reinit_pending = FALSE;
-        req->suppress_until_ms = 0;
-        req->consecutive_refused = 0;
+        idr_requester_reset_request_state_locked(req, TRUE, TRUE);
         changed = TRUE;
     }
     g_mutex_unlock(&req->lock);
@@ -480,13 +486,8 @@ void idr_requester_note_keyframe(IdrRequester *req) {
     guint64 now_ms = monotonic_ms();
 
     g_mutex_lock(&req->lock);
-    req->active = FALSE;
-    req->attempt_count = 0;
-    req->next_interval_ms = 0;
-    req->last_request_ms = 0;
-    req->reinit_pending = FALSE;
+    idr_requester_reset_request_state_locked(req, FALSE, TRUE);
     req->suppress_until_ms = now_ms + IDR_POST_KEYFRAME_COOLDOWN_MS;
-    req->consecutive_refused = 0;
     g_mutex_unlock(&req->lock);
 }
 
@@ -527,10 +528,7 @@ void idr_requester_handle_warning(IdrRequester *req) {
     if (req->active && req->last_warning_ms != 0 && now_ms > req->last_warning_ms) {
         guint64 quiet = now_ms - req->last_warning_ms;
         if (quiet > IDR_QUIET_RESET_MS) {
-            req->active = FALSE;
-            req->attempt_count = 0;
-            req->next_interval_ms = 0;
-            req->last_request_ms = 0;
+            idr_requester_reset_request_state_locked(req, FALSE, FALSE);
         }
     }
 
@@ -570,10 +568,7 @@ void idr_requester_handle_warning(IdrRequester *req) {
             reinit_data = req->reinit_user_data;
             req->reinit_pending = TRUE;
             req->request_in_flight = FALSE;
-            req->active = FALSE;
-            req->attempt_count = 0;
-            req->next_interval_ms = 0;
-            req->last_request_ms = 0;
+            idr_requester_reset_request_state_locked(req, FALSE, FALSE);
             g_strlcpy(host_copy, req->source_host, sizeof(host_copy));
             g_strlcpy(path_copy, req->http_path, sizeof(path_copy));
             port_copy = req->http_port;
