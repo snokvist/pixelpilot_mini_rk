@@ -81,6 +81,7 @@ typedef struct {
     int aud_pt;
     int appsink_max_buffers;
     StreamProfile stream_profile;
+    int stream_profile_lock_controls;
     int depay_emit_partial_au;
     int decoder_drop_error_frames;
     int jitterbuffer_enable;

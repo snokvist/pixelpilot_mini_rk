@@ -929,6 +929,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "jitterbuffer-enable") == 0) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("config: ignoring pipeline.jitterbuffer-enable because pipeline.stream-profile controls jitter/IDR tuning");
+                return 0;
+            }
             int v = 0;
             if (parse_bool(value, &v) != 0) {
                 return -1;
@@ -937,6 +941,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "jitterbuffer-latency-ms") == 0) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("config: ignoring pipeline.jitterbuffer-latency-ms because pipeline.stream-profile controls jitter/IDR tuning");
+                return 0;
+            }
             int v = atoi(value);
             if (v < 0) {
                 LOGE("config: pipeline.jitterbuffer-latency-ms '%s' must be >= 0", value);
@@ -946,6 +954,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "jitterbuffer-max-misorder") == 0) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("config: ignoring pipeline.jitterbuffer-max-misorder because pipeline.stream-profile controls jitter/IDR tuning");
+                return 0;
+            }
             int v = atoi(value);
             if (v < 0) {
                 LOGE("config: pipeline.jitterbuffer-max-misorder '%s' must be >= 0", value);
@@ -1262,6 +1274,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "stats-trigger") == 0) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("config: ignoring idr.stats-trigger because pipeline.stream-profile controls jitter/IDR tuning");
+                return 0;
+            }
             int v = 0;
             if (parse_bool(value, &v) != 0) {
                 return -1;
@@ -1270,6 +1286,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "loss-window-ms") == 0) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("config: ignoring idr.loss-window-ms because pipeline.stream-profile controls jitter/IDR tuning");
+                return 0;
+            }
             int v = atoi(value);
             if (v < 0) {
                 v = 0;
@@ -1278,6 +1298,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "loss-threshold") == 0) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("config: ignoring idr.loss-threshold because pipeline.stream-profile controls jitter/IDR tuning");
+                return 0;
+            }
             int v = atoi(value);
             if (v <= 0) {
                 LOGE("config: IDR loss-threshold '%s' must be positive", value);
@@ -1287,6 +1311,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "jitter-threshold-ms") == 0) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("config: ignoring idr.jitter-threshold-ms because pipeline.stream-profile controls jitter/IDR tuning");
+                return 0;
+            }
             double v = atof(value);
             if (v <= 0.0) {
                 LOGE("config: IDR jitter-threshold-ms '%s' must be positive", value);
@@ -1296,6 +1324,10 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
             return 0;
         }
         if (strcasecmp(key, "jitter-cooldown-ms") == 0) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("config: ignoring idr.jitter-cooldown-ms because pipeline.stream-profile controls jitter/IDR tuning");
+                return 0;
+            }
             int v = atoi(value);
             if (v < 0) {
                 v = 0;

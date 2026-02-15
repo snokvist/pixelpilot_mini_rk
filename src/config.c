@@ -173,6 +173,7 @@ void cfg_apply_stream_profile(AppCfg *cfg, StreamProfile profile) {
     }
 
     cfg->stream_profile = profile;
+    cfg->stream_profile_lock_controls = 1;
 
     switch (profile) {
     case STREAM_PROFILE_LOW_LATENCY:
@@ -292,6 +293,7 @@ void cfg_defaults(AppCfg *c) {
     c->aud_pt = 98;
     c->appsink_max_buffers = 4;
     c->stream_profile = STREAM_PROFILE_LOW_LATENCY;
+    c->stream_profile_lock_controls = 1;
     c->udpsrc_pt97_filter = 1;
     c->custom_sink = CUSTOM_SINK_RECEIVER;
     strcpy(c->aud_dev, "plughw:CARD=rockchiphdmi0,DEV=0");
@@ -556,10 +558,23 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
         } else if (!strcmp(argv[i], "--decoder-keep-error-frames")) {
             cfg->decoder_drop_error_frames = 0;
         } else if (!strcmp(argv[i], "--jitterbuffer-enable")) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --jitterbuffer-enable because --stream-profile controls jitter/IDR tuning");
+                continue;
+            }
             cfg->jitterbuffer_enable = 1;
         } else if (!strcmp(argv[i], "--jitterbuffer-disable")) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --jitterbuffer-disable because --stream-profile controls jitter/IDR tuning");
+                continue;
+            }
             cfg->jitterbuffer_enable = 0;
         } else if (!strcmp(argv[i], "--jitterbuffer-latency-ms") && i + 1 < argc) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --jitterbuffer-latency-ms because --stream-profile controls jitter/IDR tuning");
+                ++i;
+                continue;
+            }
             int latency = atoi(argv[++i]);
             if (latency < 0) {
                 LOGW("--jitterbuffer-latency-ms must be >= 0; clamping to 0");
@@ -567,6 +582,11 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             }
             cfg->jitterbuffer_latency_ms = (unsigned int)latency;
         } else if (!strcmp(argv[i], "--jitterbuffer-max-misorder") && i + 1 < argc) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --jitterbuffer-max-misorder because --stream-profile controls jitter/IDR tuning");
+                ++i;
+                continue;
+            }
             int misorder = atoi(argv[++i]);
             if (misorder < 0) {
                 LOGW("--jitterbuffer-max-misorder must be >= 0; clamping to 0");
@@ -706,10 +726,23 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 cfg->idr.http_port = port;
             }
         } else if (!strcmp(argv[i], "--idr-stats-trigger")) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --idr-stats-trigger because --stream-profile controls jitter/IDR tuning");
+                continue;
+            }
             cfg->idr.stats_trigger = 1;
         } else if (!strcmp(argv[i], "--idr-no-stats-trigger")) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --idr-no-stats-trigger because --stream-profile controls jitter/IDR tuning");
+                continue;
+            }
             cfg->idr.stats_trigger = 0;
         } else if (!strcmp(argv[i], "--idr-loss-window-ms") && i + 1 < argc) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --idr-loss-window-ms because --stream-profile controls jitter/IDR tuning");
+                ++i;
+                continue;
+            }
             int win = atoi(argv[++i]);
             if (win < 0) {
                 LOGE("--idr-loss-window-ms requires a non-negative value");
@@ -717,6 +750,11 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             }
             cfg->idr.loss_window_ms = (unsigned int)win;
         } else if (!strcmp(argv[i], "--idr-loss-threshold") && i + 1 < argc) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --idr-loss-threshold because --stream-profile controls jitter/IDR tuning");
+                ++i;
+                continue;
+            }
             int threshold = atoi(argv[++i]);
             if (threshold <= 0) {
                 LOGE("--idr-loss-threshold requires a positive value");
@@ -724,6 +762,11 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             }
             cfg->idr.loss_threshold = (unsigned int)threshold;
         } else if (!strcmp(argv[i], "--idr-jitter-threshold-ms") && i + 1 < argc) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --idr-jitter-threshold-ms because --stream-profile controls jitter/IDR tuning");
+                ++i;
+                continue;
+            }
             double jitter = atof(argv[++i]);
             if (jitter <= 0.0) {
                 LOGE("--idr-jitter-threshold-ms requires a positive value");
@@ -731,6 +774,11 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
             }
             cfg->idr.jitter_threshold_ms = jitter;
         } else if (!strcmp(argv[i], "--idr-jitter-cooldown-ms") && i + 1 < argc) {
+            if (cfg->stream_profile_lock_controls) {
+                LOGW("Ignoring --idr-jitter-cooldown-ms because --stream-profile controls jitter/IDR tuning");
+                ++i;
+                continue;
+            }
             int cooldown = atoi(argv[++i]);
             if (cooldown < 0) {
                 LOGE("--idr-jitter-cooldown-ms requires a non-negative value");
