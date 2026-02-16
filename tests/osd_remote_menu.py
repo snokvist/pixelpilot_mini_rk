@@ -34,10 +34,15 @@ CRSF_MAX = 1811
 CRSF_CENTER = 992
 CRSF_AXIS_DEADBAND = 120
 CRSF_ACTION_THRESHOLD = 1400
+CRSF_ACTION_LOW_THRESHOLD = CRSF_MIN + CRSF_MAX - CRSF_ACTION_THRESHOLD
 CRSF_DIRECTION_CHANNELS = 16
 CRSF_DIRECTION_REPEAT_DEFAULT_MS = 180
+CRSF_NAV_DEBOUNCE_MS = 100
+CRSF_SELECT_DEBOUNCE_MS = 250
+CRSF_MENU_TOGGLE_HOLD_S = 1.0
 CRSF_SAMPLE_INTERVAL_MS = 40
 CRSF_MENU_HIDE_KEY = -1001
+CRSF_MENU_TOGGLE_KEY = -1002
 
 
 @dataclass(frozen=True)
@@ -66,10 +71,16 @@ class CrsfInputState:
     select_pressed: bool = False
     back_pressed: bool = False
     last_nav_monotonic: float = 0.0
+    last_select_monotonic: float = 0.0
     last_sample_monotonic: float = 0.0
     last_update_monotonic: float = 0.0
     channels: Tuple[int, int, int, int] = (CRSF_CENTER, CRSF_CENTER, CRSF_CENTER, CRSF_CENTER)
     nav_direction: str = "neutral"
+    nav_candidate: str = "neutral"
+    nav_candidate_since: float = 0.0
+    combo_active: bool = False
+    combo_started_monotonic: float = 0.0
+    combo_latched: bool = False
     link_up: bool = False
 
 
@@ -170,47 +181,73 @@ def poll_crsf_remote_keys(
     if crsf_state.link_up and (now - crsf_state.last_update_monotonic) > 0.5:
         crsf_state.link_up = False
         crsf_state.nav_direction = "neutral"
+        crsf_state.nav_candidate = "neutral"
         crsf_state.select_pressed = False
         crsf_state.back_pressed = False
+        crsf_state.combo_active = False
+        crsf_state.combo_started_monotonic = 0.0
+        crsf_state.combo_latched = False
 
     if not crsf_state.link_up:
         return keys
 
     axis_x = crsf_state.channels[0] - CRSF_CENTER
     axis_y = crsf_state.channels[1] - CRSF_CENTER
+    nav_direction = "neutral"
     nav_key: Optional[int] = None
     if abs(axis_x) >= abs(axis_y):
         if axis_x <= -CRSF_AXIS_DEADBAND:
+            nav_direction = "up"
             nav_key = curses.KEY_UP
-            crsf_state.nav_direction = "up"
         elif axis_x >= CRSF_AXIS_DEADBAND:
+            nav_direction = "down"
             nav_key = curses.KEY_DOWN
-            crsf_state.nav_direction = "down"
-        else:
-            crsf_state.nav_direction = "neutral"
     else:
         if axis_y <= -CRSF_AXIS_DEADBAND:
+            nav_direction = "up"
             nav_key = curses.KEY_UP
-            crsf_state.nav_direction = "up"
         elif axis_y >= CRSF_AXIS_DEADBAND:
+            nav_direction = "down"
             nav_key = curses.KEY_DOWN
-            crsf_state.nav_direction = "down"
-        else:
-            crsf_state.nav_direction = "neutral"
 
-    if nav_key is not None and (now - crsf_state.last_nav_monotonic) * 1000.0 >= direction_repeat_ms:
-        keys.append(nav_key)
-        crsf_state.last_nav_monotonic = now
+    if nav_direction != crsf_state.nav_candidate:
+        crsf_state.nav_candidate = nav_direction
+        crsf_state.nav_candidate_since = now
+
+    if nav_key is not None and crsf_state.nav_candidate == nav_direction:
+        nav_candidate_age_ms = (now - crsf_state.nav_candidate_since) * 1000.0
+        if nav_candidate_age_ms >= CRSF_NAV_DEBOUNCE_MS and (now - crsf_state.last_nav_monotonic) * 1000.0 >= direction_repeat_ms:
+            keys.append(nav_key)
+            crsf_state.last_nav_monotonic = now
+
+    crsf_state.nav_direction = nav_direction
 
     select_active = crsf_state.channels[2] >= CRSF_ACTION_THRESHOLD
-    if select_active and not crsf_state.select_pressed:
+    select_elapsed_ms = (now - crsf_state.last_select_monotonic) * 1000.0
+    if select_active and not crsf_state.select_pressed and select_elapsed_ms >= CRSF_SELECT_DEBOUNCE_MS:
         keys.append(10)
+        crsf_state.last_select_monotonic = now
     crsf_state.select_pressed = select_active
 
-    back_active = crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
-    if back_active and not crsf_state.back_pressed:
-        keys.append(CRSF_MENU_HIDE_KEY)
-    crsf_state.back_pressed = back_active
+    crsf_state.back_pressed = crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
+
+    combo_active = (
+        crsf_state.channels[0] <= CRSF_ACTION_LOW_THRESHOLD
+        and crsf_state.channels[1] >= CRSF_ACTION_THRESHOLD
+        and crsf_state.channels[2] >= CRSF_ACTION_THRESHOLD
+        and crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
+    )
+    crsf_state.combo_active = combo_active
+    if combo_active:
+        if crsf_state.combo_started_monotonic <= 0.0:
+            crsf_state.combo_started_monotonic = now
+        hold_time = now - crsf_state.combo_started_monotonic
+        if hold_time >= CRSF_MENU_TOGGLE_HOLD_S and not crsf_state.combo_latched:
+            keys.append(CRSF_MENU_TOGGLE_KEY)
+            crsf_state.combo_latched = True
+    else:
+        crsf_state.combo_started_monotonic = 0.0
+        crsf_state.combo_latched = False
 
     return keys
 
@@ -636,6 +673,8 @@ def build_webui_state(
             "back_pressed": crsf_state.back_pressed,
             "last_update_age_ms": last_update_age_ms,
             "inverse": [int(flag) for flag in inverse_channels],
+            "combo_active": crsf_state.combo_active,
+            "combo_latched": crsf_state.combo_latched,
         },
     }
 
@@ -925,6 +964,16 @@ def run_controller(
                         current_section = ""
                         selected = 0
                         status = "Menu overlay hidden"
+                        dirty = True
+                        continue
+
+                    if key == CRSF_MENU_TOGGLE_KEY:
+                        current_state = asset_enabled[menu_asset_id]
+                        next_state = True if current_state is None else (not current_state)
+                        asset_enabled[menu_asset_id] = next_state
+                        current_section = ""
+                        selected = 0
+                        status = "Menu overlay visible" if next_state else "Menu overlay hidden"
                         dirty = True
                         continue
 
