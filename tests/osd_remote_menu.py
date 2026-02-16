@@ -27,6 +27,13 @@ SECTION_ZOOM = "ZOOM"
 RESERVED_SECTIONS = {SECTION_ASSETS, SECTION_ZOOM}
 
 STOP_REQUESTED = False
+DEFAULT_UDP_DESTINATIONS: Tuple[Tuple[str, int], ...] = (("10.6.0.50", 7777),)
+
+
+@dataclass(frozen=True)
+class UdpDestination:
+    host: str
+    port: int
 
 
 @dataclass
@@ -228,8 +235,45 @@ def build_payload(menu_window: Tuple[str, str, str], asset_enabled: Sequence[Opt
     return payload
 
 
-def send_payload(sock: socket.socket, host: str, port: int, payload: dict) -> None:
-    sock.sendto(json.dumps(payload, separators=(",", ":")).encode("utf-8"), (host, port))
+def parse_udp_destination(payload: object) -> Optional[UdpDestination]:
+    if not isinstance(payload, dict):
+        return None
+    host = str(payload.get("host", "")).strip()
+    port_raw = payload.get("port")
+    if not host:
+        return None
+    if isinstance(port_raw, str) and port_raw.isdigit():
+        port_raw = int(port_raw)
+    if not isinstance(port_raw, int) or not (1 <= port_raw <= 65535):
+        return None
+    return UdpDestination(host=host, port=port_raw)
+
+
+def dedupe_destinations(destinations: Sequence[UdpDestination]) -> List[UdpDestination]:
+    seen: Set[Tuple[str, int]] = set()
+    unique: List[UdpDestination] = []
+    for destination in destinations:
+        key = (destination.host, destination.port)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(destination)
+    return unique
+
+
+def destination_label(destination: UdpDestination) -> str:
+    return f"{destination.host}:{destination.port}"
+
+
+def send_payloads(sock: socket.socket, destinations: Sequence[UdpDestination], payload: dict) -> List[str]:
+    encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    failures: List[str] = []
+    for destination in destinations:
+        try:
+            sock.sendto(encoded, (destination.host, destination.port))
+        except OSError as exc:
+            failures.append(f"{destination_label(destination)} ({exc})")
+    return failures
 
 
 class WebUiBridge:
@@ -402,6 +446,7 @@ def build_webui_state(
     asset_enabled: Sequence[Optional[bool]],
     zoom_enabled: bool,
     zoom_percent: int,
+    destinations: Sequence[UdpDestination],
 ) -> dict:
     return {
         "type": "menu_state",
@@ -412,6 +457,7 @@ def build_webui_state(
         "status": status,
         "asset_enabled": list(asset_enabled),
         "zoom": current_zoom_command(zoom_enabled, zoom_percent),
+        "destinations": [{"host": destination.host, "port": destination.port} for destination in destinations],
     }
 
 
@@ -459,8 +505,7 @@ def draw_ui(
     stdscr: "curses._CursesWindow",
     menu_window: Tuple[str, str, str],
     status: str,
-    host: str,
-    port: int,
+    destinations: Sequence[UdpDestination],
     interval_ms: int,
     zoom_enabled: bool,
     zoom_percent: int,
@@ -479,10 +524,14 @@ def draw_ui(
             pass
 
     level = "ROOT" if current_section == "" else f"[{current_section}]"
-    header = (
-        f"OSD menu {level} -> {host}:{port} tx={interval_ms}ms "
-        f"zoom={zoom_state_text(zoom_enabled, zoom_percent)} sections={section_count}"
-    )
+    if destinations:
+        first_destination = destination_label(destinations[0])
+        suffix = "" if len(destinations) == 1 else f" (+{len(destinations) - 1} more)"
+        destination_text = f"{first_destination}{suffix}"
+    else:
+        destination_text = "(no UDP destinations)"
+
+    header = f"OSD menu {level} -> {destination_text} tx={interval_ms}ms zoom={zoom_state_text(zoom_enabled, zoom_percent)} sections={section_count}"
     safe_addnstr(0, 0, header)
     safe_addnstr(1, 0, "-" * max(1, width - 1))
     safe_addnstr(2, 0, "3-row menu view (matches OSD ext.text6/7/8):")
@@ -538,6 +587,9 @@ def run_controller(
         current_section = ""
         entries = top_entries
         selected = 0
+        destinations = dedupe_destinations(
+            [UdpDestination(host=host, port=port)] + [UdpDestination(host=extra_host, port=extra_port) for extra_host, extra_port in DEFAULT_UDP_DESTINATIONS]
+        )
         status = f"Ready (WebUI http://{webui_host}:{webui_port})"
         dirty = True
         last_send_monotonic = 0.0
@@ -559,8 +611,7 @@ def run_controller(
                             stdscr,
                             menu_window,
                             status,
-                            host,
-                            port,
+                            destinations,
                             interval_ms,
                             zoom_enabled,
                             zoom_percent,
@@ -597,6 +648,18 @@ def run_controller(
                                     asset_enabled[asset_id] = enabled
                                     dirty = True
 
+                        if isinstance(message.get("destinations"), list):
+                            requested_destinations = [
+                                parsed
+                                for item in message["destinations"]
+                                for parsed in [parse_udp_destination(item)]
+                                if parsed is not None
+                            ]
+                            if requested_destinations:
+                                destinations = dedupe_destinations(requested_destinations)
+                                status = f"UDP destinations updated ({len(destinations)})"
+                                dirty = True
+
                         zoom_command = message.get("zoom")
                         if isinstance(zoom_command, str):
                             try:
@@ -618,6 +681,7 @@ def run_controller(
                             asset_enabled,
                             zoom_enabled,
                             zoom_percent,
+                            destinations,
                         )
                     )
 
@@ -625,12 +689,15 @@ def run_controller(
                     if dirty or (now - last_send_monotonic) * 1000.0 >= interval_ms:
                         payload = build_payload(menu_window, asset_enabled, zoom_enabled, zoom_percent)
                         try:
-                            send_payload(sock, host, port, payload)
+                            failures = send_payloads(sock, destinations, payload)
                             last_send_monotonic = now
-                            dirty = False
-                        except OSError as exc:
+                            if failures:
+                                status = f"Send partial failure ({len(failures)}/{len(destinations)}): {clamp_text(failures[0])}"
+                            else:
+                                dirty = False
+                        except Exception as exc:
                             status = f"Send failed: {exc}"
-                            last_send_monotonic = now
+                        last_send_monotonic = now
 
                     if remote_keys:
                         key = remote_keys.pop(0)
@@ -739,12 +806,12 @@ def run_controller(
                     clear_texts[MENU_TEXT_SLOT_START + 0] = ""
                     clear_texts[MENU_TEXT_SLOT_START + 1] = ""
                     clear_texts[MENU_TEXT_SLOT_START + 2] = ""
-                    send_payload(sock, host, port, {"texts": clear_texts})
+                    send_payloads(sock, destinations, {"texts": clear_texts})
                 except OSError:
                     pass
 
                 try:
-                    send_payload(sock, host, port, {"asset_updates": [{"id": menu_asset_id, "enabled": False}]})
+                    send_payloads(sock, destinations, {"asset_updates": [{"id": menu_asset_id, "enabled": False}]})
                 except OSError:
                     pass
 

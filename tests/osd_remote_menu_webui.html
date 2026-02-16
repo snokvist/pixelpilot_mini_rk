@@ -21,6 +21,9 @@
     .state { white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b1220; border-radius:10px; padding:10px; min-height:72px; }
     ul { margin:8px 0 0; padding-left:20px; }
     .asset-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:8px; }
+    .destinations { display:flex; flex-direction:column; gap:8px; }
+    .dest-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .dest-row code { background:#0b1220; border:1px solid #334155; border-radius:8px; padding:6px 8px; }
   </style>
 </head>
 <body>
@@ -34,6 +37,16 @@
         <button id="disconnect" class="alt">Disconnect</button>
       </div>
       <p id="status">Disconnected</p>
+    </div>
+
+    <div class="card">
+      <h3>UDP Destinations</h3>
+      <div class="row">
+        <div><label>Host</label><input id="dest-host" value="10.6.0.50" /></div>
+        <div><label>Port</label><input id="dest-port" type="number" value="7777" /></div>
+        <button id="add-destination" class="alt">Add Destination</button>
+      </div>
+      <div id="destinations" class="destinations"></div>
     </div>
 
     <div class="card">
@@ -66,6 +79,7 @@ let pollTimer = null;
 let pollInFlight = false;
 let connected = false;
 let latestState = null;
+let destinations = [];
 
 function setStatus(text){ document.getElementById('status').textContent = text; }
 function buildBaseUrl(){
@@ -90,6 +104,67 @@ async function send(obj){
 }
 
 function sendKey(key){ send({ key }); }
+
+function destinationKey(destination){ return `${destination.host}:${destination.port}`; }
+
+function sanitizeDestination(destination){
+  const host = String(destination.host || '').trim();
+  const port = Number(destination.port);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { host, port };
+}
+
+function dedupeDestinations(input){
+  const seen = new Set();
+  const output = [];
+  input.forEach((item) => {
+    const clean = sanitizeDestination(item);
+    if (!clean) return;
+    const key = destinationKey(clean);
+    if (seen.has(key)) return;
+    seen.add(key);
+    output.push(clean);
+  });
+  return output;
+}
+
+function pushDestinations(){
+  if (!baseUrl) {
+    setStatus('Connect first before changing destinations.');
+    return;
+  }
+  send({ destinations });
+}
+
+function renderDestinations(){
+  const container = document.getElementById('destinations');
+  container.innerHTML = '';
+  if (!destinations.length) {
+    container.textContent = 'No destinations configured.';
+    return;
+  }
+
+  destinations.forEach((destination, index) => {
+    const row = document.createElement('div');
+    row.className = 'dest-row';
+
+    const label = document.createElement('code');
+    label.textContent = destinationKey(destination);
+    row.appendChild(label);
+
+    const removeButton = document.createElement('button');
+    removeButton.className = 'danger';
+    removeButton.textContent = 'Remove';
+    removeButton.onclick = () => {
+      destinations = destinations.filter((_item, idx) => idx !== index);
+      renderDestinations();
+      pushDestinations();
+    };
+    row.appendChild(removeButton);
+
+    container.appendChild(row);
+  });
+}
 
 async function pollState(){
   if (!baseUrl || pollInFlight) return;
@@ -146,6 +221,10 @@ function toggleAsset(assetId, currentIsOn){
 }
 function renderState(state){
   latestState = state;
+  if (Array.isArray(state.destinations)) {
+    destinations = dedupeDestinations(state.destinations);
+    renderDestinations();
+  }
   const lines = state.menu_window || [];
   document.getElementById('window').textContent = `${lines[0]||''}\n${lines[1]||''}\n${lines[2]||''}`;
 
@@ -173,6 +252,18 @@ function renderState(state){
 
 document.getElementById('connect').onclick = connect;
 document.getElementById('disconnect').onclick = disconnect;
+document.getElementById('add-destination').onclick = () => {
+  const host = document.getElementById('dest-host').value.trim();
+  const port = Number(document.getElementById('dest-port').value.trim());
+  const next = sanitizeDestination({ host, port });
+  if (!next) {
+    setStatus('Invalid destination host or port.');
+    return;
+  }
+  destinations = dedupeDestinations([...destinations, next]);
+  renderDestinations();
+  pushDestinations();
+};
 </script>
 </body>
 </html>
