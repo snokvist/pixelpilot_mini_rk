@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PixelPilot OSD Menu WebUI</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; }
+    .wrap { max-width:920px; margin:20px auto; padding:16px; }
+    .card { background:#1e293b; border-radius:14px; padding:16px; box-shadow:0 10px 24px rgba(0,0,0,.35); margin-bottom:14px; }
+    h1 { margin:0 0 12px; font-size:22px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
+    label { font-size:12px; color:#94a3b8; display:block; margin-bottom:6px; }
+    input { padding:10px; border-radius:10px; border:1px solid #334155; background:#0b1220; color:#e2e8f0; width:160px; }
+    button { padding:10px 14px; border:0; border-radius:10px; cursor:pointer; color:#fff; background:#3b82f6; font-weight:600; }
+    button:hover { filter:brightness(1.08); }
+    button.alt { background:#475569; }
+    button.warn { background:#f59e0b; }
+    button.danger { background:#ef4444; }
+    .grid { display:grid; grid-template-columns:repeat(3,minmax(120px,1fr)); gap:10px; }
+    .state { white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b1220; border-radius:10px; padding:10px; min-height:72px; }
+    ul { margin:8px 0 0; padding-left:20px; }
+    .asset-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:8px; }
+    .destinations { display:flex; flex-direction:column; gap:8px; }
+    .dest-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .dest-row code { background:#0b1220; border:1px solid #334155; border-radius:8px; padding:6px 8px; }
+    .crsf-grid { display:grid; grid-template-columns:repeat(2,minmax(180px,1fr)); gap:10px; }
+    .meter { background:#0b1220; border:1px solid #334155; border-radius:10px; padding:8px; }
+    .meter-bar { height:10px; border-radius:999px; background:#334155; overflow:hidden; margin-top:6px; }
+    .meter-bar > span { display:block; height:100%; background:#22d3ee; width:0%; transition:width .08s linear; }
+    .pill { display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:600; margin-left:8px; }
+    .pill.ok { background:#065f46; color:#d1fae5; }
+    .pill.off { background:#7f1d1d; color:#fee2e2; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="grid">
+        <button onclick="sendKey('up')">⬆ Up</button>
+        <button onclick="sendKey('select')">⏎ Select</button>
+        <button onclick="sendKey('down')">⬇ Down</button>
+        <button class="warn" id="all-assets-on">All Assets ON</button>
+        <button class="warn" id="all-assets-off">All Assets OFF</button>
+        <button class="danger" onclick="sendKey('hide_menu')">Hide Menu Overlay</button>
+        <button class="alt" onclick="sendKey('show_menu')">Show Menu Overlay</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Current 3-row OSD Window</h3>
+      <p id="status">Connecting...</p>
+      <div class="state" id="window"></div>
+      <h3>Entries</h3>
+      <ul id="entries"></ul>
+    </div>
+
+    <div class="card">
+      <h3>CRSF Input <span id="crsf-link" class="pill off">OFF</span></h3>
+      <div id="crsf-summary" class="state">No CRSF data.</div>
+      <div class="crsf-grid" id="crsf-grid"></div>
+    </div>
+
+    <div class="card">
+      <h3>Assets</h3>
+      <div class="asset-grid" id="assets"></div>
+    </div>
+
+    <div class="card">
+      <h3>UDP Destinations</h3>
+      <div class="row">
+        <div><label>Host</label><input id="dest-host" value="10.6.0.50" /></div>
+        <div><label>Port</label><input id="dest-port" type="number" value="7777" /></div>
+        <button id="add-destination" class="alt">Add Destination</button>
+      </div>
+      <div id="destinations" class="destinations"></div>
+    </div>
+  </div>
+
+<script>
+let baseUrl = '';
+let pollTimer = null;
+let pollInFlight = false;
+let connected = false;
+let latestState = null;
+let destinations = [];
+
+function setStatus(text){ document.getElementById('status').textContent = text; }
+function inferDefaultEndpoint(){
+  const host = window.location.hostname || '127.0.0.1';
+  let port = window.location.port;
+  if (!port) {
+    if (window.location.protocol === 'http:') port = '80';
+    else if (window.location.protocol === 'https:') port = '443';
+    else port = '8060';
+  }
+  return { host, port };
+}
+function buildBaseUrl(){
+  const defaults = inferDefaultEndpoint();
+  return `http://${defaults.host}:${defaults.port}`;
+}
+
+async function send(obj){
+  if (!baseUrl) { setStatus('Not connected'); return; }
+  try {
+    const response = await fetch(`${baseUrl}/command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj)
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    await pollState();
+  } catch (err) {
+    setStatus(`Command failed: ${err}`);
+  }
+}
+
+function sendKey(key){ send({ key }); }
+
+function sleep(ms){ return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+async function setAllAssetsWithWaterfall(enabled){
+  const assets = (latestState && Array.isArray(latestState.asset_enabled)) ? latestState.asset_enabled : [];
+  if (!assets.length) {
+    send({ key: enabled ? 'all_on' : 'all_off' });
+    return;
+  }
+
+  for (let idx = 0; idx < assets.length; idx += 1) {
+    await send({ asset_updates: [{ id: idx, enabled }] });
+    await sleep(35);
+  }
+
+  if (latestState && Array.isArray(latestState.asset_enabled)) {
+    latestState.asset_enabled = latestState.asset_enabled.map(() => enabled);
+    renderState(latestState);
+  }
+}
+
+function destinationKey(destination){ return `${destination.host}:${destination.port}`; }
+
+function sanitizeDestination(destination){
+  const host = String(destination.host || '').trim();
+  const port = Number(destination.port);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { host, port };
+}
+
+function dedupeDestinations(input){
+  const seen = new Set();
+  const output = [];
+  input.forEach((item) => {
+    const clean = sanitizeDestination(item);
+    if (!clean) return;
+    const key = destinationKey(clean);
+    if (seen.has(key)) return;
+    seen.add(key);
+    output.push(clean);
+  });
+  return output;
+}
+
+function pushDestinations(){
+  if (!baseUrl) {
+    setStatus('Connect first before changing destinations.');
+    return;
+  }
+  send({ destinations });
+}
+
+function renderDestinations(){
+  const container = document.getElementById('destinations');
+  container.innerHTML = '';
+  if (!destinations.length) {
+    container.textContent = 'No destinations configured.';
+    return;
+  }
+
+  destinations.forEach((destination, index) => {
+    const row = document.createElement('div');
+    row.className = 'dest-row';
+
+    const label = document.createElement('code');
+    label.textContent = destinationKey(destination);
+    row.appendChild(label);
+
+    const removeButton = document.createElement('button');
+    removeButton.className = 'danger';
+    removeButton.textContent = 'Remove';
+    removeButton.onclick = () => {
+      destinations = destinations.filter((_item, idx) => idx !== index);
+      renderDestinations();
+      pushDestinations();
+    };
+    row.appendChild(removeButton);
+
+    container.appendChild(row);
+  });
+}
+
+async function pollState(){
+  if (!baseUrl || pollInFlight) return;
+  pollInFlight = true;
+  try {
+    const response = await fetch(`${baseUrl}/state`, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const state = await response.json();
+    renderState(state);
+    connected = true;
+    setStatus(`Connected to ${baseUrl}`);
+  } catch (err) {
+    setStatus(`Polling failed: ${err}`);
+  } finally {
+    pollInFlight = false;
+  }
+}
+
+function schedulePoll(){
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    await pollState();
+    if (baseUrl) {
+      schedulePoll();
+    }
+  }, 350);
+}
+
+function connect(){
+  baseUrl = buildBaseUrl();
+  connected = false;
+  setStatus(`Connecting to ${baseUrl} ...`);
+  if (pollTimer) clearTimeout(pollTimer);
+  pollState();
+  schedulePoll();
+}
+
+function disconnect(){
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
+  baseUrl = '';
+  connected = false;
+  setStatus('Disconnected');
+}
+
+
+
+function toggleAsset(assetId, currentIsOn){
+  if (latestState && Array.isArray(latestState.asset_enabled)) {
+    latestState.asset_enabled[assetId] = !currentIsOn;
+    renderState(latestState);
+  }
+  send({ asset_updates: [{ id: assetId, enabled: !currentIsOn }] });
+}
+function normalizeCrsf(chValue){
+  const min = 172;
+  const max = 1811;
+  const clamped = Math.max(min, Math.min(max, Number(chValue || 0)));
+  return ((clamped - min) / (max - min)) * 100;
+}
+
+function renderCrsf(state){
+  const crsf = state && state.crsf ? state.crsf : {};
+  const link = document.getElementById('crsf-link');
+  const summary = document.getElementById('crsf-summary');
+  const grid = document.getElementById('crsf-grid');
+  const channels = Array.isArray(crsf.channels) ? crsf.channels : [];
+  const labels = ['CH1 Select', 'CH2 Nav (high=up, low=down)', 'CH3 Combo input', 'CH4 Combo input'];
+
+  if (crsf.link_up) {
+    link.textContent = 'LINK';
+    link.className = 'pill ok';
+  } else {
+    link.textContent = crsf.enabled ? 'NO LINK' : 'OFF';
+    link.className = 'pill off';
+  }
+
+  const age = Number.isFinite(crsf.last_update_age_ms) && crsf.last_update_age_ms >= 0 ? `${crsf.last_update_age_ms}ms` : 'n/a';
+  summary.textContent = `enabled=${Boolean(crsf.enabled)} port=${crsf.port || 0} nav=${crsf.nav_direction || 'neutral'} select=${Boolean(crsf.select_pressed)} combo=${Boolean(crsf.combo_active)} latch=${Boolean(crsf.combo_latched)} age=${age}`;
+
+  grid.innerHTML = '';
+  labels.forEach((label, idx) => {
+    const rawValue = Number(channels[idx] || 0);
+    const meter = document.createElement('div');
+    meter.className = 'meter';
+    const title = document.createElement('div');
+    title.textContent = `${label}: ${rawValue}`;
+    const bar = document.createElement('div');
+    bar.className = 'meter-bar';
+    const fill = document.createElement('span');
+    fill.style.width = `${normalizeCrsf(rawValue)}%`;
+    bar.appendChild(fill);
+    meter.appendChild(title);
+    meter.appendChild(bar);
+    grid.appendChild(meter);
+  });
+}
+
+function renderState(state){
+  latestState = state;
+  if (Array.isArray(state.destinations)) {
+    destinations = dedupeDestinations(state.destinations);
+    renderDestinations();
+  }
+  const lines = state.menu_window || [];
+  document.getElementById('window').textContent = `${lines[0]||''}\n${lines[1]||''}\n${lines[2]||''}`;
+
+  const ul = document.getElementById('entries');
+  ul.innerHTML = '';
+  (state.entries || []).forEach((entry, idx) => {
+    const li = document.createElement('li');
+    li.textContent = `${idx === state.selected ? '👉 ' : ''}${entry}`;
+    li.style.cursor = 'pointer';
+    li.onclick = () => send({ selected: idx });
+    ul.appendChild(li);
+  });
+
+  const assets = document.getElementById('assets');
+  assets.innerHTML = '';
+  renderCrsf(state);
+
+  (state.asset_enabled || []).forEach((enabled, idx) => {
+    const btn = document.createElement('button');
+    const isOn = enabled === true;
+    btn.className = isOn ? '' : 'alt';
+    btn.textContent = `Asset ${idx}: ${isOn ? 'ON' : (enabled === false ? 'OFF' : '?')}`;
+    btn.onclick = () => toggleAsset(idx, isOn);
+    assets.appendChild(btn);
+  });
+}
+
+document.getElementById('all-assets-on').onclick = () => { setAllAssetsWithWaterfall(true); };
+document.getElementById('all-assets-off').onclick = () => { setAllAssetsWithWaterfall(false); };
+document.getElementById('add-destination').onclick = () => {
+  const host = document.getElementById('dest-host').value.trim();
+  const port = Number(document.getElementById('dest-port').value.trim());
+  const next = sanitizeDestination({ host, port });
+  if (!next) {
+    setStatus('Invalid destination host or port.');
+    return;
+  }
+  destinations = dedupeDestinations([...destinations, next]);
+  renderDestinations();
+  pushDestinations();
+};
+
+{
+  connect();
+}
+</script>
+</body>
+</html>
