@@ -200,10 +200,10 @@ def poll_crsf_remote_keys(
     axis_y = crsf_state.channels[1] - CRSF_CENTER
     nav_direction = "neutral"
     nav_key: Optional[int] = None
-    if axis_y <= -CRSF_AXIS_DEADBAND:
+    if axis_y >= CRSF_AXIS_DEADBAND:
         nav_direction = "up"
         nav_key = curses.KEY_UP
-    elif axis_y >= CRSF_AXIS_DEADBAND:
+    elif axis_y <= -CRSF_AXIS_DEADBAND:
         nav_direction = "down"
         nav_key = curses.KEY_DOWN
 
@@ -217,6 +217,7 @@ def poll_crsf_remote_keys(
     crsf_state.nav_direction = nav_direction
 
     # CH1 high is enter/select. CH2 is the only navigation axis for up/down.
+    # CH2 high => up, CH2 low => down.
     select_active = crsf_state.channels[0] >= CRSF_ACTION_THRESHOLD
     crsf_state.back_pressed = False
 
@@ -827,7 +828,8 @@ def run_controller(
         asset_enabled: List[Optional[bool]] = [None] * ASSET_COUNT
         for asset_id in initial_off:
             asset_enabled[asset_id] = False
-        asset_enabled[menu_asset_id] = True
+        menu_visible_by_default = stdscr is not None
+        asset_enabled[menu_asset_id] = menu_visible_by_default
 
         zoom_enabled = False
         zoom_percent = 100
@@ -840,7 +842,10 @@ def run_controller(
         destinations = dedupe_destinations(
             [UdpDestination(host=host, port=port)] + [UdpDestination(host=extra_host, port=extra_port) for extra_host, extra_port in DEFAULT_UDP_DESTINATIONS]
         )
-        status = f"Ready (WebUI http://{webui_host}:{webui_port})"
+        if menu_visible_by_default:
+            status = f"Ready (WebUI http://{webui_host}:{webui_port})"
+        else:
+            status = f"Ready (menu hidden; activate via WebUI or CRSF combo) (WebUI http://{webui_host}:{webui_port})"
         dirty = True
         last_send_monotonic = 0.0
         remote_keys: List[int] = []
@@ -855,7 +860,13 @@ def run_controller(
                 crsf_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 crsf_socket.bind(("0.0.0.0", crsf_udp_port))
                 crsf_socket.setblocking(False)
-                status = f"Ready (WebUI http://{webui_host}:{webui_port}, CRSF UDP :{crsf_udp_port})"
+                if menu_visible_by_default:
+                    status = f"Ready (WebUI http://{webui_host}:{webui_port}, CRSF UDP :{crsf_udp_port})"
+                else:
+                    status = (
+                        f"Ready (menu hidden; activate via WebUI or CRSF combo) "
+                        f"(WebUI http://{webui_host}:{webui_port}, CRSF UDP :{crsf_udp_port})"
+                    )
             try:
                 while not STOP_REQUESTED:
                     entries = top_entries if current_section == "" else submenu_table.get(current_section, fallback_entries)
