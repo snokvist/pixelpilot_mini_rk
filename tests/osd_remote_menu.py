@@ -807,6 +807,7 @@ def run_controller(
     crsf_udp_port: int,
     crsf_repeat_ms: int,
     inverse_channels: Tuple[bool, bool, bool, bool],
+    verbose: bool,
 ) -> int:
     global STOP_REQUESTED
     STOP_REQUESTED = False
@@ -951,7 +952,7 @@ def run_controller(
                             asset_enabled[menu_asset_id] is True,
                         )
                         remote_keys.extend(polled_keys)
-                        if stdscr is None:
+                        if stdscr is None and verbose:
                             maybe_emit_crsf_debug_log(crsf_state, asset_enabled[menu_asset_id] is True, polled_keys)
 
                     webui_bridge.broadcast(
@@ -1168,6 +1169,7 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated CRSF channel inversion flags for CH1..CH4 (example: 0,0,0,1)",
     )
     parser.add_argument("--webui-only", action="store_true", help="Run without ncurses and serve as WebUI-driven background daemon")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose CRSF debug logs (requires --webui-only)")
     return parser.parse_args()
 
 
@@ -1191,6 +1193,8 @@ def main() -> int:
         raise SystemExit("--crsf-udp-port must be in range 0..65535")
     if args.crsf_repeat_ms <= 0:
         raise SystemExit("--crsf-repeat-ms must be > 0")
+    if args.verbose and not args.webui_only:
+        raise SystemExit("--verbose requires --webui-only")
 
     try:
         initial_off = parse_asset_id_list(args.initial_off)
@@ -1232,6 +1236,7 @@ def main() -> int:
             args.crsf_udp_port,
             args.crsf_repeat_ms,
             inverse_channels,
+            args.verbose,
         )
 
     return curses.wrapper(
@@ -1252,6 +1257,7 @@ def main() -> int:
         args.crsf_udp_port,
         args.crsf_repeat_ms,
         inverse_channels,
+        args.verbose,
     )
 
 
