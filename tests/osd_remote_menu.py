@@ -28,6 +28,22 @@ RESERVED_SECTIONS = {SECTION_ASSETS, SECTION_ZOOM}
 
 STOP_REQUESTED = False
 DEFAULT_UDP_DESTINATIONS: Tuple[Tuple[str, int], ...] = (("10.6.0.50", 7777),)
+CRSF_FRAME_TYPE_RC_CHANNELS_PACKED = 0x16
+CRSF_MIN = 172
+CRSF_MAX = 1811
+CRSF_CENTER = 992
+CRSF_AXIS_DEADBAND = 120
+CRSF_ACTION_THRESHOLD = 1400
+CRSF_MENU_TOGGLE_CH1_MAX = 500
+CRSF_MENU_TOGGLE_CH234_MIN = 1500
+CRSF_DIRECTION_CHANNELS = 16
+CRSF_NAV_DEBOUNCE_MS = 100
+CRSF_SELECT_DEBOUNCE_MS = 250
+CRSF_MENU_TOGGLE_HOLD_S = 1.0
+CRSF_SAMPLE_INTERVAL_MS = 40
+MENU_INACTIVITY_TIMEOUT_S = 30.0
+CRSF_MENU_HIDE_KEY = -1001
+CRSF_MENU_TOGGLE_KEY = -1002
 
 
 @dataclass(frozen=True)
@@ -50,6 +66,219 @@ class MenuEntry:
     asset_id: int = -1
     action: Optional[MenuAction] = None
 
+
+@dataclass
+class CrsfInputState:
+    select_pressed: bool = False
+    back_pressed: bool = False
+    last_nav_monotonic: float = 0.0
+    last_select_monotonic: float = 0.0
+    last_sample_monotonic: float = 0.0
+    last_update_monotonic: float = 0.0
+    channels: Tuple[int, int, int, int] = (CRSF_CENTER, CRSF_CENTER, CRSF_CENTER, CRSF_CENTER)
+    nav_direction: str = "neutral"
+    nav_candidate: str = "neutral"
+    nav_candidate_since: float = 0.0
+    nav_latched: bool = False
+    combo_active: bool = False
+    combo_started_monotonic: float = 0.0
+    combo_latched: bool = False
+    link_up: bool = False
+    debug_last_print_monotonic: float = 0.0
+    debug_last_signature: str = ""
+
+
+def crc8_dvb_s2(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0xD5) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+    return crc
+
+
+def unpack_crsf_channels(payload: bytes) -> List[int]:
+    if len(payload) < 22:
+        return []
+    packed = int.from_bytes(payload[:22], byteorder="little", signed=False)
+    return [(packed >> (11 * index)) & 0x7FF for index in range(CRSF_DIRECTION_CHANNELS)]
+
+
+def extract_crsf_channels(datagram: bytes) -> Optional[List[int]]:
+    index = 0
+    while index + 2 <= len(datagram):
+        frame_len = datagram[index + 1]
+        frame_end = index + 2 + frame_len
+        if frame_len < 2 or frame_end > len(datagram):
+            break
+        frame_type = datagram[index + 2]
+        payload = datagram[index + 3 : frame_end - 1]
+        frame_crc = datagram[frame_end - 1]
+        if frame_crc == crc8_dvb_s2(bytes([frame_type]) + payload) and frame_type == CRSF_FRAME_TYPE_RC_CHANNELS_PACKED:
+            channels = unpack_crsf_channels(payload)
+            if len(channels) >= 4:
+                return channels
+        index = frame_end
+    return None
+
+
+
+
+def parse_inverse_spec(spec: str) -> Tuple[bool, bool, bool, bool]:
+    parts = [chunk.strip() for chunk in spec.split(",")]
+    if len(parts) != 4:
+        raise ValueError("expected exactly 4 values")
+
+    parsed: List[bool] = []
+    for idx, part in enumerate(parts):
+        if part not in ("0", "1"):
+            raise ValueError(f"invalid inverse flag '{part}' at position {idx + 1}; expected 0 or 1")
+        parsed.append(part == "1")
+
+    return tuple(parsed)  # type: ignore[return-value]
+
+
+def maybe_invert_channel(value: int, inverse: bool) -> int:
+    if not inverse:
+        return value
+    return CRSF_MIN + CRSF_MAX - value
+
+def poll_crsf_remote_keys(
+    crsf_socket: Optional[socket.socket],
+    crsf_state: CrsfInputState,
+    inverse_channels: Tuple[bool, bool, bool, bool],
+    menu_visible: bool,
+) -> List[int]:
+    if crsf_socket is None:
+        return []
+
+    keys: List[int] = []
+    latest_channels: Optional[List[int]] = None
+    while True:
+        try:
+            packet, _addr = crsf_socket.recvfrom(512)
+        except BlockingIOError:
+            break
+        except OSError:
+            return keys
+        parsed = extract_crsf_channels(packet)
+        if parsed is not None:
+            latest_channels = parsed
+
+    now = time.monotonic()
+    if (now - crsf_state.last_sample_monotonic) * 1000.0 < CRSF_SAMPLE_INTERVAL_MS:
+        return keys
+    crsf_state.last_sample_monotonic = now
+
+    if latest_channels is not None:
+        ch0 = maybe_invert_channel(latest_channels[0], inverse_channels[0])
+        ch1 = maybe_invert_channel(latest_channels[1], inverse_channels[1])
+        ch2 = maybe_invert_channel(latest_channels[2], inverse_channels[2])
+        ch3 = maybe_invert_channel(latest_channels[3], inverse_channels[3])
+        crsf_state.channels = (ch0, ch1, ch2, ch3)
+        crsf_state.last_update_monotonic = now
+        crsf_state.link_up = True
+
+    if crsf_state.link_up and (now - crsf_state.last_update_monotonic) > 0.5:
+        crsf_state.link_up = False
+        crsf_state.nav_direction = "neutral"
+        crsf_state.nav_candidate = "neutral"
+        crsf_state.select_pressed = False
+        crsf_state.back_pressed = False
+        crsf_state.nav_latched = False
+        crsf_state.combo_active = False
+        crsf_state.combo_started_monotonic = 0.0
+        crsf_state.combo_latched = False
+
+    if not crsf_state.link_up:
+        return keys
+
+    axis_y = crsf_state.channels[1] - CRSF_CENTER
+    nav_direction = "neutral"
+    nav_key: Optional[int] = None
+    if axis_y >= CRSF_AXIS_DEADBAND:
+        nav_direction = "up"
+        nav_key = curses.KEY_UP
+    elif axis_y <= -CRSF_AXIS_DEADBAND:
+        nav_direction = "down"
+        nav_key = curses.KEY_DOWN
+
+    if nav_direction != crsf_state.nav_candidate:
+        crsf_state.nav_candidate = nav_direction
+        crsf_state.nav_candidate_since = now
+
+    if nav_direction == "neutral":
+        crsf_state.nav_latched = False
+
+    crsf_state.nav_direction = nav_direction
+
+    # CH1 high is enter/select. CH2 is the only navigation axis for up/down.
+    # CH2 high => up, CH2 low => down.
+    select_active = crsf_state.channels[0] >= CRSF_ACTION_THRESHOLD
+    crsf_state.back_pressed = False
+
+    combo_active = (
+        crsf_state.channels[0] < CRSF_MENU_TOGGLE_CH1_MAX
+        and crsf_state.channels[1] > CRSF_MENU_TOGGLE_CH234_MIN
+        and crsf_state.channels[2] > CRSF_MENU_TOGGLE_CH234_MIN
+        and crsf_state.channels[3] > CRSF_MENU_TOGGLE_CH234_MIN
+    )
+    crsf_state.combo_active = combo_active
+    if combo_active:
+        if crsf_state.combo_started_monotonic <= 0.0:
+            crsf_state.combo_started_monotonic = now
+        hold_time = now - crsf_state.combo_started_monotonic
+        if hold_time >= CRSF_MENU_TOGGLE_HOLD_S and not crsf_state.combo_latched:
+            keys.append(CRSF_MENU_TOGGLE_KEY)
+            crsf_state.combo_latched = True
+    else:
+        crsf_state.combo_started_monotonic = 0.0
+        crsf_state.combo_latched = False
+
+    # When menu overlay is hidden, ignore all CRSF navigation/actions and only allow
+    # the explicit combo-based menu toggle to avoid accidental key presses.
+    if not menu_visible:
+        crsf_state.select_pressed = select_active
+        return [key for key in keys if key == CRSF_MENU_TOGGLE_KEY]
+
+    if nav_key is not None and crsf_state.nav_candidate == nav_direction and not crsf_state.nav_latched:
+        nav_candidate_age_ms = (now - crsf_state.nav_candidate_since) * 1000.0
+        if nav_candidate_age_ms >= CRSF_NAV_DEBOUNCE_MS:
+            keys.append(nav_key)
+            crsf_state.nav_latched = True
+
+    select_elapsed_ms = (now - crsf_state.last_select_monotonic) * 1000.0
+    if select_active and not crsf_state.select_pressed and select_elapsed_ms >= CRSF_SELECT_DEBOUNCE_MS:
+        keys.append(10)
+        crsf_state.last_select_monotonic = now
+    crsf_state.select_pressed = select_active
+
+    return keys
+
+
+
+def maybe_emit_crsf_debug_log(
+    crsf_state: CrsfInputState,
+    menu_visible: bool,
+    emitted_keys: Sequence[int],
+) -> None:
+    now = time.monotonic()
+    signature = (
+        f"menu={'on' if menu_visible else 'off'} "
+        f"link={'up' if crsf_state.link_up else 'down'} "
+        f"ch={crsf_state.channels} "
+        f"nav={crsf_state.nav_direction} "
+        f"sel={int(crsf_state.select_pressed)} "
+        f"combo={int(crsf_state.combo_active)} latch={int(crsf_state.combo_latched)} "
+        f"keys={list(emitted_keys)}"
+    )
+    if emitted_keys or signature != crsf_state.debug_last_signature or (now - crsf_state.debug_last_print_monotonic) >= 1.0:
+        print(f"[CRSF DEBUG] {signature}", flush=True)
+        crsf_state.debug_last_signature = signature
+        crsf_state.debug_last_print_monotonic = now
 
 def _on_sigint(_signum: int, _frame) -> None:
     global STOP_REQUESTED
@@ -447,7 +676,11 @@ def build_webui_state(
     zoom_enabled: bool,
     zoom_percent: int,
     destinations: Sequence[UdpDestination],
+    crsf_state: CrsfInputState,
+    crsf_udp_port: int,
+    inverse_channels: Tuple[bool, bool, bool, bool],
 ) -> dict:
+    last_update_age_ms = int((time.monotonic() - crsf_state.last_update_monotonic) * 1000.0) if crsf_state.last_update_monotonic else -1
     return {
         "type": "menu_state",
         "section": current_section or "ROOT",
@@ -458,6 +691,19 @@ def build_webui_state(
         "asset_enabled": list(asset_enabled),
         "zoom": current_zoom_command(zoom_enabled, zoom_percent),
         "destinations": [{"host": destination.host, "port": destination.port} for destination in destinations],
+        "crsf": {
+            "enabled": crsf_udp_port > 0,
+            "port": crsf_udp_port,
+            "link_up": crsf_state.link_up,
+            "channels": list(crsf_state.channels),
+            "nav_direction": crsf_state.nav_direction,
+            "select_pressed": crsf_state.select_pressed,
+            "back_pressed": crsf_state.back_pressed,
+            "last_update_age_ms": last_update_age_ms,
+            "inverse": [int(flag) for flag in inverse_channels],
+            "combo_active": crsf_state.combo_active,
+            "combo_latched": crsf_state.combo_latched,
+        },
     }
 
 
@@ -558,6 +804,9 @@ def run_controller(
     menu_asset_id: int,
     webui_host: str,
     webui_port: int,
+    crsf_udp_port: int,
+    inverse_channels: Tuple[bool, bool, bool, bool],
+    verbose: bool,
 ) -> int:
     global STOP_REQUESTED
     STOP_REQUESTED = False
@@ -577,7 +826,8 @@ def run_controller(
         asset_enabled: List[Optional[bool]] = [None] * ASSET_COUNT
         for asset_id in initial_off:
             asset_enabled[asset_id] = False
-        asset_enabled[menu_asset_id] = True
+        menu_visible_by_default = stdscr is not None
+        asset_enabled[menu_asset_id] = menu_visible_by_default
 
         zoom_enabled = False
         zoom_percent = 100
@@ -590,15 +840,32 @@ def run_controller(
         destinations = dedupe_destinations(
             [UdpDestination(host=host, port=port)] + [UdpDestination(host=extra_host, port=extra_port) for extra_host, extra_port in DEFAULT_UDP_DESTINATIONS]
         )
-        status = f"Ready (WebUI http://{webui_host}:{webui_port})"
+        if menu_visible_by_default:
+            status = f"Ready (WebUI http://{webui_host}:{webui_port})"
+        else:
+            status = f"Ready (menu hidden; activate via WebUI or CRSF combo) (WebUI http://{webui_host}:{webui_port})"
         dirty = True
         last_send_monotonic = 0.0
+        last_menu_activity_monotonic = time.monotonic()
         remote_keys: List[int] = []
+        crsf_state = CrsfInputState()
 
         ui_html_path = os.path.join(os.path.dirname(__file__), "osd_remote_menu_webui.html")
         webui_bridge = WebUiBridge(webui_host, webui_port, ui_html_path)
 
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            crsf_socket: Optional[socket.socket] = None
+            if crsf_udp_port > 0:
+                crsf_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                crsf_socket.bind(("0.0.0.0", crsf_udp_port))
+                crsf_socket.setblocking(False)
+                if menu_visible_by_default:
+                    status = f"Ready (WebUI http://{webui_host}:{webui_port}, CRSF UDP :{crsf_udp_port})"
+                else:
+                    status = (
+                        f"Ready (menu hidden; activate via WebUI or CRSF combo) "
+                        f"(WebUI http://{webui_host}:{webui_port}, CRSF UDP :{crsf_udp_port})"
+                    )
             try:
                 while not STOP_REQUESTED:
                     entries = top_entries if current_section == "" else submenu_table.get(current_section, fallback_entries)
@@ -629,6 +896,7 @@ def run_controller(
                         key_name = str(message.get("key", "")).strip().lower()
                         if key_name in key_map:
                             remote_keys.append(key_map[key_name])
+                            last_menu_activity_monotonic = time.monotonic()
                         elif key_name in ("quit", "hide_menu"):
                             asset_enabled[menu_asset_id] = False
                             status = "Menu overlay hidden"
@@ -636,21 +904,25 @@ def run_controller(
                         elif key_name == "show_menu":
                             asset_enabled[menu_asset_id] = True
                             status = "Menu overlay visible"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         elif key_name == "all_on":
                             for asset_id in range(ASSET_COUNT):
                                 asset_enabled[asset_id] = True
                             status = "All assets ON"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         elif key_name == "all_off":
                             for asset_id in range(ASSET_COUNT):
                                 asset_enabled[asset_id] = False
                             status = "All assets OFF"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
 
                         selected_value = message.get("selected")
                         if isinstance(selected_value, int):
                             selected = min(max(selected_value, 0), max(0, len(entries) - 1))
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
 
                         if isinstance(message.get("asset_updates"), list):
@@ -661,6 +933,8 @@ def run_controller(
                                 enabled = update.get("enabled")
                                 if isinstance(asset_id, int) and 0 <= asset_id < ASSET_COUNT and isinstance(enabled, bool):
                                     asset_enabled[asset_id] = enabled
+                                    if enabled and asset_id == menu_asset_id:
+                                        last_menu_activity_monotonic = time.monotonic()
                                     dirty = True
 
                         if isinstance(message.get("destinations"), list):
@@ -673,6 +947,7 @@ def run_controller(
                             if requested_destinations:
                                 destinations = dedupe_destinations(requested_destinations)
                                 status = f"UDP destinations updated ({len(destinations)})"
+                                last_menu_activity_monotonic = time.monotonic()
                                 dirty = True
 
                         zoom_command = message.get("zoom")
@@ -684,7 +959,31 @@ def run_controller(
                             else:
                                 zoom_enabled = parsed_enabled
                                 zoom_percent = max(100, min(zoom_max, parsed_percent))
+                                last_menu_activity_monotonic = time.monotonic()
                                 dirty = True
+
+                    if crsf_socket is not None:
+                        polled_keys = poll_crsf_remote_keys(
+                            crsf_socket,
+                            crsf_state,
+                            inverse_channels,
+                            asset_enabled[menu_asset_id] is True,
+                        )
+                        remote_keys.extend(polled_keys)
+                        if polled_keys:
+                            last_menu_activity_monotonic = time.monotonic()
+                        if stdscr is None and verbose:
+                            maybe_emit_crsf_debug_log(crsf_state, asset_enabled[menu_asset_id] is True, polled_keys)
+
+                    now = time.monotonic()
+                    menu_visible = asset_enabled[menu_asset_id] is True
+                    if menu_visible and (now - last_menu_activity_monotonic) >= MENU_INACTIVITY_TIMEOUT_S:
+                        asset_enabled[menu_asset_id] = False
+                        current_section = ""
+                        selected = 0
+                        status = f"Menu auto-hidden after {int(MENU_INACTIVITY_TIMEOUT_S)}s inactivity"
+                        dirty = True
+                        last_menu_activity_monotonic = now
 
                     webui_bridge.broadcast(
                         build_webui_state(
@@ -697,10 +996,12 @@ def run_controller(
                             zoom_enabled,
                             zoom_percent,
                             destinations,
+                            crsf_state,
+                            crsf_udp_port,
+                            inverse_channels,
                         )
                     )
 
-                    now = time.monotonic()
                     if dirty or (now - last_send_monotonic) * 1000.0 >= interval_ms:
                         payload = build_payload(menu_window, asset_enabled, zoom_enabled, zoom_percent)
                         try:
@@ -722,6 +1023,27 @@ def run_controller(
                         time.sleep(0.05)
                         continue
 
+                    if key == CRSF_MENU_HIDE_KEY:
+                        asset_enabled[menu_asset_id] = False
+                        current_section = ""
+                        selected = 0
+                        status = "Menu overlay hidden"
+                        last_menu_activity_monotonic = time.monotonic()
+                        dirty = True
+                        continue
+
+                    if key == CRSF_MENU_TOGGLE_KEY:
+                        current_state = asset_enabled[menu_asset_id]
+                        next_state = True if current_state is None else (not current_state)
+                        asset_enabled[menu_asset_id] = next_state
+                        current_section = ""
+                        selected = 0
+                        status = "Menu overlay visible" if next_state else "Menu overlay hidden"
+                        if next_state:
+                            last_menu_activity_monotonic = time.monotonic()
+                        dirty = True
+                        continue
+
                     if key < 0:
                         continue
 
@@ -732,12 +1054,14 @@ def run_controller(
                     if key in (curses.KEY_UP, ord("k"), ord("K")):
                         if selected > 0:
                             selected -= 1
+                        last_menu_activity_monotonic = time.monotonic()
                         dirty = True
                         continue
 
                     if key in (curses.KEY_DOWN, ord("j"), ord("J")):
                         if selected + 1 < len(entries):
                             selected += 1
+                        last_menu_activity_monotonic = time.monotonic()
                         dirty = True
                         continue
 
@@ -746,6 +1070,7 @@ def run_controller(
                             for asset_id in range(ASSET_COUNT):
                                 asset_enabled[asset_id] = True
                             status = "All assets ON"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         else:
                             status = "A/Z available in [ASSETS]"
@@ -756,6 +1081,7 @@ def run_controller(
                             for asset_id in range(ASSET_COUNT):
                                 asset_enabled[asset_id] = False
                             status = "All assets OFF"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         else:
                             status = "A/Z available in [ASSETS]"
@@ -769,6 +1095,7 @@ def run_controller(
                             current_section = ""
                             selected = 0
                             status = "Menu overlay hidden"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
@@ -776,6 +1103,7 @@ def run_controller(
                             current_section = entry.section
                             selected = 0
                             status = f"Opened [{current_section}]"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
@@ -789,6 +1117,7 @@ def run_controller(
                                         selected = idx
                                         break
                                 status = "Returned to ROOT"
+                                last_menu_activity_monotonic = time.monotonic()
                                 dirty = True
                             continue
 
@@ -797,6 +1126,7 @@ def run_controller(
                             next_state = True if current_state is None else (not current_state)
                             asset_enabled[entry.asset_id] = next_state
                             status = f"Asset {entry.asset_id} {'ON' if next_state else 'OFF'}"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
@@ -804,6 +1134,7 @@ def run_controller(
                             zoom_percent = min(zoom_max, zoom_percent + zoom_step)
                             zoom_enabled = zoom_percent > 100
                             status = f"Zoom set to {zoom_state_text(zoom_enabled, zoom_percent)}"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
@@ -812,11 +1143,13 @@ def run_controller(
                             if zoom_percent <= 100:
                                 zoom_enabled = False
                             status = f"Zoom set to {zoom_state_text(zoom_enabled, zoom_percent)}"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
                         if entry.kind == "action" and entry.action is not None:
                             status = execute_action(entry.action, action_timeout_ms, action_shell)
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
             finally:
@@ -833,6 +1166,12 @@ def run_controller(
                     send_payloads(sock, destinations, {"asset_updates": [{"id": menu_asset_id, "enabled": False}]})
                 except OSError:
                     pass
+
+                if crsf_socket is not None:
+                    try:
+                        crsf_socket.close()
+                    except OSError:
+                        pass
 
                 webui_bridge.close()
 
@@ -860,7 +1199,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--menu-asset-id", type=int, default=7, help="Asset id of menu widget to force-disable on exit (default: 7)")
     parser.add_argument("--webui-host", default="0.0.0.0", help="WebUI bind host (default: 0.0.0.0)")
     parser.add_argument("--webui-port", type=int, default=6666, help="WebUI HTTP bind port (default: 6666)")
+    parser.add_argument("--crsf-udp-port", type=int, default=0, help="Optional UDP port to ingest CRSF RC frames (default: disabled)")
+    parser.add_argument(
+        "--inverse",
+        default="0,0,0,0",
+        help="Comma-separated CRSF channel inversion flags for CH1..CH4 (example: 0,0,0,1)",
+    )
     parser.add_argument("--webui-only", action="store_true", help="Run without ncurses and serve as WebUI-driven background daemon")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose CRSF debug logs (requires --webui-only)")
     return parser.parse_args()
 
 
@@ -880,11 +1226,20 @@ def main() -> int:
         raise SystemExit(f"--menu-asset-id must be in range 0..{ASSET_COUNT - 1}")
     if args.webui_port <= 0 or args.webui_port > 65535:
         raise SystemExit("--webui-port must be in range 1..65535")
+    if args.crsf_udp_port < 0 or args.crsf_udp_port > 65535:
+        raise SystemExit("--crsf-udp-port must be in range 0..65535")
+    if args.verbose and not args.webui_only:
+        raise SystemExit("--verbose requires --webui-only")
 
     try:
         initial_off = parse_asset_id_list(args.initial_off)
     except ValueError as exc:
         raise SystemExit(f"--initial-off parse error: {exc}") from exc
+
+    try:
+        inverse_channels = parse_inverse_spec(args.inverse)
+    except ValueError as exc:
+        raise SystemExit(f"--inverse parse error: {exc}") from exc
 
     try:
         action_sections, actions_by_section = load_actions(args.actions_ini)
@@ -913,6 +1268,9 @@ def main() -> int:
             args.menu_asset_id,
             args.webui_host,
             args.webui_port,
+            args.crsf_udp_port,
+            inverse_channels,
+            args.verbose,
         )
 
     return curses.wrapper(
@@ -930,6 +1288,9 @@ def main() -> int:
         args.menu_asset_id,
         args.webui_host,
         args.webui_port,
+        args.crsf_udp_port,
+        inverse_channels,
+        args.verbose,
     )
 
 

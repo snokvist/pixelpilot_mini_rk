@@ -24,6 +24,13 @@
     .destinations { display:flex; flex-direction:column; gap:8px; }
     .dest-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .dest-row code { background:#0b1220; border:1px solid #334155; border-radius:8px; padding:6px 8px; }
+    .crsf-grid { display:grid; grid-template-columns:repeat(2,minmax(180px,1fr)); gap:10px; }
+    .meter { background:#0b1220; border:1px solid #334155; border-radius:10px; padding:8px; }
+    .meter-bar { height:10px; border-radius:999px; background:#334155; overflow:hidden; margin-top:6px; }
+    .meter-bar > span { display:block; height:100%; background:#22d3ee; width:0%; transition:width .08s linear; }
+    .pill { display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:600; margin-left:8px; }
+    .pill.ok { background:#065f46; color:#d1fae5; }
+    .pill.off { background:#7f1d1d; color:#fee2e2; }
   </style>
 </head>
 <body>
@@ -66,6 +73,12 @@
       <div class="state" id="window"></div>
       <h3>Entries</h3>
       <ul id="entries"></ul>
+    </div>
+
+    <div class="card">
+      <h3>CRSF Input <span id="crsf-link" class="pill off">OFF</span></h3>
+      <div id="crsf-summary" class="state">No CRSF data.</div>
+      <div class="crsf-grid" id="crsf-grid"></div>
     </div>
 
     <div class="card">
@@ -240,6 +253,50 @@ function toggleAsset(assetId, currentIsOn){
   }
   send({ asset_updates: [{ id: assetId, enabled: !currentIsOn }] });
 }
+function normalizeCrsf(chValue){
+  const min = 172;
+  const max = 1811;
+  const clamped = Math.max(min, Math.min(max, Number(chValue || 0)));
+  return ((clamped - min) / (max - min)) * 100;
+}
+
+function renderCrsf(state){
+  const crsf = state && state.crsf ? state.crsf : {};
+  const link = document.getElementById('crsf-link');
+  const summary = document.getElementById('crsf-summary');
+  const grid = document.getElementById('crsf-grid');
+  const channels = Array.isArray(crsf.channels) ? crsf.channels : [];
+  const labels = ['CH1 Select', 'CH2 Nav (high=up, low=down)', 'CH3 Combo input', 'CH4 Combo input'];
+
+  if (crsf.link_up) {
+    link.textContent = 'LINK';
+    link.className = 'pill ok';
+  } else {
+    link.textContent = crsf.enabled ? 'NO LINK' : 'OFF';
+    link.className = 'pill off';
+  }
+
+  const age = Number.isFinite(crsf.last_update_age_ms) && crsf.last_update_age_ms >= 0 ? `${crsf.last_update_age_ms}ms` : 'n/a';
+  summary.textContent = `enabled=${Boolean(crsf.enabled)} port=${crsf.port || 0} nav=${crsf.nav_direction || 'neutral'} select=${Boolean(crsf.select_pressed)} combo=${Boolean(crsf.combo_active)} latch=${Boolean(crsf.combo_latched)} age=${age}`;
+
+  grid.innerHTML = '';
+  labels.forEach((label, idx) => {
+    const rawValue = Number(channels[idx] || 0);
+    const meter = document.createElement('div');
+    meter.className = 'meter';
+    const title = document.createElement('div');
+    title.textContent = `${label}: ${rawValue}`;
+    const bar = document.createElement('div');
+    bar.className = 'meter-bar';
+    const fill = document.createElement('span');
+    fill.style.width = `${normalizeCrsf(rawValue)}%`;
+    bar.appendChild(fill);
+    meter.appendChild(title);
+    meter.appendChild(bar);
+    grid.appendChild(meter);
+  });
+}
+
 function renderState(state){
   latestState = state;
   if (Array.isArray(state.destinations)) {
@@ -261,6 +318,8 @@ function renderState(state){
 
   const assets = document.getElementById('assets');
   assets.innerHTML = '';
+  renderCrsf(state);
+
   (state.asset_enabled || []).forEach((enabled, idx) => {
     const btn = document.createElement('button');
     const isOn = enabled === true;
