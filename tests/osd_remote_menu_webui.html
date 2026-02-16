@@ -54,9 +54,10 @@
         <button onclick="sendKey('up')">⬆ Up</button>
         <button onclick="sendKey('select')">⏎ Select</button>
         <button onclick="sendKey('down')">⬇ Down</button>
-        <button class="warn" onclick="sendKey('all_on')">All Assets ON</button>
-        <button class="warn" onclick="sendKey('all_off')">All Assets OFF</button>
-        <button class="danger" onclick="sendKey('quit')">Quit Menu Process</button>
+        <button class="warn" id="all-assets-on">All Assets ON</button>
+        <button class="warn" id="all-assets-off">All Assets OFF</button>
+        <button class="danger" onclick="sendKey('hide_menu')">Hide Menu Overlay</button>
+        <button class="alt" onclick="sendKey('show_menu')">Show Menu Overlay</button>
       </div>
     </div>
 
@@ -104,6 +105,26 @@ async function send(obj){
 }
 
 function sendKey(key){ send({ key }); }
+
+function sleep(ms){ return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+async function setAllAssetsWithWaterfall(enabled){
+  const assets = (latestState && Array.isArray(latestState.asset_enabled)) ? latestState.asset_enabled : [];
+  if (!assets.length) {
+    send({ key: enabled ? 'all_on' : 'all_off' });
+    return;
+  }
+
+  for (let idx = 0; idx < assets.length; idx += 1) {
+    await send({ asset_updates: [{ id: idx, enabled }] });
+    await sleep(35);
+  }
+
+  if (latestState && Array.isArray(latestState.asset_enabled)) {
+    latestState.asset_enabled = latestState.asset_enabled.map(() => enabled);
+    renderState(latestState);
+  }
+}
 
 function destinationKey(destination){ return `${destination.host}:${destination.port}`; }
 
@@ -252,6 +273,8 @@ function renderState(state){
 
 document.getElementById('connect').onclick = connect;
 document.getElementById('disconnect').onclick = disconnect;
+document.getElementById('all-assets-on').onclick = () => { setAllAssetsWithWaterfall(true); };
+document.getElementById('all-assets-off').onclick = () => { setAllAssetsWithWaterfall(false); };
 document.getElementById('add-destination').onclick = () => {
   const host = document.getElementById('dest-host').value.trim();
   const port = Number(document.getElementById('dest-port').value.trim());

@@ -625,13 +625,28 @@ def run_controller(
                             "down": curses.KEY_DOWN,
                             "select": 10,
                             "enter": 10,
-                            "quit": ord("q"),
-                            "all_on": ord("a"),
-                            "all_off": ord("z"),
                         }
                         key_name = str(message.get("key", "")).strip().lower()
                         if key_name in key_map:
                             remote_keys.append(key_map[key_name])
+                        elif key_name in ("quit", "hide_menu"):
+                            asset_enabled[menu_asset_id] = False
+                            status = "Menu overlay hidden"
+                            dirty = True
+                        elif key_name == "show_menu":
+                            asset_enabled[menu_asset_id] = True
+                            status = "Menu overlay visible"
+                            dirty = True
+                        elif key_name == "all_on":
+                            for asset_id in range(ASSET_COUNT):
+                                asset_enabled[asset_id] = True
+                            status = "All assets ON"
+                            dirty = True
+                        elif key_name == "all_off":
+                            for asset_id in range(ASSET_COUNT):
+                                asset_enabled[asset_id] = False
+                            status = "All assets OFF"
+                            dirty = True
 
                         selected_value = message.get("selected")
                         if isinstance(selected_value, int):
@@ -750,8 +765,12 @@ def run_controller(
                         entry = entries[selected]
 
                         if entry.kind == "exit":
-                            STOP_REQUESTED = True
-                            break
+                            asset_enabled[menu_asset_id] = False
+                            current_section = ""
+                            selected = 0
+                            status = "Menu overlay hidden"
+                            dirty = True
+                            continue
 
                         if entry.kind == "section":
                             current_section = entry.section
