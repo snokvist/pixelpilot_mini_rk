@@ -1276,7 +1276,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-off", default="", help="Comma-separated asset ids to start OFF (example: '2,5,7')")
     parser.add_argument("--zoom-step", type=int, default=25, help="Zoom percentage step (default: 25)")
     parser.add_argument("--zoom-max", type=int, default=300, help="Maximum zoom percentage (default: 300)")
-    parser.add_argument("--actions-ini", default="", help="Optional INI file of local command actions")
+    parser.add_argument(
+        "--actions-ini",
+        default="",
+        help="Optional INI file of local command actions (defaults to menu.ini beside this script when present)",
+    )
     parser.add_argument("--action-timeout-ms", type=int, default=5000, help="Action command timeout in ms (default: 5000)")
     parser.add_argument("--action-shell", default="", help="Shell executable for actions (default: $SHELL, fallback /bin/sh)")
     parser.add_argument("--menu-asset-id", type=int, default=7, help="Asset id of menu widget to force-disable on exit (default: 7)")
@@ -1337,8 +1341,14 @@ def main() -> int:
     except ValueError as exc:
         raise SystemExit(f"--initial-off parse error: {exc}") from exc
 
+    actions_ini_path = args.actions_ini
+    if not actions_ini_path:
+        bundled_actions_ini = os.path.join(os.path.dirname(__file__), "menu.ini")
+        if os.path.isfile(bundled_actions_ini):
+            actions_ini_path = bundled_actions_ini
+
     try:
-        action_sections, actions_by_section = load_actions(args.actions_ini)
+        action_sections, actions_by_section = load_actions(actions_ini_path)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
