@@ -28,6 +28,13 @@ RESERVED_SECTIONS = {SECTION_ASSETS, SECTION_ZOOM}
 
 STOP_REQUESTED = False
 DEFAULT_UDP_DESTINATIONS: Tuple[Tuple[str, int], ...] = (("10.6.0.50", 7777),)
+CRSF_FRAME_TYPE_RC_CHANNELS_PACKED = 0x16
+CRSF_CENTER = 992
+CRSF_AXIS_DEADBAND = 120
+CRSF_ACTION_THRESHOLD = 1400
+CRSF_DIRECTION_CHANNELS = 16
+CRSF_DIRECTION_REPEAT_DEFAULT_MS = 180
+CRSF_SAMPLE_INTERVAL_MS = 40
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,134 @@ class MenuEntry:
     section: str = ""
     asset_id: int = -1
     action: Optional[MenuAction] = None
+
+
+@dataclass
+class CrsfInputState:
+    select_pressed: bool = False
+    back_pressed: bool = False
+    last_nav_monotonic: float = 0.0
+    last_sample_monotonic: float = 0.0
+    last_update_monotonic: float = 0.0
+    channels: Tuple[int, int, int, int] = (CRSF_CENTER, CRSF_CENTER, CRSF_CENTER, CRSF_CENTER)
+    nav_direction: str = "neutral"
+    link_up: bool = False
+
+
+def crc8_dvb_s2(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0xD5) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+    return crc
+
+
+def unpack_crsf_channels(payload: bytes) -> List[int]:
+    if len(payload) < 22:
+        return []
+    packed = int.from_bytes(payload[:22], byteorder="little", signed=False)
+    return [(packed >> (11 * index)) & 0x7FF for index in range(CRSF_DIRECTION_CHANNELS)]
+
+
+def extract_crsf_channels(datagram: bytes) -> Optional[List[int]]:
+    index = 0
+    while index + 2 <= len(datagram):
+        frame_len = datagram[index + 1]
+        frame_end = index + 2 + frame_len
+        if frame_len < 2 or frame_end > len(datagram):
+            break
+        frame_type = datagram[index + 2]
+        payload = datagram[index + 3 : frame_end - 1]
+        frame_crc = datagram[frame_end - 1]
+        if frame_crc == crc8_dvb_s2(bytes([frame_type]) + payload) and frame_type == CRSF_FRAME_TYPE_RC_CHANNELS_PACKED:
+            channels = unpack_crsf_channels(payload)
+            if len(channels) >= 4:
+                return channels
+        index = frame_end
+    return None
+
+
+def poll_crsf_remote_keys(
+    crsf_socket: Optional[socket.socket],
+    crsf_state: CrsfInputState,
+    direction_repeat_ms: int,
+) -> List[int]:
+    if crsf_socket is None:
+        return []
+
+    keys: List[int] = []
+    latest_channels: Optional[List[int]] = None
+    while True:
+        try:
+            packet, _addr = crsf_socket.recvfrom(512)
+        except BlockingIOError:
+            break
+        except OSError:
+            return keys
+        parsed = extract_crsf_channels(packet)
+        if parsed is not None:
+            latest_channels = parsed
+
+    now = time.monotonic()
+    if (now - crsf_state.last_sample_monotonic) * 1000.0 < CRSF_SAMPLE_INTERVAL_MS:
+        return keys
+    crsf_state.last_sample_monotonic = now
+
+    if latest_channels is not None:
+        crsf_state.channels = tuple(latest_channels[:4])
+        crsf_state.last_update_monotonic = now
+        crsf_state.link_up = True
+
+    if crsf_state.link_up and (now - crsf_state.last_update_monotonic) > 0.5:
+        crsf_state.link_up = False
+        crsf_state.nav_direction = "neutral"
+        crsf_state.select_pressed = False
+        crsf_state.back_pressed = False
+
+    if not crsf_state.link_up:
+        return keys
+
+    axis_x = crsf_state.channels[0] - CRSF_CENTER
+    axis_y = crsf_state.channels[1] - CRSF_CENTER
+    nav_key: Optional[int] = None
+    if abs(axis_x) >= abs(axis_y):
+        if axis_x <= -CRSF_AXIS_DEADBAND:
+            nav_key = curses.KEY_UP
+            crsf_state.nav_direction = "up"
+        elif axis_x >= CRSF_AXIS_DEADBAND:
+            nav_key = curses.KEY_DOWN
+            crsf_state.nav_direction = "down"
+        else:
+            crsf_state.nav_direction = "neutral"
+    else:
+        if axis_y <= -CRSF_AXIS_DEADBAND:
+            nav_key = curses.KEY_UP
+            crsf_state.nav_direction = "up"
+        elif axis_y >= CRSF_AXIS_DEADBAND:
+            nav_key = curses.KEY_DOWN
+            crsf_state.nav_direction = "down"
+        else:
+            crsf_state.nav_direction = "neutral"
+
+    if nav_key is not None and (now - crsf_state.last_nav_monotonic) * 1000.0 >= direction_repeat_ms:
+        keys.append(nav_key)
+        crsf_state.last_nav_monotonic = now
+
+    select_active = crsf_state.channels[2] >= CRSF_ACTION_THRESHOLD
+    if select_active and not crsf_state.select_pressed:
+        keys.append(10)
+    crsf_state.select_pressed = select_active
+
+    back_active = crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
+    if back_active and not crsf_state.back_pressed:
+        keys.append(27)
+    crsf_state.back_pressed = back_active
+
+    return keys
 
 
 def _on_sigint(_signum: int, _frame) -> None:
@@ -447,7 +582,10 @@ def build_webui_state(
     zoom_enabled: bool,
     zoom_percent: int,
     destinations: Sequence[UdpDestination],
+    crsf_state: CrsfInputState,
+    crsf_udp_port: int,
 ) -> dict:
+    last_update_age_ms = int((time.monotonic() - crsf_state.last_update_monotonic) * 1000.0) if crsf_state.last_update_monotonic else -1
     return {
         "type": "menu_state",
         "section": current_section or "ROOT",
@@ -458,6 +596,16 @@ def build_webui_state(
         "asset_enabled": list(asset_enabled),
         "zoom": current_zoom_command(zoom_enabled, zoom_percent),
         "destinations": [{"host": destination.host, "port": destination.port} for destination in destinations],
+        "crsf": {
+            "enabled": crsf_udp_port > 0,
+            "port": crsf_udp_port,
+            "link_up": crsf_state.link_up,
+            "channels": list(crsf_state.channels),
+            "nav_direction": crsf_state.nav_direction,
+            "select_pressed": crsf_state.select_pressed,
+            "back_pressed": crsf_state.back_pressed,
+            "last_update_age_ms": last_update_age_ms,
+        },
     }
 
 
@@ -558,6 +706,8 @@ def run_controller(
     menu_asset_id: int,
     webui_host: str,
     webui_port: int,
+    crsf_udp_port: int,
+    crsf_repeat_ms: int,
 ) -> int:
     global STOP_REQUESTED
     STOP_REQUESTED = False
@@ -594,11 +744,18 @@ def run_controller(
         dirty = True
         last_send_monotonic = 0.0
         remote_keys: List[int] = []
+        crsf_state = CrsfInputState()
 
         ui_html_path = os.path.join(os.path.dirname(__file__), "osd_remote_menu_webui.html")
         webui_bridge = WebUiBridge(webui_host, webui_port, ui_html_path)
 
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            crsf_socket: Optional[socket.socket] = None
+            if crsf_udp_port > 0:
+                crsf_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                crsf_socket.bind(("0.0.0.0", crsf_udp_port))
+                crsf_socket.setblocking(False)
+                status = f"Ready (WebUI http://{webui_host}:{webui_port}, CRSF UDP :{crsf_udp_port})"
             try:
                 while not STOP_REQUESTED:
                     entries = top_entries if current_section == "" else submenu_table.get(current_section, fallback_entries)
@@ -686,6 +843,9 @@ def run_controller(
                                 zoom_percent = max(100, min(zoom_max, parsed_percent))
                                 dirty = True
 
+                    if crsf_socket is not None:
+                        remote_keys.extend(poll_crsf_remote_keys(crsf_socket, crsf_state, crsf_repeat_ms))
+
                     webui_bridge.broadcast(
                         build_webui_state(
                             menu_window,
@@ -697,6 +857,8 @@ def run_controller(
                             zoom_enabled,
                             zoom_percent,
                             destinations,
+                            crsf_state,
+                            crsf_udp_port,
                         )
                     )
 
@@ -834,6 +996,12 @@ def run_controller(
                 except OSError:
                     pass
 
+                if crsf_socket is not None:
+                    try:
+                        crsf_socket.close()
+                    except OSError:
+                        pass
+
                 webui_bridge.close()
 
         return 0
@@ -860,6 +1028,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--menu-asset-id", type=int, default=7, help="Asset id of menu widget to force-disable on exit (default: 7)")
     parser.add_argument("--webui-host", default="0.0.0.0", help="WebUI bind host (default: 0.0.0.0)")
     parser.add_argument("--webui-port", type=int, default=6666, help="WebUI HTTP bind port (default: 6666)")
+    parser.add_argument("--crsf-udp-port", type=int, default=0, help="Optional UDP port to ingest CRSF RC frames (default: disabled)")
+    parser.add_argument(
+        "--crsf-repeat-ms",
+        type=int,
+        default=CRSF_DIRECTION_REPEAT_DEFAULT_MS,
+        help=f"Direction repeat interval while stick is held (default: {CRSF_DIRECTION_REPEAT_DEFAULT_MS})",
+    )
     parser.add_argument("--webui-only", action="store_true", help="Run without ncurses and serve as WebUI-driven background daemon")
     return parser.parse_args()
 
@@ -880,6 +1055,10 @@ def main() -> int:
         raise SystemExit(f"--menu-asset-id must be in range 0..{ASSET_COUNT - 1}")
     if args.webui_port <= 0 or args.webui_port > 65535:
         raise SystemExit("--webui-port must be in range 1..65535")
+    if args.crsf_udp_port < 0 or args.crsf_udp_port > 65535:
+        raise SystemExit("--crsf-udp-port must be in range 0..65535")
+    if args.crsf_repeat_ms <= 0:
+        raise SystemExit("--crsf-repeat-ms must be > 0")
 
     try:
         initial_off = parse_asset_id_list(args.initial_off)
@@ -913,6 +1092,8 @@ def main() -> int:
             args.menu_asset_id,
             args.webui_host,
             args.webui_port,
+            args.crsf_udp_port,
+            args.crsf_repeat_ms,
         )
 
     return curses.wrapper(
@@ -930,6 +1111,8 @@ def main() -> int:
         args.menu_asset_id,
         args.webui_host,
         args.webui_port,
+        args.crsf_udp_port,
+        args.crsf_repeat_ms,
     )
 
 
