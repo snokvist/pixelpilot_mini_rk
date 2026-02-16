@@ -29,12 +29,15 @@ RESERVED_SECTIONS = {SECTION_ASSETS, SECTION_ZOOM}
 STOP_REQUESTED = False
 DEFAULT_UDP_DESTINATIONS: Tuple[Tuple[str, int], ...] = (("10.6.0.50", 7777),)
 CRSF_FRAME_TYPE_RC_CHANNELS_PACKED = 0x16
+CRSF_MIN = 172
+CRSF_MAX = 1811
 CRSF_CENTER = 992
 CRSF_AXIS_DEADBAND = 120
 CRSF_ACTION_THRESHOLD = 1400
 CRSF_DIRECTION_CHANNELS = 16
 CRSF_DIRECTION_REPEAT_DEFAULT_MS = 180
 CRSF_SAMPLE_INTERVAL_MS = 40
+CRSF_MENU_HIDE_KEY = -1001
 
 
 @dataclass(frozen=True)
@@ -107,10 +110,32 @@ def extract_crsf_channels(datagram: bytes) -> Optional[List[int]]:
     return None
 
 
+
+
+def parse_inverse_spec(spec: str) -> Tuple[bool, bool, bool, bool]:
+    parts = [chunk.strip() for chunk in spec.split(",")]
+    if len(parts) != 4:
+        raise ValueError("expected exactly 4 values")
+
+    parsed: List[bool] = []
+    for idx, part in enumerate(parts):
+        if part not in ("0", "1"):
+            raise ValueError(f"invalid inverse flag '{part}' at position {idx + 1}; expected 0 or 1")
+        parsed.append(part == "1")
+
+    return tuple(parsed)  # type: ignore[return-value]
+
+
+def maybe_invert_channel(value: int, inverse: bool) -> int:
+    if not inverse:
+        return value
+    return CRSF_MIN + CRSF_MAX - value
+
 def poll_crsf_remote_keys(
     crsf_socket: Optional[socket.socket],
     crsf_state: CrsfInputState,
     direction_repeat_ms: int,
+    inverse_channels: Tuple[bool, bool, bool, bool],
 ) -> List[int]:
     if crsf_socket is None:
         return []
@@ -134,7 +159,11 @@ def poll_crsf_remote_keys(
     crsf_state.last_sample_monotonic = now
 
     if latest_channels is not None:
-        crsf_state.channels = tuple(latest_channels[:4])
+        ch0 = maybe_invert_channel(latest_channels[0], inverse_channels[0])
+        ch1 = maybe_invert_channel(latest_channels[1], inverse_channels[1])
+        ch2 = maybe_invert_channel(latest_channels[2], inverse_channels[2])
+        ch3 = maybe_invert_channel(latest_channels[3], inverse_channels[3])
+        crsf_state.channels = (ch0, ch1, ch2, ch3)
         crsf_state.last_update_monotonic = now
         crsf_state.link_up = True
 
@@ -180,7 +209,7 @@ def poll_crsf_remote_keys(
 
     back_active = crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
     if back_active and not crsf_state.back_pressed:
-        keys.append(27)
+        keys.append(CRSF_MENU_HIDE_KEY)
     crsf_state.back_pressed = back_active
 
     return keys
@@ -584,6 +613,7 @@ def build_webui_state(
     destinations: Sequence[UdpDestination],
     crsf_state: CrsfInputState,
     crsf_udp_port: int,
+    inverse_channels: Tuple[bool, bool, bool, bool],
 ) -> dict:
     last_update_age_ms = int((time.monotonic() - crsf_state.last_update_monotonic) * 1000.0) if crsf_state.last_update_monotonic else -1
     return {
@@ -605,6 +635,7 @@ def build_webui_state(
             "select_pressed": crsf_state.select_pressed,
             "back_pressed": crsf_state.back_pressed,
             "last_update_age_ms": last_update_age_ms,
+            "inverse": [int(flag) for flag in inverse_channels],
         },
     }
 
@@ -708,6 +739,7 @@ def run_controller(
     webui_port: int,
     crsf_udp_port: int,
     crsf_repeat_ms: int,
+    inverse_channels: Tuple[bool, bool, bool, bool],
 ) -> int:
     global STOP_REQUESTED
     STOP_REQUESTED = False
@@ -844,7 +876,7 @@ def run_controller(
                                 dirty = True
 
                     if crsf_socket is not None:
-                        remote_keys.extend(poll_crsf_remote_keys(crsf_socket, crsf_state, crsf_repeat_ms))
+                        remote_keys.extend(poll_crsf_remote_keys(crsf_socket, crsf_state, crsf_repeat_ms, inverse_channels))
 
                     webui_bridge.broadcast(
                         build_webui_state(
@@ -859,6 +891,7 @@ def run_controller(
                             destinations,
                             crsf_state,
                             crsf_udp_port,
+                            inverse_channels,
                         )
                     )
 
@@ -885,6 +918,14 @@ def run_controller(
                         continue
 
                     if key < 0:
+                        continue
+
+                    if key == CRSF_MENU_HIDE_KEY:
+                        asset_enabled[menu_asset_id] = False
+                        current_section = ""
+                        selected = 0
+                        status = "Menu overlay hidden"
+                        dirty = True
                         continue
 
                     if key in (ord("q"), ord("Q"), 27, 3):
@@ -1035,6 +1076,11 @@ def parse_args() -> argparse.Namespace:
         default=CRSF_DIRECTION_REPEAT_DEFAULT_MS,
         help=f"Direction repeat interval while stick is held (default: {CRSF_DIRECTION_REPEAT_DEFAULT_MS})",
     )
+    parser.add_argument(
+        "--inverse",
+        default="0,0,0,0",
+        help="Comma-separated CRSF channel inversion flags for CH1..CH4 (example: 0,0,0,1)",
+    )
     parser.add_argument("--webui-only", action="store_true", help="Run without ncurses and serve as WebUI-driven background daemon")
     return parser.parse_args()
 
@@ -1066,6 +1112,11 @@ def main() -> int:
         raise SystemExit(f"--initial-off parse error: {exc}") from exc
 
     try:
+        inverse_channels = parse_inverse_spec(args.inverse)
+    except ValueError as exc:
+        raise SystemExit(f"--inverse parse error: {exc}") from exc
+
+    try:
         action_sections, actions_by_section = load_actions(args.actions_ini)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1094,6 +1145,7 @@ def main() -> int:
             args.webui_port,
             args.crsf_udp_port,
             args.crsf_repeat_ms,
+            inverse_channels,
         )
 
     return curses.wrapper(
@@ -1113,6 +1165,7 @@ def main() -> int:
         args.webui_port,
         args.crsf_udp_port,
         args.crsf_repeat_ms,
+        inverse_channels,
     )
 
 
