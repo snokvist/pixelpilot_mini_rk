@@ -993,9 +993,6 @@ def run_controller(
                         time.sleep(0.05)
                         continue
 
-                    if key < 0:
-                        continue
-
                     if key == CRSF_MENU_HIDE_KEY:
                         asset_enabled[menu_asset_id] = False
                         current_section = ""
@@ -1012,6 +1009,9 @@ def run_controller(
                         selected = 0
                         status = "Menu overlay visible" if next_state else "Menu overlay hidden"
                         dirty = True
+                        continue
+
+                    if key < 0:
                         continue
 
                     if key in (ord("q"), ord("Q"), 27, 3):
