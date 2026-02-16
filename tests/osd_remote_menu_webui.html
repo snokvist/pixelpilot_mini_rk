@@ -266,7 +266,7 @@ function renderCrsf(state){
   const summary = document.getElementById('crsf-summary');
   const grid = document.getElementById('crsf-grid');
   const channels = Array.isArray(crsf.channels) ? crsf.channels : [];
-  const labels = ['CH1 Direction X', 'CH2 Direction Y', 'CH3 Select', 'CH4 Back'];
+  const labels = ['CH1 Select', 'CH2 Nav (high=up, low=down)', 'CH3 Combo input', 'CH4 Combo input'];
 
   if (crsf.link_up) {
     link.textContent = 'LINK';
@@ -277,7 +277,7 @@ function renderCrsf(state){
   }
 
   const age = Number.isFinite(crsf.last_update_age_ms) && crsf.last_update_age_ms >= 0 ? `${crsf.last_update_age_ms}ms` : 'n/a';
-  summary.textContent = `enabled=${Boolean(crsf.enabled)} port=${crsf.port || 0} nav=${crsf.nav_direction || 'neutral'} select=${Boolean(crsf.select_pressed)} back=${Boolean(crsf.back_pressed)} age=${age}`;
+  summary.textContent = `enabled=${Boolean(crsf.enabled)} port=${crsf.port || 0} nav=${crsf.nav_direction || 'neutral'} select=${Boolean(crsf.select_pressed)} combo=${Boolean(crsf.combo_active)} latch=${Boolean(crsf.combo_latched)} age=${age}`;
 
   grid.innerHTML = '';
   labels.forEach((label, idx) => {

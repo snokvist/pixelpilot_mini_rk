@@ -37,11 +37,11 @@ CRSF_ACTION_THRESHOLD = 1400
 CRSF_MENU_TOGGLE_CH1_MAX = 500
 CRSF_MENU_TOGGLE_CH234_MIN = 1500
 CRSF_DIRECTION_CHANNELS = 16
-CRSF_DIRECTION_REPEAT_DEFAULT_MS = 180
 CRSF_NAV_DEBOUNCE_MS = 100
 CRSF_SELECT_DEBOUNCE_MS = 250
 CRSF_MENU_TOGGLE_HOLD_S = 1.0
 CRSF_SAMPLE_INTERVAL_MS = 40
+MENU_INACTIVITY_TIMEOUT_S = 30.0
 CRSF_MENU_HIDE_KEY = -1001
 CRSF_MENU_TOGGLE_KEY = -1002
 
@@ -149,7 +149,6 @@ def maybe_invert_channel(value: int, inverse: bool) -> int:
 def poll_crsf_remote_keys(
     crsf_socket: Optional[socket.socket],
     crsf_state: CrsfInputState,
-    direction_repeat_ms: int,
     inverse_channels: Tuple[bool, bool, bool, bool],
     menu_visible: bool,
 ) -> List[int]:
@@ -806,7 +805,6 @@ def run_controller(
     webui_host: str,
     webui_port: int,
     crsf_udp_port: int,
-    crsf_repeat_ms: int,
     inverse_channels: Tuple[bool, bool, bool, bool],
     verbose: bool,
 ) -> int:
@@ -848,6 +846,7 @@ def run_controller(
             status = f"Ready (menu hidden; activate via WebUI or CRSF combo) (WebUI http://{webui_host}:{webui_port})"
         dirty = True
         last_send_monotonic = 0.0
+        last_menu_activity_monotonic = time.monotonic()
         remote_keys: List[int] = []
         crsf_state = CrsfInputState()
 
@@ -897,6 +896,7 @@ def run_controller(
                         key_name = str(message.get("key", "")).strip().lower()
                         if key_name in key_map:
                             remote_keys.append(key_map[key_name])
+                            last_menu_activity_monotonic = time.monotonic()
                         elif key_name in ("quit", "hide_menu"):
                             asset_enabled[menu_asset_id] = False
                             status = "Menu overlay hidden"
@@ -904,21 +904,25 @@ def run_controller(
                         elif key_name == "show_menu":
                             asset_enabled[menu_asset_id] = True
                             status = "Menu overlay visible"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         elif key_name == "all_on":
                             for asset_id in range(ASSET_COUNT):
                                 asset_enabled[asset_id] = True
                             status = "All assets ON"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         elif key_name == "all_off":
                             for asset_id in range(ASSET_COUNT):
                                 asset_enabled[asset_id] = False
                             status = "All assets OFF"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
 
                         selected_value = message.get("selected")
                         if isinstance(selected_value, int):
                             selected = min(max(selected_value, 0), max(0, len(entries) - 1))
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
 
                         if isinstance(message.get("asset_updates"), list):
@@ -929,6 +933,8 @@ def run_controller(
                                 enabled = update.get("enabled")
                                 if isinstance(asset_id, int) and 0 <= asset_id < ASSET_COUNT and isinstance(enabled, bool):
                                     asset_enabled[asset_id] = enabled
+                                    if enabled and asset_id == menu_asset_id:
+                                        last_menu_activity_monotonic = time.monotonic()
                                     dirty = True
 
                         if isinstance(message.get("destinations"), list):
@@ -941,6 +947,7 @@ def run_controller(
                             if requested_destinations:
                                 destinations = dedupe_destinations(requested_destinations)
                                 status = f"UDP destinations updated ({len(destinations)})"
+                                last_menu_activity_monotonic = time.monotonic()
                                 dirty = True
 
                         zoom_command = message.get("zoom")
@@ -952,19 +959,31 @@ def run_controller(
                             else:
                                 zoom_enabled = parsed_enabled
                                 zoom_percent = max(100, min(zoom_max, parsed_percent))
+                                last_menu_activity_monotonic = time.monotonic()
                                 dirty = True
 
                     if crsf_socket is not None:
                         polled_keys = poll_crsf_remote_keys(
                             crsf_socket,
                             crsf_state,
-                            crsf_repeat_ms,
                             inverse_channels,
                             asset_enabled[menu_asset_id] is True,
                         )
                         remote_keys.extend(polled_keys)
+                        if polled_keys:
+                            last_menu_activity_monotonic = time.monotonic()
                         if stdscr is None and verbose:
                             maybe_emit_crsf_debug_log(crsf_state, asset_enabled[menu_asset_id] is True, polled_keys)
+
+                    now = time.monotonic()
+                    menu_visible = asset_enabled[menu_asset_id] is True
+                    if menu_visible and (now - last_menu_activity_monotonic) >= MENU_INACTIVITY_TIMEOUT_S:
+                        asset_enabled[menu_asset_id] = False
+                        current_section = ""
+                        selected = 0
+                        status = f"Menu auto-hidden after {int(MENU_INACTIVITY_TIMEOUT_S)}s inactivity"
+                        dirty = True
+                        last_menu_activity_monotonic = now
 
                     webui_bridge.broadcast(
                         build_webui_state(
@@ -983,7 +1002,6 @@ def run_controller(
                         )
                     )
 
-                    now = time.monotonic()
                     if dirty or (now - last_send_monotonic) * 1000.0 >= interval_ms:
                         payload = build_payload(menu_window, asset_enabled, zoom_enabled, zoom_percent)
                         try:
@@ -1010,6 +1028,7 @@ def run_controller(
                         current_section = ""
                         selected = 0
                         status = "Menu overlay hidden"
+                        last_menu_activity_monotonic = time.monotonic()
                         dirty = True
                         continue
 
@@ -1020,6 +1039,8 @@ def run_controller(
                         current_section = ""
                         selected = 0
                         status = "Menu overlay visible" if next_state else "Menu overlay hidden"
+                        if next_state:
+                            last_menu_activity_monotonic = time.monotonic()
                         dirty = True
                         continue
 
@@ -1033,12 +1054,14 @@ def run_controller(
                     if key in (curses.KEY_UP, ord("k"), ord("K")):
                         if selected > 0:
                             selected -= 1
+                        last_menu_activity_monotonic = time.monotonic()
                         dirty = True
                         continue
 
                     if key in (curses.KEY_DOWN, ord("j"), ord("J")):
                         if selected + 1 < len(entries):
                             selected += 1
+                        last_menu_activity_monotonic = time.monotonic()
                         dirty = True
                         continue
 
@@ -1047,6 +1070,7 @@ def run_controller(
                             for asset_id in range(ASSET_COUNT):
                                 asset_enabled[asset_id] = True
                             status = "All assets ON"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         else:
                             status = "A/Z available in [ASSETS]"
@@ -1057,6 +1081,7 @@ def run_controller(
                             for asset_id in range(ASSET_COUNT):
                                 asset_enabled[asset_id] = False
                             status = "All assets OFF"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         else:
                             status = "A/Z available in [ASSETS]"
@@ -1070,6 +1095,7 @@ def run_controller(
                             current_section = ""
                             selected = 0
                             status = "Menu overlay hidden"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
@@ -1077,6 +1103,7 @@ def run_controller(
                             current_section = entry.section
                             selected = 0
                             status = f"Opened [{current_section}]"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
@@ -1090,6 +1117,7 @@ def run_controller(
                                         selected = idx
                                         break
                                 status = "Returned to ROOT"
+                                last_menu_activity_monotonic = time.monotonic()
                                 dirty = True
                             continue
 
@@ -1098,6 +1126,7 @@ def run_controller(
                             next_state = True if current_state is None else (not current_state)
                             asset_enabled[entry.asset_id] = next_state
                             status = f"Asset {entry.asset_id} {'ON' if next_state else 'OFF'}"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
@@ -1105,6 +1134,7 @@ def run_controller(
                             zoom_percent = min(zoom_max, zoom_percent + zoom_step)
                             zoom_enabled = zoom_percent > 100
                             status = f"Zoom set to {zoom_state_text(zoom_enabled, zoom_percent)}"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
@@ -1113,11 +1143,13 @@ def run_controller(
                             if zoom_percent <= 100:
                                 zoom_enabled = False
                             status = f"Zoom set to {zoom_state_text(zoom_enabled, zoom_percent)}"
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
 
                         if entry.kind == "action" and entry.action is not None:
                             status = execute_action(entry.action, action_timeout_ms, action_shell)
+                            last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                             continue
             finally:
@@ -1169,12 +1201,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--webui-port", type=int, default=6666, help="WebUI HTTP bind port (default: 6666)")
     parser.add_argument("--crsf-udp-port", type=int, default=0, help="Optional UDP port to ingest CRSF RC frames (default: disabled)")
     parser.add_argument(
-        "--crsf-repeat-ms",
-        type=int,
-        default=CRSF_DIRECTION_REPEAT_DEFAULT_MS,
-        help=f"Direction repeat interval while stick is held (default: {CRSF_DIRECTION_REPEAT_DEFAULT_MS})",
-    )
-    parser.add_argument(
         "--inverse",
         default="0,0,0,0",
         help="Comma-separated CRSF channel inversion flags for CH1..CH4 (example: 0,0,0,1)",
@@ -1202,8 +1228,6 @@ def main() -> int:
         raise SystemExit("--webui-port must be in range 1..65535")
     if args.crsf_udp_port < 0 or args.crsf_udp_port > 65535:
         raise SystemExit("--crsf-udp-port must be in range 0..65535")
-    if args.crsf_repeat_ms <= 0:
-        raise SystemExit("--crsf-repeat-ms must be > 0")
     if args.verbose and not args.webui_only:
         raise SystemExit("--verbose requires --webui-only")
 
@@ -1245,7 +1269,6 @@ def main() -> int:
             args.webui_host,
             args.webui_port,
             args.crsf_udp_port,
-            args.crsf_repeat_ms,
             inverse_channels,
             args.verbose,
         )
@@ -1266,7 +1289,6 @@ def main() -> int:
         args.webui_host,
         args.webui_port,
         args.crsf_udp_port,
-        args.crsf_repeat_ms,
         inverse_channels,
         args.verbose,
     )
