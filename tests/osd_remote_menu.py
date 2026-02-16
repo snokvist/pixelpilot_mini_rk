@@ -34,7 +34,8 @@ CRSF_MAX = 1811
 CRSF_CENTER = 992
 CRSF_AXIS_DEADBAND = 120
 CRSF_ACTION_THRESHOLD = 1400
-CRSF_ACTION_LOW_THRESHOLD = CRSF_MIN + CRSF_MAX - CRSF_ACTION_THRESHOLD
+CRSF_MENU_TOGGLE_CH1_MAX = 500
+CRSF_MENU_TOGGLE_CH234_MIN = 1500
 CRSF_DIRECTION_CHANNELS = 16
 CRSF_DIRECTION_REPEAT_DEFAULT_MS = 180
 CRSF_NAV_DEBOUNCE_MS = 100
@@ -227,10 +228,10 @@ def poll_crsf_remote_keys(
     crsf_state.back_pressed = back_active
 
     combo_active = (
-        crsf_state.channels[0] <= CRSF_ACTION_LOW_THRESHOLD
-        and crsf_state.channels[1] >= CRSF_ACTION_THRESHOLD
-        and crsf_state.channels[2] >= CRSF_ACTION_THRESHOLD
-        and crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
+        crsf_state.channels[0] < CRSF_MENU_TOGGLE_CH1_MAX
+        and crsf_state.channels[1] > CRSF_MENU_TOGGLE_CH234_MIN
+        and crsf_state.channels[2] > CRSF_MENU_TOGGLE_CH234_MIN
+        and crsf_state.channels[3] > CRSF_MENU_TOGGLE_CH234_MIN
     )
     crsf_state.combo_active = combo_active
     if combo_active:
