@@ -84,6 +84,8 @@ class CrsfInputState:
     combo_started_monotonic: float = 0.0
     combo_latched: bool = False
     link_up: bool = False
+    debug_last_print_monotonic: float = 0.0
+    debug_last_signature: str = ""
 
 
 def crc8_dvb_s2(data: bytes) -> int:
@@ -195,24 +197,15 @@ def poll_crsf_remote_keys(
     if not crsf_state.link_up:
         return keys
 
-    axis_x = crsf_state.channels[0] - CRSF_CENTER
     axis_y = crsf_state.channels[1] - CRSF_CENTER
     nav_direction = "neutral"
     nav_key: Optional[int] = None
-    if abs(axis_x) >= abs(axis_y):
-        if axis_x <= -CRSF_AXIS_DEADBAND:
-            nav_direction = "up"
-            nav_key = curses.KEY_UP
-        elif axis_x >= CRSF_AXIS_DEADBAND:
-            nav_direction = "down"
-            nav_key = curses.KEY_DOWN
-    else:
-        if axis_y <= -CRSF_AXIS_DEADBAND:
-            nav_direction = "up"
-            nav_key = curses.KEY_UP
-        elif axis_y >= CRSF_AXIS_DEADBAND:
-            nav_direction = "down"
-            nav_key = curses.KEY_DOWN
+    if axis_y <= -CRSF_AXIS_DEADBAND:
+        nav_direction = "up"
+        nav_key = curses.KEY_UP
+    elif axis_y >= CRSF_AXIS_DEADBAND:
+        nav_direction = "down"
+        nav_key = curses.KEY_DOWN
 
     if nav_direction != crsf_state.nav_candidate:
         crsf_state.nav_candidate = nav_direction
@@ -223,9 +216,9 @@ def poll_crsf_remote_keys(
 
     crsf_state.nav_direction = nav_direction
 
-    select_active = crsf_state.channels[2] >= CRSF_ACTION_THRESHOLD
-    back_active = crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
-    crsf_state.back_pressed = back_active
+    # CH1 high is enter/select. CH2 is the only navigation axis for up/down.
+    select_active = crsf_state.channels[0] >= CRSF_ACTION_THRESHOLD
+    crsf_state.back_pressed = False
 
     combo_active = (
         crsf_state.channels[0] < CRSF_MENU_TOGGLE_CH1_MAX
@@ -265,6 +258,27 @@ def poll_crsf_remote_keys(
 
     return keys
 
+
+
+def maybe_emit_crsf_debug_log(
+    crsf_state: CrsfInputState,
+    menu_visible: bool,
+    emitted_keys: Sequence[int],
+) -> None:
+    now = time.monotonic()
+    signature = (
+        f"menu={'on' if menu_visible else 'off'} "
+        f"link={'up' if crsf_state.link_up else 'down'} "
+        f"ch={crsf_state.channels} "
+        f"nav={crsf_state.nav_direction} "
+        f"sel={int(crsf_state.select_pressed)} "
+        f"combo={int(crsf_state.combo_active)} latch={int(crsf_state.combo_latched)} "
+        f"keys={list(emitted_keys)}"
+    )
+    if emitted_keys or signature != crsf_state.debug_last_signature or (now - crsf_state.debug_last_print_monotonic) >= 1.0:
+        print(f"[CRSF DEBUG] {signature}", flush=True)
+        crsf_state.debug_last_signature = signature
+        crsf_state.debug_last_print_monotonic = now
 
 def _on_sigint(_signum: int, _frame) -> None:
     global STOP_REQUESTED
@@ -929,15 +943,16 @@ def run_controller(
                                 dirty = True
 
                     if crsf_socket is not None:
-                        remote_keys.extend(
-                            poll_crsf_remote_keys(
-                                crsf_socket,
-                                crsf_state,
-                                crsf_repeat_ms,
-                                inverse_channels,
-                                asset_enabled[menu_asset_id] is True,
-                            )
+                        polled_keys = poll_crsf_remote_keys(
+                            crsf_socket,
+                            crsf_state,
+                            crsf_repeat_ms,
+                            inverse_channels,
+                            asset_enabled[menu_asset_id] is True,
                         )
+                        remote_keys.extend(polled_keys)
+                        if stdscr is None:
+                            maybe_emit_crsf_debug_log(crsf_state, asset_enabled[menu_asset_id] is True, polled_keys)
 
                     webui_bridge.broadcast(
                         build_webui_state(
