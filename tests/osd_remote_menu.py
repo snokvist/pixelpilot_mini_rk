@@ -78,6 +78,7 @@ class CrsfInputState:
     nav_direction: str = "neutral"
     nav_candidate: str = "neutral"
     nav_candidate_since: float = 0.0
+    nav_latched: bool = False
     combo_active: bool = False
     combo_started_monotonic: float = 0.0
     combo_latched: bool = False
@@ -147,6 +148,7 @@ def poll_crsf_remote_keys(
     crsf_state: CrsfInputState,
     direction_repeat_ms: int,
     inverse_channels: Tuple[bool, bool, bool, bool],
+    menu_visible: bool,
 ) -> List[int]:
     if crsf_socket is None:
         return []
@@ -184,6 +186,7 @@ def poll_crsf_remote_keys(
         crsf_state.nav_candidate = "neutral"
         crsf_state.select_pressed = False
         crsf_state.back_pressed = False
+        crsf_state.nav_latched = False
         crsf_state.combo_active = False
         crsf_state.combo_started_monotonic = 0.0
         crsf_state.combo_latched = False
@@ -214,22 +217,14 @@ def poll_crsf_remote_keys(
         crsf_state.nav_candidate = nav_direction
         crsf_state.nav_candidate_since = now
 
-    if nav_key is not None and crsf_state.nav_candidate == nav_direction:
-        nav_candidate_age_ms = (now - crsf_state.nav_candidate_since) * 1000.0
-        if nav_candidate_age_ms >= CRSF_NAV_DEBOUNCE_MS and (now - crsf_state.last_nav_monotonic) * 1000.0 >= direction_repeat_ms:
-            keys.append(nav_key)
-            crsf_state.last_nav_monotonic = now
+    if nav_direction == "neutral":
+        crsf_state.nav_latched = False
 
     crsf_state.nav_direction = nav_direction
 
     select_active = crsf_state.channels[2] >= CRSF_ACTION_THRESHOLD
-    select_elapsed_ms = (now - crsf_state.last_select_monotonic) * 1000.0
-    if select_active and not crsf_state.select_pressed and select_elapsed_ms >= CRSF_SELECT_DEBOUNCE_MS:
-        keys.append(10)
-        crsf_state.last_select_monotonic = now
-    crsf_state.select_pressed = select_active
-
-    crsf_state.back_pressed = crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
+    back_active = crsf_state.channels[3] >= CRSF_ACTION_THRESHOLD
+    crsf_state.back_pressed = back_active
 
     combo_active = (
         crsf_state.channels[0] <= CRSF_ACTION_LOW_THRESHOLD
@@ -248,6 +243,24 @@ def poll_crsf_remote_keys(
     else:
         crsf_state.combo_started_monotonic = 0.0
         crsf_state.combo_latched = False
+
+    # When menu overlay is hidden, ignore all CRSF navigation/actions and only allow
+    # the explicit combo-based menu toggle to avoid accidental key presses.
+    if not menu_visible:
+        crsf_state.select_pressed = select_active
+        return [key for key in keys if key == CRSF_MENU_TOGGLE_KEY]
+
+    if nav_key is not None and crsf_state.nav_candidate == nav_direction and not crsf_state.nav_latched:
+        nav_candidate_age_ms = (now - crsf_state.nav_candidate_since) * 1000.0
+        if nav_candidate_age_ms >= CRSF_NAV_DEBOUNCE_MS:
+            keys.append(nav_key)
+            crsf_state.nav_latched = True
+
+    select_elapsed_ms = (now - crsf_state.last_select_monotonic) * 1000.0
+    if select_active and not crsf_state.select_pressed and select_elapsed_ms >= CRSF_SELECT_DEBOUNCE_MS:
+        keys.append(10)
+        crsf_state.last_select_monotonic = now
+    crsf_state.select_pressed = select_active
 
     return keys
 
@@ -915,7 +928,15 @@ def run_controller(
                                 dirty = True
 
                     if crsf_socket is not None:
-                        remote_keys.extend(poll_crsf_remote_keys(crsf_socket, crsf_state, crsf_repeat_ms, inverse_channels))
+                        remote_keys.extend(
+                            poll_crsf_remote_keys(
+                                crsf_socket,
+                                crsf_state,
+                                crsf_repeat_ms,
+                                inverse_channels,
+                                asset_enabled[menu_asset_id] is True,
+                            )
+                        )
 
                     webui_bridge.broadcast(
                         build_webui_state(
