@@ -3,89 +3,436 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PixelPilot OSD Menu WebUI</title>
+  <title>Waybeam Hub</title>
   <style>
-    body { font-family: Inter, Arial, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; }
-    .wrap { max-width:920px; margin:20px auto; padding:16px; }
-    .card { background:#1e293b; border-radius:14px; padding:16px; box-shadow:0 10px 24px rgba(0,0,0,.35); margin-bottom:14px; }
-    h1 { margin:0 0 12px; font-size:22px; }
-    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:end; }
-    label { font-size:12px; color:#94a3b8; display:block; margin-bottom:6px; }
-    input { padding:10px; border-radius:10px; border:1px solid #334155; background:#0b1220; color:#e2e8f0; width:160px; }
-    button { padding:10px 14px; border:0; border-radius:10px; cursor:pointer; color:#fff; background:#3b82f6; font-weight:600; }
-    button:hover { filter:brightness(1.08); }
-    button.alt { background:#475569; }
-    button.warn { background:#f59e0b; }
-    button.danger { background:#ef4444; }
-    .grid { display:grid; grid-template-columns:repeat(3,minmax(120px,1fr)); gap:10px; }
-    .state { white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background:#0b1220; border-radius:10px; padding:10px; min-height:72px; }
-    ul { margin:8px 0 0; padding-left:20px; }
-    .asset-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:8px; }
-    .destinations { display:flex; flex-direction:column; gap:8px; }
-    .dest-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .dest-row code { background:#0b1220; border:1px solid #334155; border-radius:8px; padding:6px 8px; }
-    .crsf-grid { display:grid; grid-template-columns:repeat(2,minmax(180px,1fr)); gap:10px; }
-    .meter { background:#0b1220; border:1px solid #334155; border-radius:10px; padding:8px; }
-    .meter-bar { height:10px; border-radius:999px; background:#334155; overflow:hidden; margin-top:6px; }
-    .meter-bar > span { display:block; height:100%; background:#22d3ee; width:0%; transition:width .08s linear; }
-    .pill { display:inline-block; padding:3px 8px; border-radius:999px; font-size:12px; font-weight:600; margin-left:8px; }
-    .pill.ok { background:#065f46; color:#d1fae5; }
-    .pill.off { background:#7f1d1d; color:#fee2e2; }
+    :root {
+      --bg: #0b1220;
+      --bg-soft: #111b2f;
+      --panel: #15233a;
+      --border: #2a3b5a;
+      --text: #e5ecf7;
+      --muted: #95a7c5;
+      --primary: #2ea8ff;
+      --primary-strong: #0d8de9;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --ok: #1bb56f;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: Inter, Arial, sans-serif;
+      background:
+        radial-gradient(900px 400px at 10% -10%, #1a3259 0%, transparent 60%),
+        radial-gradient(700px 300px at 100% 0%, #1f2d4f 0%, transparent 60%),
+        var(--bg);
+    }
+
+    .wrap {
+      max-width: 980px;
+      margin: 24px auto;
+      padding: 0 16px 24px;
+    }
+
+    .card {
+      background: linear-gradient(180deg, #182943 0%, var(--panel) 100%);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 14px;
+      box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+
+    h3 {
+      margin: 0 0 12px;
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    p { margin: 0; }
+
+    .status {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+
+    .tab-btn {
+      background: #2d3f5d;
+      color: var(--text);
+    }
+
+    .tab-btn.active {
+      background: var(--primary);
+      color: #052136;
+    }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: end;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(140px, 1fr));
+      gap: 10px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 600;
+      color: #fff;
+      background: var(--primary-strong);
+      cursor: pointer;
+      transition: filter 120ms ease;
+    }
+
+    button:hover { filter: brightness(1.08); }
+    button.alt { background: #4b5f83; }
+    button.warn { background: var(--warning); color: #2b1b00; }
+    button.danger { background: var(--danger); }
+    button.ghost { background: #2a3b5a; color: var(--text); }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    input {
+      width: 180px;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .state {
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      min-height: 72px;
+      line-height: 1.35;
+    }
+
+    ul { margin: 8px 0 0; padding-left: 20px; }
+
+    .pill {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .pill.ok { background: #0f5f40; color: #d0fce9; }
+    .pill.off { background: #6c1c27; color: #ffe3e8; }
+
+    .crsf-grid {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(200px, 1fr));
+      gap: 10px;
+    }
+
+    .meter {
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+    }
+
+    .meter-bar {
+      height: 10px;
+      border-radius: 999px;
+      background: #25344f;
+      overflow: hidden;
+      margin-top: 6px;
+    }
+
+    .meter-bar > span {
+      display: block;
+      width: 0%;
+      height: 100%;
+      background: #23c7ff;
+      transition: width 80ms linear;
+    }
+
+    .asset-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 8px;
+    }
+
+    .control-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .index-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(110px, 1fr));
+      gap: 8px;
+    }
+
+    .index-chip {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-soft);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .index-chip input[type='checkbox'] {
+      margin: 0;
+      width: 16px;
+      height: 16px;
+      accent-color: var(--ok);
+    }
+
+    .slider-row input[type='range'] {
+      width: min(440px, 100%);
+      background: transparent;
+      border: 0;
+      padding: 0;
+    }
+
+    .inline-value {
+      color: var(--primary);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-weight: 700;
+    }
+
+    .destinations {
+      margin-top: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .dest-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 10px;
+      border-radius: 10px;
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+    }
+
+    .dest-row code {
+      background: #102039;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 5px 8px;
+    }
+
+    .dest-row input[type='checkbox'] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--ok);
+      margin: 0;
+    }
+
+    .dest-meta {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    @media (max-width: 720px) {
+      .grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+      .asset-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .crsf-grid { grid-template-columns: 1fr; }
+      .index-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      input { width: 100%; }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="card">
-      <div class="grid">
-        <button onclick="sendKey('up')">⬆ Up</button>
-        <button onclick="sendKey('select')">⏎ Select</button>
-        <button onclick="sendKey('down')">⬇ Down</button>
-        <button class="warn" id="all-assets-on">All Assets ON</button>
-        <button class="warn" id="all-assets-off">All Assets OFF</button>
-        <button class="danger" onclick="sendKey('hide_menu')">Hide Menu Overlay</button>
-        <button class="alt" onclick="sendKey('show_menu')">Show Menu Overlay</button>
+      <h1>Waybeam Hub</h1>
+      <p id="status" class="status">Connecting...</p>
+      <div class="tabs" role="tablist" aria-label="Control sections">
+        <button id="tab-btn-menu" class="tab-btn active" type="button" role="tab" aria-selected="true">Pixelpilot Menu</button>
+        <button id="tab-btn-osd" class="tab-btn" type="button" role="tab" aria-selected="false">OSD Control</button>
+        <button id="tab-btn-settings" class="tab-btn" type="button" role="tab" aria-selected="false">Settings</button>
       </div>
     </div>
 
-    <div class="card">
-      <h3>Current 3-row OSD Window</h3>
-      <p id="status">Connecting...</p>
-      <div class="state" id="window"></div>
-      <h3>Entries</h3>
-      <ul id="entries"></ul>
-    </div>
-
-    <div class="card">
-      <h3>CRSF Input <span id="crsf-link" class="pill off">OFF</span></h3>
-      <div id="crsf-summary" class="state">No CRSF data.</div>
-      <div class="crsf-grid" id="crsf-grid"></div>
-    </div>
-
-    <div class="card">
-      <h3>Assets</h3>
-      <div class="asset-grid" id="assets"></div>
-    </div>
-
-    <div class="card">
-      <h3>UDP Destinations</h3>
-      <div class="row">
-        <div><label>Host</label><input id="dest-host" value="10.6.0.50" /></div>
-        <div><label>Port</label><input id="dest-port" type="number" value="7777" /></div>
-        <button id="add-destination" class="alt">Add Destination</button>
+    <section id="tab-panel-menu" class="tab-panel active" role="tabpanel">
+      <div class="card">
+        <h3>Menu Controls</h3>
+        <div class="grid">
+          <button type="button" onclick="sendKey('up')">Up</button>
+          <button type="button" onclick="sendKey('select')">Select</button>
+          <button type="button" onclick="sendKey('down')">Down</button>
+          <button type="button" class="danger" onclick="sendKey('hide_menu')">Hide Menu Overlay</button>
+          <button type="button" class="alt" onclick="sendKey('show_menu')">Show Menu Overlay</button>
+        </div>
       </div>
-      <div id="destinations" class="destinations"></div>
-    </div>
+
+      <div class="card">
+        <h3>Current 3-row OSD Window</h3>
+        <div class="state" id="window"></div>
+        <h3 style="margin-top:12px;">Entries</h3>
+        <ul id="entries"></ul>
+      </div>
+
+      <div class="card">
+        <h3>CRSF Input <span id="crsf-link" class="pill off">OFF</span></h3>
+        <div id="crsf-summary" class="state">No CRSF data.</div>
+        <div class="crsf-grid" id="crsf-grid"></div>
+      </div>
+    </section>
+
+    <section id="tab-panel-osd" class="tab-panel" role="tabpanel">
+      <div class="card">
+        <h3>OSD Actions</h3>
+        <div class="row">
+          <button type="button" class="warn" id="all-assets-on">All Assets ON</button>
+          <button type="button" class="warn" id="all-assets-off">All Assets OFF</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Assets</h3>
+        <div class="asset-grid" id="assets"></div>
+      </div>
+
+      <div class="card">
+        <h3>Value Sender</h3>
+        <p class="dest-meta">Send a value (-100 to 100) to selected OSD value indexes.</p>
+        <div class="control-stack" style="margin-top:10px;">
+          <div class="slider-row">
+            <label for="osd-value-slider">Value <span id="osd-value-readout" class="inline-value">0</span></label>
+            <input id="osd-value-slider" type="range" min="-100" max="100" step="1" value="0" />
+          </div>
+          <div class="row">
+            <button type="button" id="value-indexes-all" class="ghost">Select All Value Indexes</button>
+            <button type="button" id="value-indexes-none" class="ghost">Select None</button>
+          </div>
+          <div id="value-indexes" class="index-grid"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Text Sender</h3>
+        <p class="dest-meta">Send text to selected OSD text indexes.</p>
+        <div class="control-stack" style="margin-top:10px;">
+          <div>
+            <label for="osd-text-input">Text</label>
+            <input id="osd-text-input" type="text" placeholder="Enter text to send" />
+          </div>
+          <div class="row">
+            <button type="button" id="text-indexes-all" class="ghost">Select All Text Indexes</button>
+            <button type="button" id="text-indexes-none" class="ghost">Select None</button>
+          </div>
+          <div id="text-indexes" class="index-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-panel-settings" class="tab-panel" role="tabpanel">
+      <div class="card">
+        <h3>UDP Destinations</h3>
+        <p class="dest-meta">Checked destinations receive outgoing payloads. You can enable one, none, or multiple.</p>
+        <div class="row" style="margin-top:10px;">
+          <div>
+            <label>Host</label>
+            <input id="dest-host" value="10.6.0.50" />
+          </div>
+          <div>
+            <label>Port</label>
+            <input id="dest-port" type="number" value="7777" />
+          </div>
+          <button type="button" id="add-destination" class="alt">Add Destination</button>
+          <button type="button" id="apply-destinations" class="ghost">Apply Selection</button>
+          <button type="button" id="disable-all-destinations" class="danger">Disable All</button>
+        </div>
+        <p id="destinations-summary" class="status" style="margin-top:10px;">0 active / 0 total</p>
+        <div id="destinations" class="destinations"></div>
+      </div>
+    </section>
   </div>
 
 <script>
+const DESTINATION_STORAGE_KEY = 'waybeam_hub_destinations_v1';
+const MAX_OSD_SLOTS = 8;
+const OSD_VALUE_MIN = -100;
+const OSD_VALUE_MAX = 100;
+
 let baseUrl = '';
 let pollTimer = null;
 let pollInFlight = false;
 let connected = false;
 let latestState = null;
-let destinations = [];
+let destinationCatalog = [];
+let activeTab = 'menu';
+let valueIndexSelection = new Set(Array.from({ length: MAX_OSD_SLOTS }, (_item, idx) => idx));
+let textIndexSelection = new Set(Array.from({ length: MAX_OSD_SLOTS }, (_item, idx) => idx));
+let valueSendTimer = null;
+let textSendTimer = null;
+let lastValuePayloadSignature = '';
+let lastTextPayloadSignature = '';
 
 function setStatus(text){ document.getElementById('status').textContent = text; }
+
+function setActiveTab(nextTab){
+  activeTab = ['menu', 'osd', 'settings'].includes(nextTab) ? nextTab : 'menu';
+  const map = {
+    menu: [document.getElementById('tab-btn-menu'), document.getElementById('tab-panel-menu')],
+    osd: [document.getElementById('tab-btn-osd'), document.getElementById('tab-panel-osd')],
+    settings: [document.getElementById('tab-btn-settings'), document.getElementById('tab-panel-settings')],
+  };
+
+  Object.entries(map).forEach(([key, value]) => {
+    const [button, panel] = value;
+    const active = key === activeTab;
+    button.classList.toggle('active', active);
+    panel.classList.toggle('active', active);
+    button.setAttribute('aria-selected', active ? 'true' : 'false');
+  });
+}
+
 function inferDefaultEndpoint(){
   const host = window.location.hostname || '127.0.0.1';
   let port = window.location.port;
@@ -96,18 +443,187 @@ function inferDefaultEndpoint(){
   }
   return { host, port };
 }
+
 function buildBaseUrl(){
   const defaults = inferDefaultEndpoint();
   return `http://${defaults.host}:${defaults.port}`;
 }
 
+function destinationKey(destination){ return `${destination.host}:${destination.port}`; }
+
+function normalizeSliderValue(raw){
+  if (!Number.isFinite(raw)) return 0;
+  return Math.max(OSD_VALUE_MIN, Math.min(OSD_VALUE_MAX, Math.round(raw)));
+}
+
+function buildIndexedPayload(selectedIndexes, fillValue){
+  const payload = Array.from({ length: MAX_OSD_SLOTS }, () => null);
+  selectedIndexes.forEach((index) => {
+    if (index >= 0 && index < MAX_OSD_SLOTS) payload[index] = fillValue;
+  });
+  return payload;
+}
+
+function renderIndexSelectors(containerId, selectedIndexes, labelPrefix, onChange){
+  const container = document.getElementById(containerId);
+  container.innerHTML = '';
+  for (let index = 0; index < MAX_OSD_SLOTS; index += 1) {
+    const label = document.createElement('label');
+    label.className = 'index-chip';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = selectedIndexes.has(index);
+    checkbox.onchange = () => {
+      if (checkbox.checked) selectedIndexes.add(index);
+      else selectedIndexes.delete(index);
+      onChange();
+    };
+    const text = document.createElement('span');
+    text.textContent = `${labelPrefix} ${index}`;
+    label.appendChild(checkbox);
+    label.appendChild(text);
+    container.appendChild(label);
+  }
+}
+
+function setIndexSelection(selectedIndexes, enabled){
+  selectedIndexes.clear();
+  if (enabled) {
+    for (let index = 0; index < MAX_OSD_SLOTS; index += 1) selectedIndexes.add(index);
+  }
+}
+
+function updateValueReadout(){
+  const slider = document.getElementById('osd-value-slider');
+  const readout = document.getElementById('osd-value-readout');
+  const value = normalizeSliderValue(Number(slider.value));
+  slider.value = String(value);
+  readout.textContent = String(value);
+  return value;
+}
+
+function sendValueIndexes(){
+  const value = updateValueReadout();
+  const values = buildIndexedPayload(valueIndexSelection, value);
+  const signature = JSON.stringify(values);
+  if (signature === lastValuePayloadSignature) return;
+  lastValuePayloadSignature = signature;
+  send({ values });
+}
+
+function sendTextIndexes(){
+  const text = String(document.getElementById('osd-text-input').value || '');
+  const texts = buildIndexedPayload(textIndexSelection, text);
+  const signature = JSON.stringify(texts);
+  if (signature === lastTextPayloadSignature) return;
+  lastTextPayloadSignature = signature;
+  send({ texts });
+}
+
+function scheduleValueIndexesSend(){
+  if (valueSendTimer) clearTimeout(valueSendTimer);
+  valueSendTimer = setTimeout(() => {
+    valueSendTimer = null;
+    sendValueIndexes();
+  }, 60);
+}
+
+function scheduleTextIndexesSend(){
+  if (textSendTimer) clearTimeout(textSendTimer);
+  textSendTimer = setTimeout(() => {
+    textSendTimer = null;
+    sendTextIndexes();
+  }, 120);
+}
+
+function normalizeDestination(destination){
+  const host = String(destination.host || '').trim();
+  const port = Number(destination.port);
+  const enabled = destination.enabled !== false;
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { host, port, enabled };
+}
+
+function dedupeDestinationCatalog(input){
+  const seen = new Set();
+  const output = [];
+  input.forEach((item) => {
+    const clean = normalizeDestination(item);
+    if (!clean) return;
+    const key = destinationKey(clean);
+    if (seen.has(key)) return;
+    seen.add(key);
+    output.push(clean);
+  });
+  return output;
+}
+
+function loadDestinationCatalog(){
+  try {
+    const raw = localStorage.getItem(DESTINATION_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    destinationCatalog = dedupeDestinationCatalog(parsed);
+  } catch (_err) {
+    destinationCatalog = [];
+  }
+}
+
+function saveDestinationCatalog(){
+  try {
+    localStorage.setItem(DESTINATION_STORAGE_KEY, JSON.stringify(destinationCatalog));
+  } catch (_err) {
+    // Non-fatal when localStorage is unavailable.
+  }
+}
+
+function mergeActiveDestinations(activeDestinations){
+  const normalizedActive = dedupeDestinationCatalog(
+    (Array.isArray(activeDestinations) ? activeDestinations : []).map((item) => ({
+      host: item.host,
+      port: item.port,
+      enabled: true,
+    }))
+  );
+
+  const activeKeys = new Set(normalizedActive.map((item) => destinationKey(item)));
+
+  if (!destinationCatalog.length) {
+    destinationCatalog = normalizedActive;
+    saveDestinationCatalog();
+    return;
+  }
+
+  const catalogByKey = new Map(destinationCatalog.map((item) => [destinationKey(item), item]));
+  destinationCatalog = destinationCatalog.map((item) => ({
+    host: item.host,
+    port: item.port,
+    enabled: activeKeys.has(destinationKey(item)),
+  }));
+
+  normalizedActive.forEach((item) => {
+    const key = destinationKey(item);
+    if (!catalogByKey.has(key)) {
+      destinationCatalog.push({ host: item.host, port: item.port, enabled: true });
+    }
+  });
+
+  destinationCatalog = dedupeDestinationCatalog(destinationCatalog);
+  saveDestinationCatalog();
+}
+
 async function send(obj){
-  if (!baseUrl) { setStatus('Not connected'); return; }
+  if (!baseUrl) {
+    setStatus('Not connected');
+    return;
+  }
+
   try {
     const response = await fetch(`${baseUrl}/command`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(obj)
+      body: JSON.stringify(obj),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     await pollState();
@@ -138,58 +654,59 @@ async function setAllAssetsWithWaterfall(enabled){
   }
 }
 
-function destinationKey(destination){ return `${destination.host}:${destination.port}`; }
-
-function sanitizeDestination(destination){
-  const host = String(destination.host || '').trim();
-  const port = Number(destination.port);
-  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
-  return { host, port };
-}
-
-function dedupeDestinations(input){
-  const seen = new Set();
-  const output = [];
-  input.forEach((item) => {
-    const clean = sanitizeDestination(item);
-    if (!clean) return;
-    const key = destinationKey(clean);
-    if (seen.has(key)) return;
-    seen.add(key);
-    output.push(clean);
-  });
-  return output;
-}
-
 function pushDestinations(){
-  if (!baseUrl) {
-    setStatus('Connect first before changing destinations.');
-    return;
-  }
-  send({ destinations });
+  const activeDestinations = destinationCatalog
+    .filter((destination) => destination.enabled)
+    .map((destination) => ({ host: destination.host, port: destination.port }));
+
+  saveDestinationCatalog();
+  send({ destinations: activeDestinations });
 }
 
 function renderDestinations(){
   const container = document.getElementById('destinations');
+  const summary = document.getElementById('destinations-summary');
   container.innerHTML = '';
-  if (!destinations.length) {
+
+  const total = destinationCatalog.length;
+  const activeCount = destinationCatalog.filter((destination) => destination.enabled).length;
+  summary.textContent = `${activeCount} active / ${total} total`;
+
+  if (!destinationCatalog.length) {
     container.textContent = 'No destinations configured.';
     return;
   }
 
-  destinations.forEach((destination, index) => {
+  destinationCatalog.forEach((destination, index) => {
     const row = document.createElement('div');
     row.className = 'dest-row';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = destination.enabled;
+    checkbox.onchange = () => {
+      destinationCatalog[index].enabled = checkbox.checked;
+      saveDestinationCatalog();
+      renderDestinations();
+      pushDestinations();
+    };
+    row.appendChild(checkbox);
 
     const label = document.createElement('code');
     label.textContent = destinationKey(destination);
     row.appendChild(label);
 
+    const state = document.createElement('span');
+    state.className = 'dest-meta';
+    state.textContent = destination.enabled ? 'Enabled' : 'Disabled';
+    row.appendChild(state);
+
     const removeButton = document.createElement('button');
     removeButton.className = 'danger';
     removeButton.textContent = 'Remove';
     removeButton.onclick = () => {
-      destinations = destinations.filter((_item, idx) => idx !== index);
+      destinationCatalog = destinationCatalog.filter((_item, idx) => idx !== index);
+      saveDestinationCatalog();
       renderDestinations();
       pushDestinations();
     };
@@ -210,6 +727,7 @@ async function pollState(){
     connected = true;
     setStatus(`Connected to ${baseUrl}`);
   } catch (err) {
+    connected = false;
     setStatus(`Polling failed: ${err}`);
   } finally {
     pollInFlight = false;
@@ -220,9 +738,7 @@ function schedulePoll(){
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer = setTimeout(async () => {
     await pollState();
-    if (baseUrl) {
-      schedulePoll();
-    }
+    if (baseUrl) schedulePoll();
   }, 350);
 }
 
@@ -243,8 +759,6 @@ function disconnect(){
   setStatus('Disconnected');
 }
 
-
-
 function toggleAsset(assetId, currentIsOn){
   if (latestState && Array.isArray(latestState.asset_enabled)) {
     latestState.asset_enabled[assetId] = !currentIsOn;
@@ -252,6 +766,7 @@ function toggleAsset(assetId, currentIsOn){
   }
   send({ asset_updates: [{ id: assetId, enabled: !currentIsOn }] });
 }
+
 function normalizeCrsf(chValue){
   const min = 172;
   const max = 1811;
@@ -276,19 +791,23 @@ function renderCrsf(state){
   }
 
   const age = Number.isFinite(crsf.last_update_age_ms) && crsf.last_update_age_ms >= 0 ? `${crsf.last_update_age_ms}ms` : 'n/a';
-  summary.textContent = `enabled=${Boolean(crsf.enabled)} port=${crsf.port || 0} nav=${crsf.nav_direction || 'neutral'} select=${Boolean(crsf.select_pressed)} combo=${Boolean(crsf.combo_active)} latch=${Boolean(crsf.combo_latched)} age=${age}`;
+  summary.textContent = `enabled=${Boolean(crsf.enabled)} nav=${crsf.nav_direction || 'neutral'} select=${Boolean(crsf.select_pressed)} combo=${Boolean(crsf.combo_active)} latch=${Boolean(crsf.combo_latched)} age=${age}`;
 
   grid.innerHTML = '';
   labels.forEach((label, idx) => {
     const rawValue = Number(channels[idx] || 0);
     const meter = document.createElement('div');
     meter.className = 'meter';
+
     const title = document.createElement('div');
     title.textContent = `${label}: ${rawValue}`;
+
     const bar = document.createElement('div');
     bar.className = 'meter-bar';
+
     const fill = document.createElement('span');
     fill.style.width = `${normalizeCrsf(rawValue)}%`;
+
     bar.appendChild(fill);
     meter.appendChild(title);
     meter.appendChild(bar);
@@ -298,18 +817,20 @@ function renderCrsf(state){
 
 function renderState(state){
   latestState = state;
+
   if (Array.isArray(state.destinations)) {
-    destinations = dedupeDestinations(state.destinations);
-    renderDestinations();
+    mergeActiveDestinations(state.destinations);
   }
+  renderDestinations();
+
   const lines = state.menu_window || [];
-  document.getElementById('window').textContent = `${lines[0]||''}\n${lines[1]||''}\n${lines[2]||''}`;
+  document.getElementById('window').textContent = `${lines[0] || ''}\n${lines[1] || ''}\n${lines[2] || ''}`;
 
   const ul = document.getElementById('entries');
   ul.innerHTML = '';
   (state.entries || []).forEach((entry, idx) => {
     const li = document.createElement('li');
-    li.textContent = `${idx === state.selected ? '👉 ' : ''}${entry}`;
+    li.textContent = `${idx === state.selected ? '-> ' : ''}${entry}`;
     li.style.cursor = 'pointer';
     li.onclick = () => send({ selected: idx });
     ul.appendChild(li);
@@ -329,22 +850,83 @@ function renderState(state){
   });
 }
 
+document.getElementById('tab-btn-menu').onclick = () => { setActiveTab('menu'); };
+document.getElementById('tab-btn-osd').onclick = () => { setActiveTab('osd'); };
+document.getElementById('tab-btn-settings').onclick = () => { setActiveTab('settings'); };
+
 document.getElementById('all-assets-on').onclick = () => { setAllAssetsWithWaterfall(true); };
 document.getElementById('all-assets-off').onclick = () => { setAllAssetsWithWaterfall(false); };
+
+document.getElementById('osd-value-slider').oninput = () => {
+  updateValueReadout();
+  scheduleValueIndexesSend();
+};
+
+document.getElementById('osd-text-input').oninput = () => {
+  scheduleTextIndexesSend();
+};
+
+document.getElementById('value-indexes-all').onclick = () => {
+  setIndexSelection(valueIndexSelection, true);
+  renderIndexSelectors('value-indexes', valueIndexSelection, 'Value index', scheduleValueIndexesSend);
+  scheduleValueIndexesSend();
+};
+
+document.getElementById('value-indexes-none').onclick = () => {
+  setIndexSelection(valueIndexSelection, false);
+  renderIndexSelectors('value-indexes', valueIndexSelection, 'Value index', scheduleValueIndexesSend);
+  scheduleValueIndexesSend();
+};
+
+document.getElementById('text-indexes-all').onclick = () => {
+  setIndexSelection(textIndexSelection, true);
+  renderIndexSelectors('text-indexes', textIndexSelection, 'Text index', scheduleTextIndexesSend);
+  scheduleTextIndexesSend();
+};
+
+document.getElementById('text-indexes-none').onclick = () => {
+  setIndexSelection(textIndexSelection, false);
+  renderIndexSelectors('text-indexes', textIndexSelection, 'Text index', scheduleTextIndexesSend);
+  scheduleTextIndexesSend();
+};
+
 document.getElementById('add-destination').onclick = () => {
   const host = document.getElementById('dest-host').value.trim();
   const port = Number(document.getElementById('dest-port').value.trim());
-  const next = sanitizeDestination({ host, port });
+  const next = normalizeDestination({ host, port, enabled: true });
   if (!next) {
     setStatus('Invalid destination host or port.');
     return;
   }
-  destinations = dedupeDestinations([...destinations, next]);
+
+  destinationCatalog = dedupeDestinationCatalog([...destinationCatalog, next]);
+  saveDestinationCatalog();
+  renderDestinations();
+  pushDestinations();
+};
+
+document.getElementById('apply-destinations').onclick = () => {
+  pushDestinations();
+};
+
+document.getElementById('disable-all-destinations').onclick = () => {
+  destinationCatalog = destinationCatalog.map((destination) => ({
+    host: destination.host,
+    port: destination.port,
+    enabled: false,
+  }));
+  saveDestinationCatalog();
   renderDestinations();
   pushDestinations();
 };
 
 {
+  loadDestinationCatalog();
+  renderDestinations();
+  renderIndexSelectors('value-indexes', valueIndexSelection, 'Value index', scheduleValueIndexesSend);
+  renderIndexSelectors('text-indexes', textIndexSelection, 'Text index', scheduleTextIndexesSend);
+  updateValueReadout();
+  setActiveTab('menu');
   connect();
 }
 </script>

@@ -302,6 +302,10 @@ def clamp_text(text: str) -> str:
     return text[: MAX_OSD_TEXT_CHARS - 3] + "..."
 
 
+def clamp_osd_value(value: float) -> float:
+    return max(-100.0, min(100.0, value))
+
+
 def zoom_state_text(zoom_enabled: bool, zoom_percent: int) -> str:
     if not zoom_enabled:
         return "OFF"
@@ -952,6 +956,10 @@ def run_controller(
         last_send_monotonic = 0.0
         last_menu_activity_monotonic = time.monotonic()
         remote_keys: List[int] = []
+        manual_text_overrides: List[Optional[str]] = [None] * MAX_OSD_SLOTS
+        manual_value_overrides: List[Optional[float]] = [None] * MAX_OSD_SLOTS
+        manual_text_overrides_pending = False
+        manual_value_overrides_pending = False
 
         source_states: Dict[str, SourceInputState] = {
             "serial": SourceInputState(name="serial"),
@@ -1065,16 +1073,54 @@ def run_controller(
                                     dirty = True
 
                         if isinstance(message.get("destinations"), list):
+                            destination_payload = message["destinations"]
                             requested_destinations = [
                                 parsed
-                                for item in message["destinations"]
+                                for item in destination_payload
                                 for parsed in [parse_udp_destination(item)]
                                 if parsed is not None
                             ]
-                            if requested_destinations:
+                            if not destination_payload:
+                                destinations = []
+                                status = "UDP destinations updated (0)"
+                                last_menu_activity_monotonic = time.monotonic()
+                                dirty = True
+                            elif requested_destinations:
                                 destinations = dedupe_destinations(requested_destinations)
                                 status = f"UDP destinations updated ({len(destinations)})"
                                 last_menu_activity_monotonic = time.monotonic()
+                                dirty = True
+                            else:
+                                status = "Ignored invalid UDP destinations payload"
+
+                        text_overrides = message.get("texts")
+                        if isinstance(text_overrides, list):
+                            parsed_texts: List[Optional[str]] = [None] * MAX_OSD_SLOTS
+                            for idx in range(min(MAX_OSD_SLOTS, len(text_overrides))):
+                                item = text_overrides[idx]
+                                if item is None:
+                                    parsed_texts[idx] = None
+                                elif isinstance(item, str):
+                                    parsed_texts[idx] = clamp_text(item)
+                                else:
+                                    parsed_texts[idx] = clamp_text(str(item))
+                            if parsed_texts != manual_text_overrides:
+                                manual_text_overrides = parsed_texts
+                                manual_text_overrides_pending = True
+                                dirty = True
+
+                        value_overrides = message.get("values")
+                        if isinstance(value_overrides, list):
+                            parsed_values: List[Optional[float]] = [None] * MAX_OSD_SLOTS
+                            for idx in range(min(MAX_OSD_SLOTS, len(value_overrides))):
+                                item = value_overrides[idx]
+                                if item is None:
+                                    parsed_values[idx] = None
+                                elif isinstance(item, (int, float)):
+                                    parsed_values[idx] = clamp_osd_value(float(item))
+                            if parsed_values != manual_value_overrides:
+                                manual_value_overrides = parsed_values
+                                manual_value_overrides_pending = True
                                 dirty = True
 
                         zoom_command = message.get("zoom")
@@ -1130,11 +1176,34 @@ def run_controller(
 
                     if dirty or (now - last_send_monotonic) * 1000.0 >= interval_ms:
                         payload = build_payload(menu_window, asset_enabled, zoom_enabled, zoom_percent)
+                        applied_text_overrides = False
+                        applied_value_overrides = False
+
+                        if manual_text_overrides_pending and any(item is not None for item in manual_text_overrides):
+                            texts_payload = payload.get("texts")
+                            if not isinstance(texts_payload, list):
+                                texts_payload = [None] * MAX_OSD_SLOTS
+                            if len(texts_payload) < MAX_OSD_SLOTS:
+                                texts_payload = texts_payload + [None] * (MAX_OSD_SLOTS - len(texts_payload))
+                            for idx, item in enumerate(manual_text_overrides):
+                                if item is not None:
+                                    texts_payload[idx] = item
+                            payload["texts"] = texts_payload
+                            applied_text_overrides = True
+
+                        if manual_value_overrides_pending and any(item is not None for item in manual_value_overrides):
+                            payload["values"] = [item for item in manual_value_overrides]
+                            applied_value_overrides = True
+
                         failures = send_payloads(sock, destinations, payload)
                         last_send_monotonic = now
                         if failures:
                             status = f"Send partial failure ({len(failures)}/{len(destinations)}): {clamp_text(failures[0])}"
                         else:
+                            if applied_text_overrides:
+                                manual_text_overrides_pending = False
+                            if applied_value_overrides:
+                                manual_value_overrides_pending = False
                             dirty = False
 
                     if status != last_logged_status:
