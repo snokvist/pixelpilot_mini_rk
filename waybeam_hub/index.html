@@ -24,10 +24,7 @@
       margin: 0;
       color: var(--text);
       font-family: Inter, Arial, sans-serif;
-      background:
-        radial-gradient(900px 400px at 10% -10%, #1a3259 0%, transparent 60%),
-        radial-gradient(700px 300px at 100% 0%, #1f2d4f 0%, transparent 60%),
-        var(--bg);
+      background: #1f2d4f;
     }
 
     .wrap {
@@ -124,7 +121,8 @@
       font-weight: 600;
     }
 
-    input {
+    input,
+    select {
       width: 180px;
       background: var(--bg-soft);
       border: 1px solid var(--border);
@@ -132,6 +130,9 @@
       border-radius: 10px;
       padding: 10px;
     }
+
+    .control-panel { display: none; }
+    .control-panel.active { display: block; }
 
     .state {
       white-space: pre-wrap;
@@ -277,12 +278,17 @@
       font-weight: 600;
     }
 
+    .debug-log {
+      max-height: 320px;
+      overflow: auto;
+    }
+
     @media (max-width: 720px) {
       .grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
       .asset-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .crsf-grid { grid-template-columns: 1fr; }
       .index-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
-      input { width: 100%; }
+      input, select { width: 100%; }
     }
   </style>
 </head>
@@ -326,48 +332,65 @@
 
     <section id="tab-panel-osd" class="tab-panel" role="tabpanel">
       <div class="card">
-        <h3>OSD Actions</h3>
-        <div class="row">
+        <h3>Assets</h3>
+        <div class="row" style="margin-bottom:10px;">
           <button type="button" class="warn" id="all-assets-on">All Assets ON</button>
           <button type="button" class="warn" id="all-assets-off">All Assets OFF</button>
         </div>
-      </div>
-
-      <div class="card">
-        <h3>Assets</h3>
         <div class="asset-grid" id="assets"></div>
       </div>
 
       <div class="card">
-        <h3>Value Sender</h3>
-        <p class="dest-meta">Send a value (-100 to 100) to selected OSD value indexes.</p>
-        <div class="control-stack" style="margin-top:10px;">
-          <div class="slider-row">
-            <label for="osd-value-slider">Value <span id="osd-value-readout" class="inline-value">0</span></label>
-            <input id="osd-value-slider" type="range" min="-100" max="100" step="1" value="0" />
+        <h3>Indexed Sender</h3>
+        <div class="row">
+          <div>
+            <label for="osd-sender-mode">Mode</label>
+            <select id="osd-sender-mode">
+              <option value="value">Value Sender</option>
+              <option value="text">Text Sender</option>
+            </select>
           </div>
-          <div class="row">
-            <button type="button" id="value-indexes-all" class="ghost">Select All Value Indexes</button>
-            <button type="button" id="value-indexes-none" class="ghost">Select None</button>
+        </div>
+
+        <div id="value-sender-panel" class="control-panel active" style="margin-top:10px;">
+          <p class="dest-meta">Send a value (-100 to 100) to selected OSD value indexes.</p>
+          <div class="control-stack" style="margin-top:10px;">
+            <div class="slider-row">
+              <label for="osd-value-slider">Value <span id="osd-value-readout" class="inline-value">0</span></label>
+              <input id="osd-value-slider" type="range" min="-100" max="100" step="1" value="0" />
+            </div>
+            <div class="row">
+              <button type="button" id="value-indexes-all" class="ghost">Select All Value Indexes</button>
+              <button type="button" id="value-indexes-none" class="ghost">Select None</button>
+            </div>
+            <div id="value-indexes" class="index-grid"></div>
           </div>
-          <div id="value-indexes" class="index-grid"></div>
+        </div>
+
+        <div id="text-sender-panel" class="control-panel" style="margin-top:10px;">
+          <p class="dest-meta">Send text to selected OSD text indexes.</p>
+          <div class="control-stack" style="margin-top:10px;">
+            <div>
+              <label for="osd-text-input">Text</label>
+              <input id="osd-text-input" type="text" placeholder="Enter text to send" />
+            </div>
+            <div class="row">
+              <button type="button" id="text-indexes-all" class="ghost">Select All Text Indexes</button>
+              <button type="button" id="text-indexes-none" class="ghost">Select None</button>
+            </div>
+            <div id="text-indexes" class="index-grid"></div>
+          </div>
         </div>
       </div>
 
       <div class="card">
-        <h3>Text Sender</h3>
-        <p class="dest-meta">Send text to selected OSD text indexes.</p>
-        <div class="control-stack" style="margin-top:10px;">
-          <div>
-            <label for="osd-text-input">Text</label>
-            <input id="osd-text-input" type="text" placeholder="Enter text to send" />
-          </div>
-          <div class="row">
-            <button type="button" id="text-indexes-all" class="ghost">Select All Text Indexes</button>
-            <button type="button" id="text-indexes-none" class="ghost">Select None</button>
-          </div>
-          <div id="text-indexes" class="index-grid"></div>
+        <h3>OSD Request Recorder <span id="debug-record-pill" class="pill off">OFF</span></h3>
+        <p class="dest-meta">Records the last 10 OSD update requests sent from this WebUI (`values`, `texts`, `asset_updates`, `all_on`, `all_off`).</p>
+        <div class="row" style="margin-top:10px;">
+          <button type="button" id="debug-record-toggle" class="alt">Start Recording</button>
+          <button type="button" id="debug-clear" class="ghost">Clear</button>
         </div>
+        <div id="debug-log" class="state debug-log" style="margin-top:10px;">Recording is OFF.</div>
       </div>
     </section>
 
@@ -397,6 +420,7 @@
 <script>
 const DESTINATION_STORAGE_KEY = 'waybeam_hub_destinations_v1';
 const MAX_OSD_SLOTS = 8;
+const MAX_DEBUG_RECORDS = 10;
 const OSD_VALUE_MIN = -100;
 const OSD_VALUE_MAX = 100;
 
@@ -413,6 +437,11 @@ let valueSendTimer = null;
 let textSendTimer = null;
 let lastValuePayloadSignature = '';
 let lastTextPayloadSignature = '';
+let osdSenderMode = 'value';
+let assetButtonStates = [];
+let assetButtonsInitialized = false;
+let debugRecordingEnabled = false;
+let debugRecords = [];
 
 function setStatus(text){ document.getElementById('status').textContent = text; }
 
@@ -431,6 +460,67 @@ function setActiveTab(nextTab){
     panel.classList.toggle('active', active);
     button.setAttribute('aria-selected', active ? 'true' : 'false');
   });
+}
+
+function setOsdSenderMode(nextMode){
+  osdSenderMode = nextMode === 'text' ? 'text' : 'value';
+  const valuePanel = document.getElementById('value-sender-panel');
+  const textPanel = document.getElementById('text-sender-panel');
+  const selector = document.getElementById('osd-sender-mode');
+  valuePanel.classList.toggle('active', osdSenderMode === 'value');
+  textPanel.classList.toggle('active', osdSenderMode === 'text');
+  selector.value = osdSenderMode;
+}
+
+function isOsdUpdateCommand(obj){
+  if (!obj || typeof obj !== 'object') return false;
+  if (Array.isArray(obj.values)) return true;
+  if (Array.isArray(obj.texts)) return true;
+  if (Array.isArray(obj.asset_updates) && obj.asset_updates.length > 0) return true;
+  if (obj.key === 'all_on' || obj.key === 'all_off') return true;
+  return false;
+}
+
+function cloneForDebug(obj){
+  try {
+    return JSON.parse(JSON.stringify(obj));
+  } catch (_err) {
+    return obj;
+  }
+}
+
+function setDebugRecording(enabled){
+  debugRecordingEnabled = Boolean(enabled);
+  const toggle = document.getElementById('debug-record-toggle');
+  const pill = document.getElementById('debug-record-pill');
+  toggle.textContent = debugRecordingEnabled ? 'Stop Recording' : 'Start Recording';
+  toggle.className = debugRecordingEnabled ? 'danger' : 'alt';
+  pill.textContent = debugRecordingEnabled ? 'REC' : 'OFF';
+  pill.className = debugRecordingEnabled ? 'pill ok' : 'pill off';
+  renderDebugLog();
+}
+
+function appendDebugRecord(record){
+  debugRecords.unshift(record);
+  if (debugRecords.length > MAX_DEBUG_RECORDS) debugRecords = debugRecords.slice(0, MAX_DEBUG_RECORDS);
+  renderDebugLog();
+}
+
+function renderDebugLog(){
+  const log = document.getElementById('debug-log');
+  if (!debugRecordingEnabled && !debugRecords.length) {
+    log.textContent = 'Recording is OFF.';
+    return;
+  }
+  if (!debugRecords.length) {
+    log.textContent = debugRecordingEnabled ? 'Recording is ON. No OSD requests captured yet.' : 'No recorded OSD requests.';
+    return;
+  }
+  const lines = debugRecords.map((record, index) => {
+    const payload = JSON.stringify(record.payload);
+    return `${index + 1}. [${record.time}] ${record.result}\n   ${payload}`;
+  });
+  log.textContent = lines.join('\n');
 }
 
 function inferDefaultEndpoint(){
@@ -536,6 +626,38 @@ function scheduleTextIndexesSend(){
   }, 120);
 }
 
+function normalizeAssetStates(rawStates){
+  if (!Array.isArray(rawStates)) return [];
+  return rawStates.map((state) => {
+    if (state === true) return true;
+    if (state === false) return false;
+    return null;
+  });
+}
+
+function renderAssets(){
+  const assets = document.getElementById('assets');
+  assets.innerHTML = '';
+  assetButtonStates.forEach((enabled, idx) => {
+    const btn = document.createElement('button');
+    const isOn = enabled === true;
+    btn.className = isOn ? '' : 'alt';
+    btn.textContent = `Asset ${idx}: ${isOn ? 'ON' : (enabled === false ? 'OFF' : '?')}`;
+    btn.onclick = () => toggleAsset(idx);
+    assets.appendChild(btn);
+  });
+}
+
+function syncAssetsFromStateIfNeeded(state){
+  const incoming = normalizeAssetStates(state && state.asset_enabled);
+  if (!incoming.length) return;
+  if (!assetButtonsInitialized || assetButtonStates.length !== incoming.length) {
+    assetButtonStates = incoming;
+    assetButtonsInitialized = true;
+    renderAssets();
+  }
+}
+
 function normalizeDestination(destination){
   const host = String(destination.host || '').trim();
   const port = Number(destination.port);
@@ -619,6 +741,8 @@ async function send(obj){
     return;
   }
 
+  const debugPayload = isOsdUpdateCommand(obj) ? cloneForDebug(obj) : null;
+
   try {
     const response = await fetch(`${baseUrl}/command`, {
       method: 'POST',
@@ -626,8 +750,22 @@ async function send(obj){
       body: JSON.stringify(obj),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (debugRecordingEnabled && debugPayload !== null) {
+      appendDebugRecord({
+        time: new Date().toLocaleTimeString('en-GB', { hour12: false }),
+        result: `HTTP ${response.status}`,
+        payload: debugPayload,
+      });
+    }
     await pollState();
   } catch (err) {
+    if (debugRecordingEnabled && debugPayload !== null) {
+      appendDebugRecord({
+        time: new Date().toLocaleTimeString('en-GB', { hour12: false }),
+        result: `ERROR ${String(err)}`,
+        payload: debugPayload,
+      });
+    }
     setStatus(`Command failed: ${err}`);
   }
 }
@@ -637,20 +775,29 @@ function sendKey(key){ send({ key }); }
 function sleep(ms){ return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 async function setAllAssetsWithWaterfall(enabled){
-  const assets = (latestState && Array.isArray(latestState.asset_enabled)) ? latestState.asset_enabled : [];
-  if (!assets.length) {
+  const knownCount = assetButtonStates.length;
+  const latestCount = (latestState && Array.isArray(latestState.asset_enabled)) ? latestState.asset_enabled.length : 0;
+  const assetCount = knownCount || latestCount;
+  if (!assetCount) {
     send({ key: enabled ? 'all_on' : 'all_off' });
     return;
   }
 
-  for (let idx = 0; idx < assets.length; idx += 1) {
-    await send({ asset_updates: [{ id: idx, enabled }] });
-    await sleep(35);
+  if (!assetButtonsInitialized || !assetButtonStates.length) {
+    assetButtonStates = Array.from({ length: assetCount }, () => enabled);
+    assetButtonsInitialized = true;
+  } else {
+    assetButtonStates = assetButtonStates.map(() => enabled);
   }
+  renderAssets();
 
   if (latestState && Array.isArray(latestState.asset_enabled)) {
-    latestState.asset_enabled = latestState.asset_enabled.map(() => enabled);
-    renderState(latestState);
+    latestState.asset_enabled = Array.from({ length: assetCount }, () => enabled);
+  }
+
+  for (let idx = 0; idx < assetCount; idx += 1) {
+    await send({ asset_updates: [{ id: idx, enabled }] });
+    await sleep(35);
   }
 }
 
@@ -759,12 +906,16 @@ function disconnect(){
   setStatus('Disconnected');
 }
 
-function toggleAsset(assetId, currentIsOn){
-  if (latestState && Array.isArray(latestState.asset_enabled)) {
-    latestState.asset_enabled[assetId] = !currentIsOn;
-    renderState(latestState);
+function toggleAsset(assetId){
+  if (assetId < 0 || assetId >= assetButtonStates.length) return;
+  const currentIsOn = assetButtonStates[assetId] === true;
+  const nextIsOn = !currentIsOn;
+  assetButtonStates[assetId] = nextIsOn;
+  renderAssets();
+  if (latestState && Array.isArray(latestState.asset_enabled) && assetId < latestState.asset_enabled.length) {
+    latestState.asset_enabled[assetId] = nextIsOn;
   }
-  send({ asset_updates: [{ id: assetId, enabled: !currentIsOn }] });
+  send({ asset_updates: [{ id: assetId, enabled: nextIsOn }] });
 }
 
 function normalizeCrsf(chValue){
@@ -836,18 +987,8 @@ function renderState(state){
     ul.appendChild(li);
   });
 
-  const assets = document.getElementById('assets');
-  assets.innerHTML = '';
   renderCrsf(state);
-
-  (state.asset_enabled || []).forEach((enabled, idx) => {
-    const btn = document.createElement('button');
-    const isOn = enabled === true;
-    btn.className = isOn ? '' : 'alt';
-    btn.textContent = `Asset ${idx}: ${isOn ? 'ON' : (enabled === false ? 'OFF' : '?')}`;
-    btn.onclick = () => toggleAsset(idx, isOn);
-    assets.appendChild(btn);
-  });
+  syncAssetsFromStateIfNeeded(state);
 }
 
 document.getElementById('tab-btn-menu').onclick = () => { setActiveTab('menu'); };
@@ -856,6 +997,7 @@ document.getElementById('tab-btn-settings').onclick = () => { setActiveTab('sett
 
 document.getElementById('all-assets-on').onclick = () => { setAllAssetsWithWaterfall(true); };
 document.getElementById('all-assets-off').onclick = () => { setAllAssetsWithWaterfall(false); };
+document.getElementById('osd-sender-mode').onchange = (event) => { setOsdSenderMode(event.target.value); };
 
 document.getElementById('osd-value-slider').oninput = () => {
   updateValueReadout();
@@ -920,12 +1062,23 @@ document.getElementById('disable-all-destinations').onclick = () => {
   pushDestinations();
 };
 
+document.getElementById('debug-record-toggle').onclick = () => {
+  setDebugRecording(!debugRecordingEnabled);
+};
+
+document.getElementById('debug-clear').onclick = () => {
+  debugRecords = [];
+  renderDebugLog();
+};
+
 {
   loadDestinationCatalog();
   renderDestinations();
   renderIndexSelectors('value-indexes', valueIndexSelection, 'Value index', scheduleValueIndexesSend);
   renderIndexSelectors('text-indexes', textIndexSelection, 'Text index', scheduleTextIndexesSend);
   updateValueReadout();
+  setOsdSenderMode('value');
+  setDebugRecording(false);
   setActiveTab('menu');
   connect();
 }
