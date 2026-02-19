@@ -96,6 +96,39 @@
       gap: 10px;
     }
 
+    .menu-btn-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .menu-btn-row button {
+      padding: 7px 10px;
+      border-radius: 8px;
+      font-size: 13px;
+    }
+
+    .menu-data-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 10px;
+    }
+
+    .menu-data-pane {
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .menu-data-pane h4 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
     button {
       border: 0;
       border-radius: 10px;
@@ -285,6 +318,7 @@
 
     @media (max-width: 720px) {
       .grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+      .menu-data-grid { grid-template-columns: 1fr; }
       .asset-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .crsf-grid { grid-template-columns: 1fr; }
       .index-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
@@ -307,20 +341,23 @@
     <section id="tab-panel-menu" class="tab-panel active" role="tabpanel">
       <div class="card">
         <h3>Menu Controls</h3>
-        <div class="grid">
+        <div class="menu-btn-row">
           <button type="button" onclick="sendKey('up')">Up</button>
           <button type="button" onclick="sendKey('select')">Select</button>
           <button type="button" onclick="sendKey('down')">Down</button>
           <button type="button" class="danger" onclick="sendKey('hide_menu')">Hide Menu Overlay</button>
           <button type="button" class="alt" onclick="sendKey('show_menu')">Show Menu Overlay</button>
         </div>
-      </div>
-
-      <div class="card">
-        <h3>Current 3-row OSD Window</h3>
-        <div class="state" id="window"></div>
-        <h3 style="margin-top:12px;">Entries</h3>
-        <ul id="entries"></ul>
+        <div class="menu-data-grid">
+          <div class="menu-data-pane">
+            <h4>Current 3-row OSD Window</h4>
+            <div class="state" id="window"></div>
+          </div>
+          <div class="menu-data-pane">
+            <h4>Entries</h4>
+            <ul id="entries"></ul>
+          </div>
+        </div>
       </div>
 
       <div class="card">
@@ -348,6 +385,7 @@
             <select id="osd-sender-mode">
               <option value="value">Value Sender</option>
               <option value="text">Text Sender</option>
+              <option value="asset_update">Asset Update</option>
             </select>
           </div>
         </div>
@@ -379,6 +417,31 @@
               <button type="button" id="text-indexes-none" class="ghost">Select None</button>
             </div>
             <div id="text-indexes" class="index-grid"></div>
+          </div>
+        </div>
+
+        <div id="asset-update-panel" class="control-panel" style="margin-top:10px;">
+          <p class="dest-meta">Send one-shot `asset_updates` patches for extended property testing.</p>
+          <div class="control-stack" style="margin-top:10px;">
+            <div class="row">
+              <div>
+                <label for="asset-prop-key">Property</label>
+                <select id="asset-prop-key"></select>
+              </div>
+              <div>
+                <label id="asset-prop-value-label" for="asset-prop-number">Value</label>
+                <input id="asset-prop-number" type="number" />
+                <input id="asset-prop-text" type="text" style="display:none;" />
+                <select id="asset-prop-select" style="display:none;"></select>
+              </div>
+              <button type="button" id="asset-prop-apply">Apply To Selected Asset IDs</button>
+            </div>
+            <p id="asset-prop-help" class="dest-meta"></p>
+            <div class="row">
+              <button type="button" id="asset-ids-all" class="ghost">Select All Asset IDs</button>
+              <button type="button" id="asset-ids-none" class="ghost">Select None</button>
+            </div>
+            <div id="asset-update-ids" class="index-grid"></div>
           </div>
         </div>
       </div>
@@ -423,6 +486,30 @@ const MAX_OSD_SLOTS = 8;
 const MAX_DEBUG_RECORDS = 10;
 const OSD_VALUE_MIN = -100;
 const OSD_VALUE_MAX = 100;
+const ASSET_UPDATE_PROPERTY_DEFS = [
+  { key: 'enabled', label: 'enabled', kind: 'bool', help: 'Enable or disable the asset.' },
+  { key: 'type', label: 'type', kind: 'enum', options: ['bar', 'text', 'image'], help: 'Asset type.' },
+  { key: 'value_index', label: 'value_index', kind: 'int', min: 0, max: 7, help: 'Numeric source index (0-7).' },
+  { key: 'text_index', label: 'text_index', kind: 'int', min: -1, max: 7, help: 'Text source index (-1 to disable, 0-7).' },
+  { key: 'text_indices', label: 'text_indices', kind: 'int_list', min: 0, max: 7, help: 'Comma separated list, for example: 0,1,2' },
+  { key: 'text_inline', label: 'text_inline', kind: 'bool', help: 'Join text_indices on one line when true.' },
+  { key: 'label', label: 'label', kind: 'text', help: 'Static fallback label.' },
+  { key: 'orientation', label: 'orientation', kind: 'enum', options: ['right', 'left', 'center'], help: 'Layout anchor/orientation.' },
+  { key: 'x', label: 'x', kind: 'int', help: 'X position in pixels.' },
+  { key: 'y', label: 'y', kind: 'int', help: 'Y position in pixels.' },
+  { key: 'width', label: 'width', kind: 'int', min: 1, help: 'Width in pixels.' },
+  { key: 'height', label: 'height', kind: 'int', min: 1, help: 'Height in pixels.' },
+  { key: 'scale_pct', label: 'scale_pct', kind: 'int', min: 25, max: 400, help: 'Scale percent (25-400).' },
+  { key: 'min', label: 'min', kind: 'float', help: 'Minimum mapped value.' },
+  { key: 'max', label: 'max', kind: 'float', help: 'Maximum mapped value.' },
+  { key: 'bar_color', label: 'bar_color', kind: 'color_int', help: 'RGB integer; supports decimal, 0xRRGGBB, or #RRGGBB.' },
+  { key: 'text_color', label: 'text_color', kind: 'color_int', help: 'RGB integer; supports decimal, 0xRRGGBB, or #RRGGBB.' },
+  { key: 'background', label: 'background', kind: 'int', min: -1, max: 10, help: 'Background palette index (-1 to 10).' },
+  { key: 'background_opacity', label: 'background_opacity', kind: 'int', min: 0, max: 100, help: 'Background opacity percent.' },
+  { key: 'segments', label: 'segments', kind: 'int', min: 0, help: 'Bar segments (0 for continuous).' },
+  { key: 'rounded_outline', label: 'rounded_outline', kind: 'bool', help: 'Rounded outline/background style.' },
+];
+const ASSET_UPDATE_PROPERTY_MAP = new Map(ASSET_UPDATE_PROPERTY_DEFS.map((item) => [item.key, item]));
 
 let baseUrl = '';
 let pollTimer = null;
@@ -433,6 +520,7 @@ let destinationCatalog = [];
 let activeTab = 'menu';
 let valueIndexSelection = new Set(Array.from({ length: MAX_OSD_SLOTS }, (_item, idx) => idx));
 let textIndexSelection = new Set(Array.from({ length: MAX_OSD_SLOTS }, (_item, idx) => idx));
+let assetUpdateIdSelection = new Set([0]);
 let valueSendTimer = null;
 let textSendTimer = null;
 let lastValuePayloadSignature = '';
@@ -463,12 +551,14 @@ function setActiveTab(nextTab){
 }
 
 function setOsdSenderMode(nextMode){
-  osdSenderMode = nextMode === 'text' ? 'text' : 'value';
+  osdSenderMode = ['value', 'text', 'asset_update'].includes(nextMode) ? nextMode : 'value';
   const valuePanel = document.getElementById('value-sender-panel');
   const textPanel = document.getElementById('text-sender-panel');
+  const assetUpdatePanel = document.getElementById('asset-update-panel');
   const selector = document.getElementById('osd-sender-mode');
   valuePanel.classList.toggle('active', osdSenderMode === 'value');
   textPanel.classList.toggle('active', osdSenderMode === 'text');
+  assetUpdatePanel.classList.toggle('active', osdSenderMode === 'asset_update');
   selector.value = osdSenderMode;
 }
 
@@ -554,6 +644,208 @@ function buildIndexedPayload(selectedIndexes, fillValue){
   return payload;
 }
 
+function composeCommandPayload(parts){
+  const payload = {};
+  parts.forEach((part) => {
+    if (part && typeof part === 'object') Object.assign(payload, part);
+  });
+  return payload;
+}
+
+function commandPartValues(values){
+  return { values };
+}
+
+function commandPartTexts(texts){
+  return { texts };
+}
+
+function commandPartAssetUpdates(assetUpdates){
+  return { asset_updates: assetUpdates };
+}
+
+function sortSelectedIndexes(selectedIndexes){
+  return Array.from(selectedIndexes)
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < MAX_OSD_SLOTS)
+    .sort((a, b) => a - b);
+}
+
+function buildAssetUpdatesFromPatch(assetIds, patch){
+  return assetIds.map((assetId) => ({ id: assetId, ...patch }));
+}
+
+function parseDelimitedIntegerList(rawValue, minValue, maxValue){
+  const parts = String(rawValue || '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  const values = [];
+  for (const part of parts) {
+    const parsed = Number(part);
+    if (!Number.isInteger(parsed)) {
+      return { ok: false, error: `Expected integer list for ${part}.` };
+    }
+    if (Number.isInteger(minValue) && parsed < minValue) {
+      return { ok: false, error: `Value ${parsed} is below ${minValue}.` };
+    }
+    if (Number.isInteger(maxValue) && parsed > maxValue) {
+      return { ok: false, error: `Value ${parsed} is above ${maxValue}.` };
+    }
+    values.push(parsed);
+  }
+  return { ok: true, value: values };
+}
+
+function parseColorInteger(rawValue){
+  const text = String(rawValue || '').trim();
+  if (!text) return { ok: false, error: 'Color value is required.' };
+  if (/^#[0-9a-fA-F]{6}$/.test(text)) {
+    return { ok: true, value: Number.parseInt(text.slice(1), 16) };
+  }
+  if (/^0x[0-9a-fA-F]+$/.test(text)) {
+    return { ok: true, value: Number.parseInt(text.slice(2), 16) };
+  }
+  if (/^-?[0-9]+$/.test(text)) {
+    return { ok: true, value: Number.parseInt(text, 10) };
+  }
+  return { ok: false, error: 'Use decimal, 0xRRGGBB, or #RRGGBB for color values.' };
+}
+
+function getAssetPropertyDefinition(){
+  const key = String(document.getElementById('asset-prop-key').value || '');
+  return ASSET_UPDATE_PROPERTY_MAP.get(key) || null;
+}
+
+function setSelectOptions(selectElement, values){
+  selectElement.innerHTML = '';
+  values.forEach((value) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value;
+    selectElement.appendChild(option);
+  });
+}
+
+function refreshAssetPropertyEditor(){
+  const def = getAssetPropertyDefinition();
+  const numberInput = document.getElementById('asset-prop-number');
+  const textInput = document.getElementById('asset-prop-text');
+  const selectInput = document.getElementById('asset-prop-select');
+  const valueLabel = document.getElementById('asset-prop-value-label');
+  const help = document.getElementById('asset-prop-help');
+
+  numberInput.style.display = 'none';
+  textInput.style.display = 'none';
+  selectInput.style.display = 'none';
+  numberInput.removeAttribute('min');
+  numberInput.removeAttribute('max');
+  numberInput.step = '1';
+  numberInput.value = '';
+  textInput.value = '';
+
+  if (!def) {
+    valueLabel.textContent = 'Value';
+    help.textContent = 'Select a property.';
+    return;
+  }
+
+  valueLabel.textContent = `Value (${def.key})`;
+  help.textContent = def.help || '';
+
+  if (def.kind === 'bool') {
+    setSelectOptions(selectInput, ['true', 'false']);
+    selectInput.value = 'true';
+    selectInput.style.display = '';
+    return;
+  }
+
+  if (def.kind === 'enum') {
+    setSelectOptions(selectInput, Array.isArray(def.options) ? def.options : []);
+    selectInput.style.display = '';
+    return;
+  }
+
+  if (def.kind === 'int' || def.kind === 'float') {
+    if (Number.isFinite(def.min)) numberInput.min = String(def.min);
+    if (Number.isFinite(def.max)) numberInput.max = String(def.max);
+    numberInput.step = def.kind === 'float' ? '0.01' : '1';
+    numberInput.style.display = '';
+    return;
+  }
+
+  textInput.placeholder = def.kind === 'int_list' ? '0,1,2' : (def.kind === 'color_int' ? '#12ab34 or 0x12ab34 or 1234567' : '');
+  textInput.style.display = '';
+}
+
+function readAssetPropertyValue(def){
+  const numberInput = document.getElementById('asset-prop-number');
+  const textInput = document.getElementById('asset-prop-text');
+  const selectInput = document.getElementById('asset-prop-select');
+
+  if (def.kind === 'bool') return { ok: true, value: selectInput.value === 'true' };
+  if (def.kind === 'enum') return { ok: true, value: selectInput.value };
+
+  if (def.kind === 'int' || def.kind === 'float') {
+    const parsed = Number(numberInput.value);
+    if (!Number.isFinite(parsed)) return { ok: false, error: 'Enter a numeric value.' };
+    if (def.kind === 'int' && !Number.isInteger(parsed)) return { ok: false, error: 'Enter an integer value.' };
+    if (Number.isFinite(def.min) && parsed < def.min) return { ok: false, error: `Value must be >= ${def.min}.` };
+    if (Number.isFinite(def.max) && parsed > def.max) return { ok: false, error: `Value must be <= ${def.max}.` };
+    return { ok: true, value: def.kind === 'int' ? Number.parseInt(String(parsed), 10) : parsed };
+  }
+
+  if (def.kind === 'int_list') {
+    return parseDelimitedIntegerList(textInput.value, def.min, def.max);
+  }
+
+  if (def.kind === 'color_int') {
+    return parseColorInteger(textInput.value);
+  }
+
+  return { ok: true, value: String(textInput.value || '') };
+}
+
+function applyAssetPropertyUpdate(){
+  const selectedAssetIds = sortSelectedIndexes(assetUpdateIdSelection);
+  if (!selectedAssetIds.length) {
+    setStatus('Select at least one asset ID for asset update testing.');
+    return;
+  }
+
+  const def = getAssetPropertyDefinition();
+  if (!def) {
+    setStatus('Select an asset property first.');
+    return;
+  }
+
+  const parsed = readAssetPropertyValue(def);
+  if (!parsed.ok) {
+    setStatus(parsed.error || 'Invalid asset update value.');
+    return;
+  }
+
+  const patch = { [def.key]: parsed.value };
+  const updates = buildAssetUpdatesFromPatch(selectedAssetIds, patch);
+  send(composeCommandPayload([commandPartAssetUpdates(updates)]));
+}
+
+function initializeAssetPropertyControls(){
+  const selector = document.getElementById('asset-prop-key');
+  selector.innerHTML = '';
+  ASSET_UPDATE_PROPERTY_DEFS.forEach((def) => {
+    const option = document.createElement('option');
+    option.value = def.key;
+    option.textContent = def.label;
+    selector.appendChild(option);
+  });
+  if (ASSET_UPDATE_PROPERTY_DEFS.length) selector.value = ASSET_UPDATE_PROPERTY_DEFS[0].key;
+  refreshAssetPropertyEditor();
+}
+
+function renderAssetUpdateIdSelectors(){
+  renderIndexSelectors('asset-update-ids', assetUpdateIdSelection, 'Asset ID', () => {});
+}
+
 function renderIndexSelectors(containerId, selectedIndexes, labelPrefix, onChange){
   const container = document.getElementById(containerId);
   container.innerHTML = '';
@@ -598,7 +890,7 @@ function sendValueIndexes(){
   const signature = JSON.stringify(values);
   if (signature === lastValuePayloadSignature) return;
   lastValuePayloadSignature = signature;
-  send({ values });
+  send(composeCommandPayload([commandPartValues(values)]));
 }
 
 function sendTextIndexes(){
@@ -607,7 +899,7 @@ function sendTextIndexes(){
   const signature = JSON.stringify(texts);
   if (signature === lastTextPayloadSignature) return;
   lastTextPayloadSignature = signature;
-  send({ texts });
+  send(composeCommandPayload([commandPartTexts(texts)]));
 }
 
 function scheduleValueIndexesSend(){
@@ -796,7 +1088,7 @@ async function setAllAssetsWithWaterfall(enabled){
   }
 
   for (let idx = 0; idx < assetCount; idx += 1) {
-    await send({ asset_updates: [{ id: idx, enabled }] });
+    await send(composeCommandPayload([commandPartAssetUpdates([{ id: idx, enabled }])]));
     await sleep(35);
   }
 }
@@ -915,7 +1207,7 @@ function toggleAsset(assetId){
   if (latestState && Array.isArray(latestState.asset_enabled) && assetId < latestState.asset_enabled.length) {
     latestState.asset_enabled[assetId] = nextIsOn;
   }
-  send({ asset_updates: [{ id: assetId, enabled: nextIsOn }] });
+  send(composeCommandPayload([commandPartAssetUpdates([{ id: assetId, enabled: nextIsOn }])]));
 }
 
 function normalizeCrsf(chValue){
@@ -998,6 +1290,8 @@ document.getElementById('tab-btn-settings').onclick = () => { setActiveTab('sett
 document.getElementById('all-assets-on').onclick = () => { setAllAssetsWithWaterfall(true); };
 document.getElementById('all-assets-off').onclick = () => { setAllAssetsWithWaterfall(false); };
 document.getElementById('osd-sender-mode').onchange = (event) => { setOsdSenderMode(event.target.value); };
+document.getElementById('asset-prop-key').onchange = () => { refreshAssetPropertyEditor(); };
+document.getElementById('asset-prop-apply').onclick = () => { applyAssetPropertyUpdate(); };
 
 document.getElementById('osd-value-slider').oninput = () => {
   updateValueReadout();
@@ -1030,6 +1324,28 @@ document.getElementById('text-indexes-none').onclick = () => {
   setIndexSelection(textIndexSelection, false);
   renderIndexSelectors('text-indexes', textIndexSelection, 'Text index', scheduleTextIndexesSend);
   scheduleTextIndexesSend();
+};
+
+document.getElementById('asset-ids-all').onclick = () => {
+  setIndexSelection(assetUpdateIdSelection, true);
+  renderAssetUpdateIdSelectors();
+};
+
+document.getElementById('asset-ids-none').onclick = () => {
+  setIndexSelection(assetUpdateIdSelection, false);
+  renderAssetUpdateIdSelectors();
+};
+
+document.getElementById('asset-prop-number').onkeydown = (event) => {
+  if (event.key === 'Enter') applyAssetPropertyUpdate();
+};
+
+document.getElementById('asset-prop-text').onkeydown = (event) => {
+  if (event.key === 'Enter') applyAssetPropertyUpdate();
+};
+
+document.getElementById('asset-prop-select').onkeydown = (event) => {
+  if (event.key === 'Enter') applyAssetPropertyUpdate();
 };
 
 document.getElementById('add-destination').onclick = () => {
@@ -1074,8 +1390,10 @@ document.getElementById('debug-clear').onclick = () => {
 {
   loadDestinationCatalog();
   renderDestinations();
+  initializeAssetPropertyControls();
   renderIndexSelectors('value-indexes', valueIndexSelection, 'Value index', scheduleValueIndexesSend);
   renderIndexSelectors('text-indexes', textIndexSelection, 'Text index', scheduleTextIndexesSend);
+  renderAssetUpdateIdSelectors();
   updateValueReadout();
   setOsdSenderMode('value');
   setDebugRecording(false);

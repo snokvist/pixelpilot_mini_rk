@@ -306,6 +306,121 @@ def clamp_osd_value(value: float) -> float:
     return max(-100.0, min(100.0, value))
 
 
+def normalize_manual_asset_updates(payload: object) -> List[dict]:
+    if not isinstance(payload, list):
+        return []
+
+    allowed_type_values = {"bar", "text", "image"}
+    allowed_orientation_values = {"right", "left", "center"}
+    normalized: List[dict] = []
+
+    def parse_int(value: object) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        return None
+
+    def parse_float(value: object) -> Optional[float]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    for raw_update in payload:
+        if not isinstance(raw_update, dict):
+            continue
+
+        asset_id = parse_int(raw_update.get("id"))
+        if asset_id is None or asset_id < 0 or asset_id >= MAX_OSD_SLOTS:
+            continue
+
+        update: Dict[str, object] = {"id": asset_id}
+
+        enabled = raw_update.get("enabled")
+        if isinstance(enabled, bool):
+            update["enabled"] = enabled
+
+        asset_type = raw_update.get("type")
+        if isinstance(asset_type, str):
+            cleaned_type = asset_type.strip().lower()
+            if cleaned_type in allowed_type_values:
+                update["type"] = cleaned_type
+
+        value_index = parse_int(raw_update.get("value_index"))
+        if value_index is not None and 0 <= value_index < MAX_OSD_SLOTS:
+            update["value_index"] = value_index
+
+        text_index = parse_int(raw_update.get("text_index"))
+        if text_index is not None and -1 <= text_index < MAX_OSD_SLOTS:
+            update["text_index"] = text_index
+
+        text_indices = raw_update.get("text_indices")
+        if isinstance(text_indices, list):
+            parsed_text_indices: List[int] = []
+            for item in text_indices:
+                parsed_item = parse_int(item)
+                if parsed_item is None or parsed_item < 0 or parsed_item >= MAX_OSD_SLOTS:
+                    parsed_text_indices = []
+                    break
+                parsed_text_indices.append(parsed_item)
+            if parsed_text_indices:
+                update["text_indices"] = parsed_text_indices
+            elif text_indices == []:
+                update["text_indices"] = []
+
+        text_inline = raw_update.get("text_inline")
+        if isinstance(text_inline, bool):
+            update["text_inline"] = text_inline
+
+        label = raw_update.get("label")
+        if isinstance(label, str):
+            update["label"] = clamp_text(label)
+
+        orientation = raw_update.get("orientation")
+        if isinstance(orientation, str):
+            cleaned_orientation = orientation.strip().lower()
+            if cleaned_orientation in allowed_orientation_values:
+                update["orientation"] = cleaned_orientation
+
+        for int_key in ("x", "y", "width", "height", "bar_color", "text_color", "segments"):
+            parsed_value = parse_int(raw_update.get(int_key))
+            if parsed_value is not None:
+                update[int_key] = parsed_value
+
+        scale_pct = parse_int(raw_update.get("scale_pct"))
+        if scale_pct is not None and 25 <= scale_pct <= 400:
+            update["scale_pct"] = scale_pct
+
+        minimum = parse_float(raw_update.get("min"))
+        if minimum is not None:
+            update["min"] = minimum
+
+        maximum = parse_float(raw_update.get("max"))
+        if maximum is not None:
+            update["max"] = maximum
+
+        background = parse_int(raw_update.get("background"))
+        if background is not None and -1 <= background <= 10:
+            update["background"] = background
+
+        background_opacity = parse_int(raw_update.get("background_opacity"))
+        if background_opacity is not None and 0 <= background_opacity <= 100:
+            update["background_opacity"] = background_opacity
+
+        rounded_outline = raw_update.get("rounded_outline")
+        if isinstance(rounded_outline, bool):
+            update["rounded_outline"] = rounded_outline
+
+        if len(update) > 1:
+            normalized.append(update)
+
+    return normalized
+
+
 def zoom_state_text(zoom_enabled: bool, zoom_percent: int) -> str:
     if not zoom_enabled:
         return "OFF"
@@ -958,8 +1073,10 @@ def run_controller(
         remote_keys: List[int] = []
         manual_text_overrides: List[Optional[str]] = [None] * MAX_OSD_SLOTS
         manual_value_overrides: List[Optional[float]] = [None] * MAX_OSD_SLOTS
+        manual_asset_updates: List[dict] = []
         manual_text_overrides_pending = False
         manual_value_overrides_pending = False
+        manual_asset_updates_pending = False
 
         source_states: Dict[str, SourceInputState] = {
             "serial": SourceInputState(name="serial"),
@@ -1061,16 +1178,20 @@ def run_controller(
                             dirty = True
 
                         if isinstance(message.get("asset_updates"), list):
-                            for update in message["asset_updates"]:
-                                if not isinstance(update, dict):
-                                    continue
-                                asset_id = update.get("id")
-                                enabled = update.get("enabled")
-                                if isinstance(asset_id, int) and 0 <= asset_id < ASSET_COUNT and isinstance(enabled, bool):
-                                    asset_enabled[asset_id] = enabled
-                                    if enabled and asset_id == menu_asset_id:
-                                        last_menu_activity_monotonic = time.monotonic()
-                                    dirty = True
+                            parsed_asset_updates = normalize_manual_asset_updates(message["asset_updates"])
+                            if parsed_asset_updates:
+                                manual_asset_updates = parsed_asset_updates
+                                manual_asset_updates_pending = True
+                                dirty = True
+                                for update in parsed_asset_updates:
+                                    asset_id = update.get("id")
+                                    enabled = update.get("enabled")
+                                    if isinstance(asset_id, int) and 0 <= asset_id < ASSET_COUNT and isinstance(enabled, bool):
+                                        asset_enabled[asset_id] = enabled
+                                        if enabled and asset_id == menu_asset_id:
+                                            last_menu_activity_monotonic = time.monotonic()
+                            elif manual_asset_updates_pending:
+                                manual_asset_updates_pending = False
 
                         if isinstance(message.get("destinations"), list):
                             destination_payload = message["destinations"]
@@ -1178,6 +1299,7 @@ def run_controller(
                         payload = build_payload(menu_window, asset_enabled, zoom_enabled, zoom_percent)
                         applied_text_overrides = False
                         applied_value_overrides = False
+                        applied_asset_updates = False
 
                         if manual_text_overrides_pending and any(item is not None for item in manual_text_overrides):
                             texts_payload = payload.get("texts")
@@ -1195,6 +1317,17 @@ def run_controller(
                             payload["values"] = [item for item in manual_value_overrides]
                             applied_value_overrides = True
 
+                        if manual_asset_updates_pending and manual_asset_updates:
+                            base_updates = payload.get("asset_updates")
+                            merged_updates: List[dict] = []
+                            if isinstance(base_updates, list):
+                                for update in base_updates:
+                                    if isinstance(update, dict):
+                                        merged_updates.append(dict(update))
+                            merged_updates.extend(dict(update) for update in manual_asset_updates)
+                            payload["asset_updates"] = merged_updates
+                            applied_asset_updates = True
+
                         failures = send_payloads(sock, destinations, payload)
                         last_send_monotonic = now
                         if failures:
@@ -1204,6 +1337,8 @@ def run_controller(
                                 manual_text_overrides_pending = False
                             if applied_value_overrides:
                                 manual_value_overrides_pending = False
+                            if applied_asset_updates:
+                                manual_asset_updates_pending = False
                             dirty = False
 
                     if status != last_logged_status:
