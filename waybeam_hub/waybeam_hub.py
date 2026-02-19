@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+import re
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 MAX_OSD_SLOTS = 8
@@ -31,7 +32,8 @@ MENU_TEXT_SLOT_START = MAX_OSD_SLOTS - 3  # ext.text6 (1-based) / index 5
 
 SECTION_ASSETS = "ASSETS"
 SECTION_ZOOM = "ZOOM"
-RESERVED_SECTIONS = {SECTION_ASSETS, SECTION_ZOOM}
+SECTION_RADIO = "RADIO"
+RESERVED_SECTIONS = {SECTION_ASSETS, SECTION_ZOOM, SECTION_RADIO}
 
 STOP_REQUESTED = False
 
@@ -42,15 +44,21 @@ CRSF_MAX = 1811
 CRSF_CENTER = 992
 CRSF_AXIS_DEADBAND = 120
 CRSF_ACTION_THRESHOLD = 1400
-CRSF_MENU_TOGGLE_CH1_MAX = 500
-CRSF_MENU_TOGGLE_CH234_MIN = 1500
+CRSF_MENU_TOGGLE_CH_LOW_MAX = 500
+CRSF_MENU_TOGGLE_CH4_MIN = 1500
 CRSF_NAV_DEBOUNCE_MS = 100
 CRSF_SELECT_DEBOUNCE_MS = 250
 CRSF_MENU_TOGGLE_HOLD_S = 1.0
 CRSF_SAMPLE_INTERVAL_MS = 40
+RADIO_TRIGGER_DEBOUNCE_MS = CRSF_NAV_DEBOUNCE_MS
+# Re-arm quickly for digital switch toggles (e.g. 191 <-> 1792) while still
+# debouncing action execution on re-entry.
+RADIO_RESET_DEBOUNCE_MS = 0
+CRSF_MIN_CONTROL_CHANNELS = 4
+CRSF_DISPLAY_CHANNELS = 16
 
 MENU_INACTIVITY_TIMEOUT_S = 30.0
-SOURCE_STALE_S = 0.5
+SOURCE_STALE_S = 1.0
 
 KEY_UP = -201
 KEY_DOWN = -202
@@ -83,6 +91,23 @@ class MenuEntry:
 
 
 @dataclass
+class RadioRule:
+    name: str
+    channel_index: int
+    min_value: int
+    max_value: int
+    action: MenuAction
+
+
+@dataclass
+class RadioRuleState:
+    enter_started_monotonic: float = 0.0
+    outside_started_monotonic: float = 0.0
+    latched_in_range: bool = False
+    trigger_count: int = 0
+
+
+@dataclass
 class SourceInputState:
     name: str
     select_pressed: bool = False
@@ -90,7 +115,7 @@ class SourceInputState:
     last_select_monotonic: float = 0.0
     last_sample_monotonic: float = 0.0
     last_update_monotonic: float = 0.0
-    channels: Tuple[int, int, int, int] = (CRSF_CENTER, CRSF_CENTER, CRSF_CENTER, CRSF_CENTER)
+    channels: Tuple[int, ...] = (CRSF_CENTER,) * CRSF_DISPLAY_CHANNELS
     nav_direction: str = "neutral"
     nav_candidate: str = "neutral"
     nav_candidate_since: float = 0.0
@@ -126,11 +151,14 @@ class SseReader(threading.Thread):
         self._out_queue = out_queue
         self._stop_event = stop_event
         self._verbose = verbose
+        self._dropped_event_count = 0
+        self._last_drop_notice_monotonic = 0.0
 
     def _queue_event(self, event: dict) -> None:
         try:
             self._out_queue.put_nowait(event)
         except queue.Full:
+            self._dropped_event_count += 1
             try:
                 self._out_queue.get_nowait()
             except queue.Empty:
@@ -139,6 +167,14 @@ class SseReader(threading.Thread):
                 self._out_queue.put_nowait(event)
             except queue.Full:
                 pass
+            if self._verbose:
+                now = time.monotonic()
+                if (now - self._last_drop_notice_monotonic) >= 1.0:
+                    print(
+                        f"[SSE] queue full; dropped {self._dropped_event_count} event(s)",
+                        flush=True,
+                    )
+                    self._last_drop_notice_monotonic = now
 
     def _queue_status(self, message: str) -> None:
         self._queue_event({"type": "status", "message": message, "monotonic": time.monotonic()})
@@ -165,15 +201,18 @@ class SseReader(threading.Thread):
             return
 
         channels = payload.get("channels")
-        if not isinstance(channels, list) or len(channels) < 4:
+        if not isinstance(channels, list) or len(channels) < CRSF_MIN_CONTROL_CHANNELS:
             return
 
         converted: List[int] = []
-        for idx in range(4):
+        max_count = min(CRSF_DISPLAY_CHANNELS, len(channels))
+        for idx in range(max_count):
             try:
                 converted.append(clamp_crsf_channel(int(channels[idx])))
             except (TypeError, ValueError):
                 return
+        if len(converted) < CRSF_DISPLAY_CHANNELS:
+            converted.extend([CRSF_CENTER] * (CRSF_DISPLAY_CHANNELS - len(converted)))
 
         self._queue_event(
             {
@@ -261,9 +300,33 @@ def parse_asset_id_list(spec: str) -> Set[int]:
     return parsed
 
 
-def load_actions(path: str) -> Tuple[List[str], Dict[str, List[MenuAction]]]:
+def parse_radio_condition(spec: str) -> Optional[Tuple[int, int, int]]:
+    text = spec.strip().lower()
+    if not text:
+        return None
+
+    match = re.match(r"^(-?\d+)\s*<\s*ch\s*(\d+)\s*<\s*(-?\d+)$", text)
+    if not match:
+        return None
+
+    minimum = int(match.group(1))
+    channel_number = int(match.group(2))
+    maximum = int(match.group(3))
+    if channel_number < 1 or channel_number > CRSF_DISPLAY_CHANNELS:
+        raise ValueError(f"RADIO rule channel out of range: ch{channel_number} (expected 1..{CRSF_DISPLAY_CHANNELS})")
+
+    if minimum >= maximum:
+        raise ValueError(
+            f"RADIO rule range must be increasing for ch{channel_number}: "
+            f"expected min<max, got {minimum} and {maximum}"
+        )
+
+    return channel_number - 1, minimum, maximum
+
+
+def load_actions(path: str) -> Tuple[List[str], Dict[str, List[MenuAction]], List[RadioRule]]:
     if not path:
-        return [], {}
+        return [], {}, []
 
     parser = configparser.ConfigParser(interpolation=None)
     parser.optionxform = str
@@ -273,11 +336,42 @@ def load_actions(path: str) -> Tuple[List[str], Dict[str, List[MenuAction]]]:
 
     section_order: List[str] = []
     actions_by_section: Dict[str, List[MenuAction]] = {}
+    radio_rules: List[RadioRule] = []
 
     for section in parser.sections():
         section_name = section.strip()
         if not section_name:
             continue
+        if section_name.upper() == SECTION_RADIO:
+            for name, raw_value in parser.items(section):
+                condition_text = name.strip()
+                value_text = raw_value.strip()
+                if not condition_text or not value_text:
+                    continue
+
+                parsed_condition = parse_radio_condition(condition_text)
+                if parsed_condition is None:
+                    raise ValueError(
+                        "invalid RADIO rule "
+                        f"'{condition_text}': expected format '1200<ch1<1500 = command'"
+                    )
+
+                command_text = value_text
+                ch_idx, min_value, max_value = parsed_condition
+                rule_name = f"{min_value}<ch{ch_idx + 1}<{max_value}"
+
+                action = MenuAction(section=SECTION_RADIO, name=rule_name, command=command_text)
+                radio_rules.append(
+                    RadioRule(
+                        name=rule_name,
+                        channel_index=ch_idx,
+                        min_value=min_value,
+                        max_value=max_value,
+                        action=action,
+                    )
+                )
+            continue
+
         if section_name.upper() in RESERVED_SECTIONS:
             continue
 
@@ -293,7 +387,7 @@ def load_actions(path: str) -> Tuple[List[str], Dict[str, List[MenuAction]]]:
             section_order.append(section_name)
             actions_by_section[section_name] = section_actions
 
-    return section_order, actions_by_section
+    return section_order, actions_by_section, radio_rules
 
 
 def clamp_text(text: str) -> str:
@@ -559,9 +653,15 @@ def parse_destination_spec(spec: str) -> UdpDestination:
     text = spec.strip()
     if not text:
         raise ValueError("empty destination")
-    host, sep, port_text = text.rpartition(":")
-    if sep == "" or not host:
+    host_part, sep, port_part = text.rpartition(":")
+    host = host_part.strip()
+    port_text = port_part.strip()
+    if sep == "":
         raise ValueError(f"invalid destination '{spec}' (expected host:port)")
+    if not host:
+        raise ValueError(f"invalid destination '{spec}' (empty host)")
+    if not port_text:
+        raise ValueError(f"invalid destination '{spec}' (empty port)")
     try:
         port = int(port_text)
     except ValueError as exc:
@@ -799,6 +899,108 @@ def execute_action(action: MenuAction, timeout_ms: int, action_shell: str) -> st
     return f"ERR {result.returncode} [{action.section}] {action.name}: {message}" if message else f"ERR {result.returncode} [{action.section}] {action.name}"
 
 
+def evaluate_radio_rules(
+    source_state: SourceInputState,
+    radio_rules: Sequence[RadioRule],
+    rule_states: Sequence[RadioRuleState],
+    now: float,
+    action_timeout_ms: int,
+    action_shell: str,
+) -> List[str]:
+    if len(radio_rules) != len(rule_states):
+        return []
+
+    triggered_statuses: List[str] = []
+    for index, rule in enumerate(radio_rules):
+        rule_state = rule_states[index]
+
+        if rule.channel_index >= len(source_state.channels):
+            rule_state.enter_started_monotonic = 0.0
+            rule_state.outside_started_monotonic = 0.0
+            rule_state.latched_in_range = False
+            continue
+
+        channel_value = source_state.channels[rule.channel_index]
+        in_range = rule.min_value < channel_value < rule.max_value
+
+        if not in_range:
+            rule_state.enter_started_monotonic = 0.0
+            if rule_state.latched_in_range:
+                if rule_state.outside_started_monotonic <= 0.0:
+                    rule_state.outside_started_monotonic = now
+                outside_ms = (now - rule_state.outside_started_monotonic) * 1000.0
+                if outside_ms >= RADIO_RESET_DEBOUNCE_MS:
+                    rule_state.latched_in_range = False
+                    rule_state.outside_started_monotonic = 0.0
+            else:
+                rule_state.outside_started_monotonic = 0.0
+            continue
+
+        rule_state.outside_started_monotonic = 0.0
+        if rule_state.latched_in_range:
+            continue
+
+        if rule_state.enter_started_monotonic <= 0.0:
+            rule_state.enter_started_monotonic = now
+            continue
+
+        stable_ms = (now - rule_state.enter_started_monotonic) * 1000.0
+        if stable_ms < RADIO_TRIGGER_DEBOUNCE_MS:
+            continue
+
+        rule_state.latched_in_range = True
+        rule_state.enter_started_monotonic = 0.0
+        rule_state.trigger_count += 1
+        action_status = execute_action(rule.action, action_timeout_ms, action_shell)
+        triggered_statuses.append(
+            f"{action_status} (trigger #{rule_state.trigger_count} {rule.min_value}<ch{rule.channel_index + 1}={channel_value}<{rule.max_value})"
+        )
+
+    return triggered_statuses
+
+
+def update_radio_rule_resets_for_source(
+    source_state: SourceInputState,
+    radio_rules: Sequence[RadioRule],
+    rule_states: Sequence[RadioRuleState],
+    now: float,
+) -> None:
+    if len(radio_rules) != len(rule_states):
+        return
+
+    for index, rule in enumerate(radio_rules):
+        rule_state = rule_states[index]
+        if rule.channel_index >= len(source_state.channels):
+            rule_state.enter_started_monotonic = 0.0
+            rule_state.outside_started_monotonic = 0.0
+            rule_state.latched_in_range = False
+            continue
+
+        channel_value = source_state.channels[rule.channel_index]
+        in_range = rule.min_value < channel_value < rule.max_value
+        if not in_range:
+            rule_state.enter_started_monotonic = 0.0
+            if rule_state.latched_in_range:
+                if rule_state.outside_started_monotonic <= 0.0:
+                    rule_state.outside_started_monotonic = now
+                outside_ms = (now - rule_state.outside_started_monotonic) * 1000.0
+                if outside_ms >= RADIO_RESET_DEBOUNCE_MS:
+                    rule_state.latched_in_range = False
+                    rule_state.outside_started_monotonic = 0.0
+            else:
+                rule_state.outside_started_monotonic = 0.0
+            continue
+
+        rule_state.outside_started_monotonic = 0.0
+
+
+def reset_radio_rule_states(rule_states: Sequence[RadioRuleState]) -> None:
+    for rule_state in rule_states:
+        rule_state.enter_started_monotonic = 0.0
+        rule_state.outside_started_monotonic = 0.0
+        rule_state.latched_in_range = False
+
+
 def source_is_fresh(state: SourceInputState, now: float, fallback_timeout_s: float) -> bool:
     return state.last_update_monotonic > 0.0 and (now - state.last_update_monotonic) <= fallback_timeout_s
 
@@ -878,14 +1080,15 @@ def poll_source_remote_keys(
 
     # CH1 high is enter/select. CH2 is the only navigation axis for up/down.
     # CH2 high => up, CH2 low => down.
+    # Menu toggle combo: CH1-CH3 low and CH4 high (held).
     select_active = source_state.channels[0] >= CRSF_ACTION_THRESHOLD
     source_state.back_pressed = False
 
     combo_active = (
-        source_state.channels[0] < CRSF_MENU_TOGGLE_CH1_MAX
-        and source_state.channels[1] > CRSF_MENU_TOGGLE_CH234_MIN
-        and source_state.channels[2] > CRSF_MENU_TOGGLE_CH234_MIN
-        and source_state.channels[3] > CRSF_MENU_TOGGLE_CH234_MIN
+        source_state.channels[0] < CRSF_MENU_TOGGLE_CH_LOW_MAX
+        and source_state.channels[1] < CRSF_MENU_TOGGLE_CH_LOW_MAX
+        and source_state.channels[2] < CRSF_MENU_TOGGLE_CH_LOW_MAX
+        and source_state.channels[3] > CRSF_MENU_TOGGLE_CH4_MIN
     )
     source_state.combo_active = combo_active
     if combo_active:
@@ -1026,6 +1229,7 @@ def run_controller(
     zoom_max: int,
     action_sections: Sequence[str],
     actions_by_section: Dict[str, List[MenuAction]],
+    radio_rules: Sequence[RadioRule],
     action_timeout_ms: int,
     action_shell: str,
     menu_asset_id: int,
@@ -1082,6 +1286,9 @@ def run_controller(
             "serial": SourceInputState(name="serial"),
             "joystick": SourceInputState(name="joystick"),
         }
+        radio_rule_states_by_source: Dict[str, List[RadioRuleState]] = {
+            source_name: [RadioRuleState() for _ in radio_rules] for source_name in source_states
+        }
         active_source: Optional[str] = None
 
         ui_html_path = os.path.join(os.path.dirname(__file__), "index.html")
@@ -1115,15 +1322,34 @@ def run_controller(
                             if stream not in source_states:
                                 continue
                             channels = event.get("channels")
-                            if not isinstance(channels, tuple) or len(channels) != 4:
+                            if not isinstance(channels, tuple) or len(channels) < CRSF_MIN_CONTROL_CHANNELS:
                                 continue
+                            normalized_channels = tuple(int(ch) for ch in channels[:CRSF_DISPLAY_CHANNELS])
+                            if len(normalized_channels) < CRSF_DISPLAY_CHANNELS:
+                                normalized_channels = normalized_channels + (CRSF_CENTER,) * (CRSF_DISPLAY_CHANNELS - len(normalized_channels))
                             state = source_states[stream]
-                            state.channels = channels
-                            state.last_update_monotonic = float(event.get("monotonic", now))
+                            sample_now = time.monotonic()
+                            state.channels = normalized_channels
+                            state.last_update_monotonic = sample_now
                             state.link_up = True
+                            # Apply RADIO reset tracking on every sample so quick
+                            # low/high switch transitions are not collapsed away
+                            # when multiple SSE events are drained in one loop.
+                            if radio_rules:
+                                update_radio_rule_resets_for_source(
+                                    state,
+                                    radio_rules,
+                                    radio_rule_states_by_source[stream],
+                                    sample_now,
+                                )
                             dirty = True
 
+                    now = time.monotonic()
                     refresh_source_links(source_states, now, SOURCE_STALE_S)
+                    if radio_rules:
+                        for source_name, source_state in source_states.items():
+                            if not source_state.link_up:
+                                reset_radio_rule_states(radio_rule_states_by_source[source_name])
                     new_active_source = choose_active_source(priority_source, source_states, now, fallback_timeout_s)
                     if new_active_source != active_source:
                         active_source = new_active_source
@@ -1265,6 +1491,18 @@ def run_controller(
                             dirty = True
                         if verbose:
                             maybe_emit_source_debug_log(source_states[active_source], active_source, polled_keys)
+                        if radio_rules:
+                            triggered_radio_statuses = evaluate_radio_rules(
+                                source_states[active_source],
+                                radio_rules,
+                                radio_rule_states_by_source[active_source],
+                                now,
+                                action_timeout_ms,
+                                action_shell,
+                            )
+                            if triggered_radio_statuses:
+                                status = triggered_radio_statuses[-1]
+                                dirty = True
 
                     now = time.monotonic()
                     menu_visible = asset_enabled[menu_asset_id] is True
@@ -1552,7 +1790,7 @@ def main() -> int:
             actions_ini_path = bundled_actions_ini
 
     try:
-        action_sections, actions_by_section = load_actions(actions_ini_path)
+        action_sections, actions_by_section, radio_rules = load_actions(actions_ini_path)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -1577,6 +1815,7 @@ def main() -> int:
         args.zoom_max,
         action_sections,
         actions_by_section,
+        radio_rules,
         args.action_timeout_ms,
         action_shell,
         args.menu_asset_id,
