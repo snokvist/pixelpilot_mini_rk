@@ -617,21 +617,12 @@ def current_zoom_command(zoom_enabled: bool, zoom_percent: int) -> str:
     return f"{zoom_percent},{zoom_percent},50,50"
 
 
-def build_payload(menu_window: Tuple[str, str, str], asset_enabled: Sequence[Optional[bool]], zoom_enabled: bool, zoom_percent: int) -> dict:
+def build_payload(menu_window: Tuple[str, str, str], zoom_enabled: bool, zoom_percent: int) -> dict:
     texts: List[Optional[str]] = [None] * MAX_OSD_SLOTS
     texts[MENU_TEXT_SLOT_START + 0] = clamp_text(menu_window[0])
     texts[MENU_TEXT_SLOT_START + 1] = clamp_text(menu_window[1])
     texts[MENU_TEXT_SLOT_START + 2] = clamp_text(menu_window[2])
-
-    asset_updates = [
-        {"id": asset_id, "enabled": asset_enabled[asset_id]}
-        for asset_id in range(ASSET_COUNT)
-        if asset_enabled[asset_id] is not None
-    ]
-
     payload = {"texts": texts, "zoom": current_zoom_command(zoom_enabled, zoom_percent)}
-    if asset_updates:
-        payload["asset_updates"] = asset_updates
     return payload
 
 
@@ -1159,6 +1150,9 @@ def build_webui_state(
     priority_source: str,
     fallback_timeout_s: float,
     sse_url: str,
+    asset_update_tx_count: int,
+    asset_update_tx_last_monotonic: float,
+    asset_update_tx_last_batch_size: int,
 ) -> dict:
     now = time.monotonic()
 
@@ -1181,6 +1175,7 @@ def build_webui_state(
         }
 
     active_age_ms = int((now - active_state.last_update_monotonic) * 1000.0) if active_state.last_update_monotonic else -1
+    asset_update_tx_last_age_ms = int((now - asset_update_tx_last_monotonic) * 1000.0) if asset_update_tx_last_monotonic > 0.0 else -1
 
     # Keep `crsf` payload for existing WebUI compatibility while adding richer SSE info.
     return {
@@ -1193,6 +1188,11 @@ def build_webui_state(
         "asset_enabled": list(asset_enabled),
         "zoom": current_zoom_command(zoom_enabled, zoom_percent),
         "destinations": [{"host": destination.host, "port": destination.port} for destination in destinations],
+        "asset_update_tx": {
+            "count": asset_update_tx_count,
+            "last_age_ms": asset_update_tx_last_age_ms,
+            "last_batch_size": asset_update_tx_last_batch_size,
+        },
         "crsf": {
             "enabled": True,
             "port": 0,
@@ -1252,11 +1252,14 @@ def run_controller(
 
     try:
         asset_enabled: List[Optional[bool]] = [None] * ASSET_COUNT
+        pending_asset_updates: Dict[int, bool] = {}
         for asset_id in initial_off:
             asset_enabled[asset_id] = False
+            pending_asset_updates[asset_id] = False
 
         # Console-only mode starts hidden; show via combo or WebUI command.
         asset_enabled[menu_asset_id] = False
+        pending_asset_updates[menu_asset_id] = False
 
         zoom_enabled = False
         zoom_percent = 100
@@ -1281,6 +1284,13 @@ def run_controller(
         manual_text_overrides_pending = False
         manual_value_overrides_pending = False
         manual_asset_updates_pending = False
+        asset_update_tx_count = 0
+        asset_update_tx_last_monotonic = 0.0
+        asset_update_tx_last_batch_size = 0
+
+        def set_asset_enabled(asset_id: int, enabled: bool) -> None:
+            asset_enabled[asset_id] = enabled
+            pending_asset_updates[asset_id] = enabled
 
         source_states: Dict[str, SourceInputState] = {
             "serial": SourceInputState(name="serial"),
@@ -1376,23 +1386,23 @@ def run_controller(
                             remote_keys.append(key_map[key_name])
                             last_menu_activity_monotonic = time.monotonic()
                         elif key_name in ("quit", "hide_menu"):
-                            asset_enabled[menu_asset_id] = False
+                            set_asset_enabled(menu_asset_id, False)
                             status = "Menu overlay hidden"
                             dirty = True
                         elif key_name == "show_menu":
-                            asset_enabled[menu_asset_id] = True
+                            set_asset_enabled(menu_asset_id, True)
                             status = "Menu overlay visible"
                             last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         elif key_name == "all_on":
                             for asset_id in range(ASSET_COUNT):
-                                asset_enabled[asset_id] = True
+                                set_asset_enabled(asset_id, True)
                             status = "All assets ON"
                             last_menu_activity_monotonic = time.monotonic()
                             dirty = True
                         elif key_name == "all_off":
                             for asset_id in range(ASSET_COUNT):
-                                asset_enabled[asset_id] = False
+                                set_asset_enabled(asset_id, False)
                             status = "All assets OFF"
                             last_menu_activity_monotonic = time.monotonic()
                             dirty = True
@@ -1507,7 +1517,7 @@ def run_controller(
                     now = time.monotonic()
                     menu_visible = asset_enabled[menu_asset_id] is True
                     if menu_visible and (now - last_menu_activity_monotonic) >= MENU_INACTIVITY_TIMEOUT_S:
-                        asset_enabled[menu_asset_id] = False
+                        set_asset_enabled(menu_asset_id, False)
                         current_section = ""
                         selected = 0
                         status = f"Menu auto-hidden after {int(MENU_INACTIVITY_TIMEOUT_S)}s inactivity"
@@ -1530,14 +1540,25 @@ def run_controller(
                             priority_source,
                             fallback_timeout_s,
                             sse_url,
+                            asset_update_tx_count,
+                            asset_update_tx_last_monotonic,
+                            asset_update_tx_last_batch_size,
                         )
                     )
 
                     if dirty or (now - last_send_monotonic) * 1000.0 >= interval_ms:
-                        payload = build_payload(menu_window, asset_enabled, zoom_enabled, zoom_percent)
+                        payload = build_payload(menu_window, zoom_enabled, zoom_percent)
                         applied_text_overrides = False
                         applied_value_overrides = False
+                        applied_state_asset_updates = False
                         applied_asset_updates = False
+
+                        if pending_asset_updates:
+                            payload["asset_updates"] = [
+                                {"id": asset_id, "enabled": enabled}
+                                for asset_id, enabled in sorted(pending_asset_updates.items())
+                            ]
+                            applied_state_asset_updates = True
 
                         if manual_text_overrides_pending and any(item is not None for item in manual_text_overrides):
                             texts_payload = payload.get("texts")
@@ -1571,10 +1592,17 @@ def run_controller(
                         if failures:
                             status = f"Send partial failure ({len(failures)}/{len(destinations)}): {clamp_text(failures[0])}"
                         else:
+                            sent_asset_updates = payload.get("asset_updates")
+                            if isinstance(sent_asset_updates, list):
+                                asset_update_tx_count += 1
+                                asset_update_tx_last_monotonic = now
+                                asset_update_tx_last_batch_size = len(sent_asset_updates)
                             if applied_text_overrides:
                                 manual_text_overrides_pending = False
                             if applied_value_overrides:
                                 manual_value_overrides_pending = False
+                            if applied_state_asset_updates:
+                                pending_asset_updates.clear()
                             if applied_asset_updates:
                                 manual_asset_updates_pending = False
                             dirty = False
@@ -1592,7 +1620,7 @@ def run_controller(
                     if key == KEY_MENU_TOGGLE:
                         current_state = asset_enabled[menu_asset_id]
                         next_state = True if current_state is None else (not current_state)
-                        asset_enabled[menu_asset_id] = next_state
+                        set_asset_enabled(menu_asset_id, next_state)
                         current_section = ""
                         selected = 0
                         status = "Menu overlay visible" if next_state else "Menu overlay hidden"
@@ -1619,7 +1647,7 @@ def run_controller(
                         entry = entries[selected]
 
                         if entry.kind == "exit":
-                            asset_enabled[menu_asset_id] = False
+                            set_asset_enabled(menu_asset_id, False)
                             current_section = ""
                             selected = 0
                             status = "Menu overlay hidden"
@@ -1652,7 +1680,7 @@ def run_controller(
                         if entry.kind == "asset" and entry.asset_id >= 0:
                             current_state = asset_enabled[entry.asset_id]
                             next_state = True if current_state is None else (not current_state)
-                            asset_enabled[entry.asset_id] = next_state
+                            set_asset_enabled(entry.asset_id, next_state)
                             status = f"Asset {entry.asset_id} {'ON' if next_state else 'OFF'}"
                             last_menu_activity_monotonic = time.monotonic()
                             dirty = True
