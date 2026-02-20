@@ -371,6 +371,7 @@
       <div class="card">
         <h3>CRSF Input <span id="crsf-link" class="pill off">OFF</span></h3>
         <div id="crsf-summary" class="state">No CRSF data.</div>
+        <div id="asset-tx-summary" class="state" style="margin-top:8px;">Asset updates tx: count=0 last=n/a batch=0</div>
         <div class="crsf-grid" id="crsf-grid"></div>
       </div>
     </section>
@@ -1290,6 +1291,11 @@ function renderState(state){
   });
 
   renderCrsf(state);
+  const tx = state && state.asset_update_tx ? state.asset_update_tx : {};
+  const txCount = Number.isFinite(tx.count) ? tx.count : 0;
+  const txLastAge = Number.isFinite(tx.last_age_ms) && tx.last_age_ms >= 0 ? `${tx.last_age_ms}ms` : 'n/a';
+  const txBatch = Number.isFinite(tx.last_batch_size) ? tx.last_batch_size : 0;
+  document.getElementById('asset-tx-summary').textContent = `Asset updates tx: count=${txCount} last=${txLastAge} batch=${txBatch}`;
   syncAssetsFromStateIfNeeded(state);
 }
 
