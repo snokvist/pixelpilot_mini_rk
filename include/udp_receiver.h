@@ -46,6 +46,7 @@ typedef struct {
     guint64 incomplete_frames;
     guint64 last_frame_bytes;
     double frame_size_avg;
+    double fps_avg;
     double jitter;
     double jitter_avg;
     double bitrate_mbps;
