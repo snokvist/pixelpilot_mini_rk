@@ -43,12 +43,6 @@ waybeam_hub.py
 
 _Add future implementation ideas below as they come up._
 
-- [ ] **WebSocket push for WebUI** — replace `/state` polling with a WebSocket connection for lower-latency state updates in the browser.
-- [ ] **Config hot-reload** — watch `config.json` for changes and apply non-destructive updates (e.g. tuning constants, verbose flag) without restarting.
-- [ ] **Multi-condition radio rules** — support AND/OR combinations of channel conditions and edge triggers (fire on channel entering vs. leaving range).
-- [ ] **OSD layout presets** — allow config to define named layout presets (sets of asset visibility + text overrides) that can be toggled via menu or radio rule.
-- [ ] **Telemetry logging** — optional file or UDP logging of channel values, menu interactions, and action executions for post-flight analysis.
-
 ## Conventions
 
 - Keep `waybeam_hub.py` as a single file — no package split unless it exceeds ~3000 lines.
