@@ -193,7 +193,7 @@ The WebUI serves `index.html` at the root and exposes a JSON command endpoint:
 {"destinations": [{"host": "10.6.0.50", "port": 7777}]}
 ```
 
-The `OSD Control` tab includes a `Gamma LUT` card with six sliders (`gamma`, `lift`, `gain`, `R`, `G`, `B`) plus `Send Neutral` and `Disable Gamma`. Slider changes are debounced and sent as one-shot external OSD `gamma` commands.
+The `OSD Control` tab includes a `Gamma LUT` card with six sliders (`gamma`, `lift`, `gain`, `R`, `G`, `B`) plus `Gregify`, `Send Neutral`, and `Disable Gamma`. Slider changes are debounced and sent as one-shot external OSD `gamma` commands. Accepted ranges are `gamma` 0.20-5.00, `lift` -0.50-0.50, `gain` 0.50-3.00, and `R/G/B` 0.50-1.50. The `Gregify` preset sends `1.00,-0.15,2.75,1.00,1.00,1.00`.
 
 ## OSD text slot layout
 
