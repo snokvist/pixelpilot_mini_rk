@@ -1040,6 +1040,41 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "video.gamma") == 0 || strcasecmp(section, "video_gamma") == 0) {
+        if (strcasecmp(key, "enable") == 0 || strcasecmp(key, "gamma-enable") == 0) {
+            int v = 0;
+            if (parse_bool(value, &v) != 0) {
+                return -1;
+            }
+            cfg->video_gamma.enable = v;
+            return 0;
+        }
+        if (strcasecmp(key, "gamma") == 0) {
+            cfg->video_gamma.gamma = strtod(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "lift") == 0) {
+            cfg->video_gamma.lift = strtod(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "gain") == 0) {
+            cfg->video_gamma.gain = strtod(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "r") == 0 || strcasecmp(key, "red") == 0) {
+            cfg->video_gamma.r = strtod(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "g") == 0 || strcasecmp(key, "green") == 0) {
+            cfg->video_gamma.g = strtod(value, NULL);
+            return 0;
+        }
+        if (strcasecmp(key, "b") == 0 || strcasecmp(key, "blue") == 0) {
+            cfg->video_gamma.b = strtod(value, NULL);
+            return 0;
+        }
+        return -1;
+    }
     if (strcasecmp(section, "restart") == 0 || strcasecmp(section, "restarts") == 0) {
         if (strcasecmp(key, "limit") == 0) {
             cfg->restart_limit = atoi(value);

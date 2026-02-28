@@ -96,7 +96,7 @@ to the defaults listed in `src/config.c` when omitted.
 
 ## External OSD Control
 
-The application supports an external OSD control feed that allows third-party tools to push text, numeric values, zoom commands, and `waybeam_osd`-style `asset_updates` visibility toggles over UDP.
+The application supports an external OSD control feed that allows third-party tools to push text, numeric values, zoom commands, DRM gamma commands, and `waybeam_osd`-style `asset_updates` visibility toggles over UDP.
 
 *   **Default Port:** 5005
 *   **Protocol:** JSON over UDP

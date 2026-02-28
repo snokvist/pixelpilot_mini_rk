@@ -38,6 +38,16 @@ typedef struct {
 
 typedef struct {
     int enable;
+    double gamma;
+    double lift;
+    double gain;
+    double r;
+    double g;
+    double b;
+} VideoGammaCfg;
+
+typedef struct {
+    int enable;
     char bind_address[64];
     int port;
     unsigned int interval_ms;
@@ -112,6 +122,7 @@ typedef struct {
     SseCfg sse;
     IdrCfg idr;
     VideoCtmCfg video_ctm;
+    VideoGammaCfg video_gamma;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);

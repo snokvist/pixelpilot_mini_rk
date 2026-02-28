@@ -10,6 +10,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
@@ -388,6 +389,19 @@ struct VideoDecoder {
     VideoDecoderZoomRequest zoom_request;
     VideoDecoderZoomRect zoom_rect;
     uint32_t last_committed_fb;
+
+    gboolean gamma_enabled;
+    double gamma_pow;
+    double gamma_lift;
+    double gamma_gain;
+    double gamma_r;
+    double gamma_g;
+    double gamma_b;
+    gboolean gamma_supported;
+    uint32_t prop_gamma_lut;
+    uint32_t prop_gamma_lut_size;
+    uint64_t gamma_lut_size;
+    uint32_t gamma_blob_id;
 
     uint32_t prop_fb_id;
     uint32_t prop_crtc_id;
@@ -1403,6 +1417,128 @@ uint32_t video_decoder_get_plane_id(const VideoDecoder *vd) {
     return vd->plane_id;
 }
 
+static uint16_t gamma_u16_clamp(double value) {
+    if (value <= 0.0) {
+        return 0;
+    }
+    if (value >= 65535.0) {
+        return 65535;
+    }
+    return (uint16_t)lround(value);
+}
+
+static double gamma_unit_clamp(double value) {
+    if (value < 0.0) {
+        return 0.0;
+    }
+    if (value > 1.0) {
+        return 1.0;
+    }
+    return value;
+}
+
+static void video_decoder_gamma_destroy_blob(VideoDecoder *vd) {
+    if (vd == NULL) {
+        return;
+    }
+    if (vd->gamma_blob_id != 0 && vd->drm_fd >= 0) {
+        drmModeDestroyPropertyBlob(vd->drm_fd, vd->gamma_blob_id);
+        vd->gamma_blob_id = 0;
+    }
+}
+
+static int video_decoder_apply_gamma_lut(VideoDecoder *vd) {
+    if (vd == NULL || vd->drm_fd < 0 || vd->crtc_id == 0 || !vd->gamma_supported || vd->prop_gamma_lut == 0 ||
+        vd->gamma_lut_size < 2) {
+        return -1;
+    }
+
+    uint64_t lut_size = vd->gamma_lut_size;
+    struct drm_color_lut *lut = g_new0(struct drm_color_lut, lut_size);
+    if (lut == NULL) {
+        return -1;
+    }
+
+    double gamma_pow = vd->gamma_enabled ? vd->gamma_pow : 1.0;
+    double lift = vd->gamma_enabled ? vd->gamma_lift : 0.0;
+    double gain = vd->gamma_enabled ? vd->gamma_gain : 1.0;
+    double r_mult = vd->gamma_enabled ? vd->gamma_r : 1.0;
+    double g_mult = vd->gamma_enabled ? vd->gamma_g : 1.0;
+    double b_mult = vd->gamma_enabled ? vd->gamma_b : 1.0;
+
+    for (uint64_t i = 0; i < lut_size; ++i) {
+        double x = (double)i / (double)(lut_size - 1);
+        double y = pow(x, gamma_pow);
+        y = (y + lift) * gain;
+        y = gamma_unit_clamp(y);
+
+        double r = gamma_unit_clamp(y * r_mult);
+        double g = gamma_unit_clamp(y * g_mult);
+        double b = gamma_unit_clamp(y * b_mult);
+
+        lut[i].red = gamma_u16_clamp(r * 65535.0);
+        lut[i].green = gamma_u16_clamp(g * 65535.0);
+        lut[i].blue = gamma_u16_clamp(b * 65535.0);
+    }
+
+    uint32_t blob_id = 0;
+    int ret = drmModeCreatePropertyBlob(vd->drm_fd, lut, (size_t)(sizeof(*lut) * lut_size), &blob_id);
+    g_free(lut);
+    if (ret != 0) {
+        return ret;
+    }
+
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    if (req == NULL) {
+        drmModeDestroyPropertyBlob(vd->drm_fd, blob_id);
+        return -1;
+    }
+
+    ret = drmModeAtomicAddProperty(req, vd->crtc_id, vd->prop_gamma_lut, blob_id);
+    if (ret < 0) {
+        drmModeAtomicFree(req);
+        drmModeDestroyPropertyBlob(vd->drm_fd, blob_id);
+        return ret;
+    }
+
+    ret = drmModeAtomicCommit(vd->drm_fd, req, 0, NULL);
+    drmModeAtomicFree(req);
+    if (ret != 0) {
+        drmModeDestroyPropertyBlob(vd->drm_fd, blob_id);
+        return ret;
+    }
+
+    video_decoder_gamma_destroy_blob(vd);
+    vd->gamma_blob_id = blob_id;
+    return 0;
+}
+
+void video_decoder_apply_gamma_update(VideoDecoder *vd, const VideoGammaUpdate *update) {
+    if (vd == NULL || update == NULL || update->fields == 0) {
+        return;
+    }
+
+    if ((update->fields & VIDEO_GAMMA_UPDATE_PARAMS) == 0u) {
+        return;
+    }
+
+    vd->gamma_enabled = update->enabled ? TRUE : FALSE;
+    vd->gamma_pow = update->gamma;
+    vd->gamma_lift = update->lift;
+    vd->gamma_gain = update->gain;
+    vd->gamma_r = update->r;
+    vd->gamma_g = update->g;
+    vd->gamma_b = update->b;
+
+    if (!vd->gamma_supported) {
+        return;
+    }
+
+    if (video_decoder_apply_gamma_lut(vd) != 0) {
+        LOGW("Video decoder: failed to apply gamma LUT update");
+    }
+}
+
 void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *update) {
     if (vd == NULL || update == NULL || update->fields == 0) {
         return;
@@ -1456,6 +1592,18 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     vd->mode_w = ms->mode_w;
     vd->mode_h = ms->mode_h;
     video_ctm_init(&vd->ctm, cfg);
+    vd->gamma_enabled = cfg->video_gamma.enable ? TRUE : FALSE;
+    vd->gamma_pow = cfg->video_gamma.gamma;
+    vd->gamma_lift = cfg->video_gamma.lift;
+    vd->gamma_gain = cfg->video_gamma.gain;
+    vd->gamma_r = cfg->video_gamma.r;
+    vd->gamma_g = cfg->video_gamma.g;
+    vd->gamma_b = cfg->video_gamma.b;
+    vd->gamma_supported = FALSE;
+    vd->prop_gamma_lut = 0;
+    vd->prop_gamma_lut_size = 0;
+    vd->gamma_lut_size = 0;
+    vd->gamma_blob_id = 0;
     vd->frame_fourcc = 0;
     vd->frame_hor_stride = 0;
     vd->frame_ver_stride = 0;
@@ -1519,6 +1667,34 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
             LOGI("Video CTM: using DRM %s property on plane %u", name, vd->plane_id);
             have_ctm = TRUE;
         }
+    }
+
+    drmModeObjectProperties *crtc_props = drmModeObjectGetProperties(vd->drm_fd, vd->crtc_id, DRM_MODE_OBJECT_CRTC);
+    if (crtc_props != NULL) {
+        for (uint32_t i = 0; i < crtc_props->count_props; ++i) {
+            drmModePropertyRes *prop = drmModeGetProperty(vd->drm_fd, crtc_props->props[i]);
+            if (prop == NULL) {
+                continue;
+            }
+            if (strcmp(prop->name, "GAMMA_LUT") == 0) {
+                vd->prop_gamma_lut = prop->prop_id;
+            } else if (strcmp(prop->name, "GAMMA_LUT_SIZE") == 0) {
+                vd->prop_gamma_lut_size = prop->prop_id;
+                vd->gamma_lut_size = crtc_props->prop_values[i];
+            }
+            drmModeFreeProperty(prop);
+        }
+        drmModeFreeObjectProperties(crtc_props);
+    }
+
+    if (vd->prop_gamma_lut != 0 && vd->gamma_lut_size >= 2) {
+        vd->gamma_supported = TRUE;
+        LOGI("Video gamma: using DRM GAMMA_LUT on CRTC %u (size=%" PRIu64 ")", vd->crtc_id, vd->gamma_lut_size);
+        if (video_decoder_apply_gamma_lut(vd) != 0) {
+            LOGW("Video gamma: failed to apply startup gamma LUT");
+        }
+    } else if (vd->gamma_enabled) {
+        LOGW("Video gamma: GAMMA_LUT not available on CRTC %u", vd->crtc_id);
     }
 
     // Suppress noisy parser error spam from the Rockchip HEVC decoder; keep only fatal logs.
@@ -1599,6 +1775,8 @@ void video_decoder_deinit(VideoDecoder *vd) {
         g_free(vd->packet_buf);
         vd->packet_buf = NULL;
     }
+
+    video_decoder_gamma_destroy_blob(vd);
 
     if (vd->drm_fd >= 0) {
         close(vd->drm_fd);

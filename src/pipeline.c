@@ -1300,3 +1300,20 @@ void pipeline_apply_ctm_update(PipelineState *ps, const VideoCtmUpdate *update) 
 
     video_decoder_apply_ctm_update(decoder, update);
 }
+
+void pipeline_apply_gamma_update(PipelineState *ps, const VideoGammaUpdate *update) {
+    if (ps == NULL || update == NULL || update->fields == 0) {
+        return;
+    }
+
+    g_mutex_lock(&ps->lock);
+    gboolean decoder_ready = ps->decoder_initialized && ps->decoder != NULL;
+    VideoDecoder *decoder = decoder_ready ? ps->decoder : NULL;
+    g_mutex_unlock(&ps->lock);
+
+    if (!decoder_ready || decoder == NULL) {
+        return;
+    }
+
+    video_decoder_apply_gamma_update(decoder, update);
+}

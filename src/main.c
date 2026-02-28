@@ -170,6 +170,73 @@ static gboolean parse_zoom_command(const char *cmd, gboolean *out_enabled, Video
     return TRUE;
 }
 
+
+static gboolean parse_gamma_command(const char *cmd, VideoGammaUpdate *out_update) {
+    if (out_update == NULL || cmd == NULL) {
+        return FALSE;
+    }
+    const char *p = cmd;
+    while (*p != '\0' && g_ascii_isspace(*p)) {
+        ++p;
+    }
+    memset(out_update, 0, sizeof(*out_update));
+    out_update->fields = VIDEO_GAMMA_UPDATE_PARAMS;
+    out_update->enabled = FALSE;
+    out_update->gamma = 1.0;
+    out_update->lift = 0.0;
+    out_update->gain = 1.0;
+    out_update->r = 1.0;
+    out_update->g = 1.0;
+    out_update->b = 1.0;
+    if (*p == '\0' || g_ascii_strcasecmp(p, "off") == 0 || g_ascii_strcasecmp(p, "gamma=off") == 0) {
+        return TRUE;
+    }
+    if (g_ascii_strncasecmp(p, "gamma=", 6) == 0) {
+        p += 6;
+    }
+    char buf[OSD_EXTERNAL_TEXT_LEN];
+    g_strlcpy(buf, p, sizeof(buf));
+    GStrv tokens = g_strsplit(buf, ",", 0);
+    double values[6] = {0.0};
+    int idx = 0;
+    gboolean ok = TRUE;
+    for (char **it = tokens; ok && it != NULL && *it != NULL; ++it) {
+        if (idx >= 6) {
+            ok = FALSE;
+            break;
+        }
+        char *token = g_strstrip(*it);
+        if (token[0] == '\0') {
+            ok = FALSE;
+            break;
+        }
+        errno = 0;
+        char *end_ptr = NULL;
+        double value = g_ascii_strtod(token, &end_ptr);
+        if (errno != 0 || end_ptr == token || *end_ptr != '\0') {
+            ok = FALSE;
+            break;
+        }
+        values[idx++] = value;
+    }
+    g_strfreev(tokens);
+    if (!ok || idx != 6) {
+        return FALSE;
+    }
+    if (values[0] < 0.20 || values[0] > 5.00 || values[1] < -0.50 || values[1] > 0.50 || values[2] < 0.50 || values[2] > 1.50 ||
+        values[3] < 0.50 || values[3] > 1.50 || values[4] < 0.50 || values[4] > 1.50 || values[5] < 0.50 || values[5] > 1.50) {
+        return FALSE;
+    }
+    out_update->enabled = TRUE;
+    out_update->gamma = values[0];
+    out_update->lift = values[1];
+    out_update->gain = values[2];
+    out_update->r = values[3];
+    out_update->g = values[4];
+    out_update->b = values[5];
+    return TRUE;
+}
+
 static int ensure_single_instance(void) {
     for (;;) {
         int rc = write_pid_file();
@@ -407,6 +474,7 @@ int main(int argc, char **argv) {
     struct timespec last_osd;
     clock_gettime(CLOCK_MONOTONIC, &last_osd);
     char last_zoom_command[OSD_EXTERNAL_TEXT_LEN] = "";
+    char last_gamma_command[OSD_EXTERNAL_TEXT_LEN] = "";
 
     while (!g_exit_flag) {
         pipeline_poll_child(&ps);
@@ -630,6 +698,18 @@ int main(int argc, char **argv) {
                         pipeline_apply_zoom_command(&ps, FALSE, NULL);
                     }
                     g_strlcpy(last_zoom_command, zoom_text != NULL ? zoom_text : "", sizeof(last_zoom_command));
+                }
+
+                const char *gamma_text = ext_snapshot.gamma_command;
+                if (g_strcmp0(gamma_text, last_gamma_command) != 0) {
+                    VideoGammaUpdate gamma_update = {0};
+                    if (parse_gamma_command(gamma_text, &gamma_update)) {
+                        pipeline_apply_gamma_update(&ps, &gamma_update);
+                    } else if (gamma_text != NULL && gamma_text[0] != '\0') {
+                        LOGW("External gamma command ignored: expected 'gamma=GAMMA,LIFT,GAIN,R,G,B' or 'gamma=off' (got '%s')",
+                             gamma_text);
+                    }
+                    g_strlcpy(last_gamma_command, gamma_text != NULL ? gamma_text : "", sizeof(last_gamma_command));
                 }
                 int updated = osd_update_stats(fd, &cfg, &ms, &ps, audio_disabled, restart_count, &ext_snapshot, &now, &osd);
                 if (updated) {
