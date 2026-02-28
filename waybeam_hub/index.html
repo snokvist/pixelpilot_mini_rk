@@ -275,6 +275,12 @@
       padding: 0;
     }
 
+    .gamma-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 10px;
+    }
+
     .inline-value {
       color: var(--primary);
       font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -330,6 +336,7 @@
       .asset-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .crsf-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .index-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+      .gamma-grid { grid-template-columns: 1fr; }
       input, select { width: 100%; }
     }
   </style>
@@ -457,12 +464,48 @@
 
       <div class="card">
         <h3>OSD Request Recorder <span id="debug-record-pill" class="pill off">OFF</span></h3>
-        <p class="dest-meta">Records the last 10 OSD update requests sent from this WebUI (`values`, `texts`, `asset_updates`, `all_on`, `all_off`).</p>
+        <p class="dest-meta">Records the last 10 OSD update requests sent from this WebUI (`values`, `texts`, `asset_updates`, `gamma`, `all_on`, `all_off`).</p>
         <div class="row" style="margin-top:10px;">
           <button type="button" id="debug-record-toggle" class="alt">Start Recording</button>
           <button type="button" id="debug-clear" class="ghost">Clear</button>
         </div>
         <div id="debug-log" class="state debug-log" style="margin-top:10px;">Recording is OFF.</div>
+      </div>
+
+      <div class="card">
+        <h3>Gamma LUT</h3>
+        <p class="dest-meta">Send live `gamma` overrides to the selected OSD destinations. Slider changes auto-send after a short debounce.</p>
+        <div id="gamma-summary" class="state" style="margin-top:10px;">Live gamma override is OFF.</div>
+        <div class="row" style="margin-top:10px;">
+          <button type="button" id="gamma-neutral" class="ghost">Send Neutral</button>
+          <button type="button" id="gamma-off" class="danger">Disable Gamma</button>
+        </div>
+        <div class="gamma-grid" style="margin-top:10px;">
+          <div class="slider-row">
+            <label for="gamma-gamma-slider">Gamma <span id="gamma-gamma-readout" class="inline-value">1.00</span></label>
+            <input id="gamma-gamma-slider" type="range" min="0.20" max="5.00" step="0.01" value="1.00" />
+          </div>
+          <div class="slider-row">
+            <label for="gamma-lift-slider">Lift <span id="gamma-lift-readout" class="inline-value">0.00</span></label>
+            <input id="gamma-lift-slider" type="range" min="-0.50" max="0.50" step="0.01" value="0.00" />
+          </div>
+          <div class="slider-row">
+            <label for="gamma-gain-slider">Gain <span id="gamma-gain-readout" class="inline-value">1.00</span></label>
+            <input id="gamma-gain-slider" type="range" min="0.50" max="1.50" step="0.01" value="1.00" />
+          </div>
+          <div class="slider-row">
+            <label for="gamma-r-slider">Red <span id="gamma-r-readout" class="inline-value">1.00</span></label>
+            <input id="gamma-r-slider" type="range" min="0.50" max="1.50" step="0.01" value="1.00" />
+          </div>
+          <div class="slider-row">
+            <label for="gamma-g-slider">Green <span id="gamma-g-readout" class="inline-value">1.00</span></label>
+            <input id="gamma-g-slider" type="range" min="0.50" max="1.50" step="0.01" value="1.00" />
+          </div>
+          <div class="slider-row">
+            <label for="gamma-b-slider">Blue <span id="gamma-b-readout" class="inline-value">1.00</span></label>
+            <input id="gamma-b-slider" type="range" min="0.50" max="1.50" step="0.01" value="1.00" />
+          </div>
+        </div>
       </div>
     </section>
 
@@ -519,6 +562,24 @@ const ASSET_UPDATE_PROPERTY_DEFS = [
   { key: 'rounded_outline', label: 'rounded_outline', kind: 'bool', help: 'Rounded outline/background style.' },
 ];
 const ASSET_UPDATE_PROPERTY_MAP = new Map(ASSET_UPDATE_PROPERTY_DEFS.map((item) => [item.key, item]));
+const GAMMA_CONTROL_DEFS = [
+  { key: 'gamma', label: 'Gamma', min: 0.20, max: 5.00, step: 0.01, defaultValue: 1.00, digits: 2 },
+  { key: 'lift', label: 'Lift', min: -0.50, max: 0.50, step: 0.01, defaultValue: 0.00, digits: 2 },
+  { key: 'gain', label: 'Gain', min: 0.50, max: 1.50, step: 0.01, defaultValue: 1.00, digits: 2 },
+  { key: 'r', label: 'Red', min: 0.50, max: 1.50, step: 0.01, defaultValue: 1.00, digits: 2 },
+  { key: 'g', label: 'Green', min: 0.50, max: 1.50, step: 0.01, defaultValue: 1.00, digits: 2 },
+  { key: 'b', label: 'Blue', min: 0.50, max: 1.50, step: 0.01, defaultValue: 1.00, digits: 2 },
+];
+const GAMMA_CONTROL_MAP = new Map(GAMMA_CONTROL_DEFS.map((item) => [item.key, item]));
+const GAMMA_DEFAULT_STATE = Object.freeze({
+  enabled: false,
+  gamma: 1.00,
+  lift: 0.00,
+  gain: 1.00,
+  r: 1.00,
+  g: 1.00,
+  b: 1.00,
+});
 
 let baseUrl = '';
 let pollTimer = null;
@@ -532,8 +593,11 @@ let textIndexSelection = new Set(Array.from({ length: MAX_OSD_SLOTS }, (_item, i
 let assetUpdateIdSelection = new Set([0]);
 let valueSendTimer = null;
 let textSendTimer = null;
+let gammaSendTimer = null;
 let lastValuePayloadSignature = '';
 let lastTextPayloadSignature = '';
+let lastGammaPayloadSignature = '';
+let gammaUiSyncHoldUntil = 0;
 let osdSenderMode = 'value';
 let assetButtonStates = [];
 let assetButtonsInitialized = false;
@@ -576,6 +640,7 @@ function isOsdUpdateCommand(obj){
   if (Array.isArray(obj.values)) return true;
   if (Array.isArray(obj.texts)) return true;
   if (Array.isArray(obj.asset_updates) && obj.asset_updates.length > 0) return true;
+  if (typeof obj.gamma === 'string') return true;
   if (obj.key === 'all_on' || obj.key === 'all_off') return true;
   return false;
 }
@@ -671,6 +736,10 @@ function commandPartTexts(texts){
 
 function commandPartAssetUpdates(assetUpdates){
   return { asset_updates: assetUpdates };
+}
+
+function commandPartGamma(gammaCommand){
+  return { gamma: gammaCommand };
 }
 
 function sortSelectedIndexes(selectedIndexes){
@@ -882,6 +951,101 @@ function setIndexSelection(selectedIndexes, enabled){
   if (enabled) {
     for (let index = 0; index < MAX_OSD_SLOTS; index += 1) selectedIndexes.add(index);
   }
+}
+
+function clampGammaControlValue(key, rawValue){
+  const def = GAMMA_CONTROL_MAP.get(key);
+  if (!def) return 0;
+  const parsed = Number(rawValue);
+  const fallback = def.defaultValue;
+  const baseValue = Number.isFinite(parsed) ? parsed : fallback;
+  const clamped = Math.max(def.min, Math.min(def.max, baseValue));
+  const factor = 10 ** def.digits;
+  return Math.round(clamped * factor) / factor;
+}
+
+function formatGammaControlValue(key, value){
+  const def = GAMMA_CONTROL_MAP.get(key);
+  if (!def) return String(value);
+  return clampGammaControlValue(key, value).toFixed(def.digits);
+}
+
+function setGammaControlValue(key, value){
+  const slider = document.getElementById(`gamma-${key}-slider`);
+  const readout = document.getElementById(`gamma-${key}-readout`);
+  const normalized = clampGammaControlValue(key, value);
+  const formatted = formatGammaControlValue(key, normalized);
+  slider.value = formatted;
+  readout.textContent = formatted;
+  return normalized;
+}
+
+function buildGammaCommandFromState(state){
+  if (!state || state.enabled !== true) return 'off';
+  return GAMMA_CONTROL_DEFS
+    .map((def) => formatGammaControlValue(def.key, state[def.key]))
+    .join(',');
+}
+
+function normalizeGammaState(rawState){
+  const normalized = { ...GAMMA_DEFAULT_STATE };
+  if (rawState && typeof rawState === 'object') {
+    normalized.enabled = rawState.enabled === true;
+    GAMMA_CONTROL_DEFS.forEach((def) => {
+      normalized[def.key] = clampGammaControlValue(def.key, rawState[def.key]);
+    });
+  }
+  return normalized;
+}
+
+function applyGammaStateToControls(state){
+  const normalized = normalizeGammaState(state);
+  GAMMA_CONTROL_DEFS.forEach((def) => {
+    normalized[def.key] = setGammaControlValue(def.key, normalized[def.key]);
+  });
+  const preview = buildGammaCommandFromState({ ...normalized, enabled: true });
+  const summary = document.getElementById('gamma-summary');
+  summary.textContent = normalized.enabled
+    ? `Live gamma override is ON.\nCommand: ${preview}`
+    : `Live gamma override is OFF.\nPreset: ${preview}`;
+  return normalized;
+}
+
+function getGammaStateFromControls(){
+  const state = { enabled: true };
+  GAMMA_CONTROL_DEFS.forEach((def) => {
+    state[def.key] = setGammaControlValue(def.key, document.getElementById(`gamma-${def.key}-slider`).value);
+  });
+  return state;
+}
+
+function sendGammaState(state){
+  const normalized = applyGammaStateToControls(state);
+  const command = buildGammaCommandFromState(normalized);
+  const signature = JSON.stringify({ gamma: command });
+  if (signature === lastGammaPayloadSignature) return;
+  lastGammaPayloadSignature = signature;
+  gammaUiSyncHoldUntil = Date.now() + 750;
+  send(composeCommandPayload([commandPartGamma(command)]));
+}
+
+function scheduleGammaSend(){
+  if (gammaSendTimer) clearTimeout(gammaSendTimer);
+  gammaSendTimer = setTimeout(() => {
+    gammaSendTimer = null;
+    sendGammaState({ ...getGammaStateFromControls(), enabled: true });
+  }, 90);
+}
+
+function isGammaControlActive(){
+  const active = document.activeElement;
+  if (!active) return false;
+  return GAMMA_CONTROL_DEFS.some((def) => active.id === `gamma-${def.key}-slider`);
+}
+
+function syncGammaControlsFromState(state){
+  if (Date.now() < gammaUiSyncHoldUntil || isGammaControlActive()) return;
+  applyGammaStateToControls(normalizeGammaState(state && state.gamma_control));
 }
 
 function updateValueReadout(){
@@ -1297,6 +1461,7 @@ function renderState(state){
   const txBatch = Number.isFinite(tx.last_batch_size) ? tx.last_batch_size : 0;
   document.getElementById('asset-tx-summary').textContent = `Asset updates tx: count=${txCount} last=${txLastAge} batch=${txBatch}`;
   syncAssetsFromStateIfNeeded(state);
+  syncGammaControlsFromState(state);
 }
 
 document.getElementById('tab-btn-menu').onclick = () => { setActiveTab('menu'); };
@@ -1364,6 +1529,21 @@ document.getElementById('asset-prop-select').onkeydown = (event) => {
   if (event.key === 'Enter') applyAssetPropertyUpdate();
 };
 
+GAMMA_CONTROL_DEFS.forEach((def) => {
+  document.getElementById(`gamma-${def.key}-slider`).oninput = () => {
+    setGammaControlValue(def.key, document.getElementById(`gamma-${def.key}-slider`).value);
+    scheduleGammaSend();
+  };
+});
+
+document.getElementById('gamma-neutral').onclick = () => {
+  sendGammaState({ ...GAMMA_DEFAULT_STATE, enabled: true });
+};
+
+document.getElementById('gamma-off').onclick = () => {
+  sendGammaState({ ...getGammaStateFromControls(), enabled: false });
+};
+
 document.getElementById('add-destination').onclick = () => {
   const host = document.getElementById('dest-host').value.trim();
   const port = Number(document.getElementById('dest-port').value.trim());
@@ -1411,6 +1591,7 @@ document.getElementById('debug-clear').onclick = () => {
   renderIndexSelectors('text-indexes', textIndexSelection, 'Text index', scheduleTextIndexesSend);
   renderAssetUpdateIdSelectors();
   updateValueReadout();
+  applyGammaStateToControls(GAMMA_DEFAULT_STATE);
   setOsdSenderMode('value');
   setDebugRecording(false);
   setActiveTab('menu');

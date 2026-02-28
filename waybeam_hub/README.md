@@ -10,7 +10,7 @@ Waybeam Hub is a remote menu driver and WebUI companion for PixelPilot Mini RK. 
 - **Zoom control** — step-based zoom in/out with configurable step size and maximum percentage.
 - **Shell actions from INI** — execute arbitrary shell commands (reboot, record, gamma presets, etc.) defined in a simple INI file.
 - **Radio rule triggers** — fire commands automatically when a CRSF channel value enters a configured range, with debounce and latch logic to prevent accidental repeats.
-- **WebUI** — dark-themed browser dashboard with real-time state display, OSD text/value overrides, asset toggles, zoom, destination management, and debug recording/playback.
+- **WebUI** — dark-themed browser dashboard with real-time state display, OSD text/value overrides, asset toggles, zoom, live gamma LUT sliders, destination management, and debug recording/playback.
 - **Multi-destination UDP** — send OSD payloads to multiple PixelPilot instances simultaneously.
 - **JSON config file** — all settings (including tuning constants) are read from a single JSON file; no CLI flags required.
 
@@ -169,8 +169,12 @@ The WebUI serves `index.html` at the root and exposes a JSON command endpoint:
 {"values": [50.5, null, null, null, null, null, null, null]}
 {"zoom": "150,150,50,50"}
 {"zoom": "off"}
+{"gamma": "0.85,0.00,1.00,1.00,1.00,1.00"}
+{"gamma": "off"}
 {"destinations": [{"host": "10.6.0.50", "port": 7777}]}
 ```
+
+The `OSD Control` tab includes a `Gamma LUT` card with six sliders (`gamma`, `lift`, `gain`, `R`, `G`, `B`) plus `Send Neutral` and `Disable Gamma`. Slider changes are debounced and sent as one-shot external OSD `gamma` commands.
 
 ## OSD text slot layout
 
@@ -203,3 +207,4 @@ line = {ext.text8}
 | `config.json` | Default JSON configuration (all settings and tuning constants) |
 | `index.html` | Browser-based control panel (served by the WebUI) |
 | `menu.ini` | Default menu actions and radio rule definitions |
+| `S99waybeam_hub` | Example init-style startup script for deployment |

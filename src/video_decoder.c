@@ -1513,6 +1513,24 @@ static int video_decoder_apply_gamma_lut(VideoDecoder *vd) {
     return 0;
 }
 
+static void video_decoder_restore_neutral_gamma(VideoDecoder *vd) {
+    if (vd == NULL || !vd->gamma_supported) {
+        return;
+    }
+
+    vd->gamma_enabled = FALSE;
+    vd->gamma_pow = 1.0;
+    vd->gamma_lift = 0.0;
+    vd->gamma_gain = 1.0;
+    vd->gamma_r = 1.0;
+    vd->gamma_g = 1.0;
+    vd->gamma_b = 1.0;
+
+    if (video_decoder_apply_gamma_lut(vd) != 0) {
+        LOGW("Video gamma: failed to restore neutral LUT during shutdown");
+    }
+}
+
 void video_decoder_apply_gamma_update(VideoDecoder *vd, const VideoGammaUpdate *update) {
     if (vd == NULL || update == NULL || update->fields == 0) {
         return;
@@ -1776,6 +1794,7 @@ void video_decoder_deinit(VideoDecoder *vd) {
         vd->packet_buf = NULL;
     }
 
+    video_decoder_restore_neutral_gamma(vd);
     video_decoder_gamma_destroy_blob(vd);
 
     if (vd->drm_fd >= 0) {
