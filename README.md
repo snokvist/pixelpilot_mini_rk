@@ -212,12 +212,12 @@ arriving on a different SSRC (or with a large sequence gap) is ignored entirely 
 | `udp.jitter.latest_ms` | RFC 3550 style inter-arrival jitter derived from the video timestamps. |
 | `udp.jitter.avg_ms` | EWMA of the video jitter metric to smooth short-term spikes. |
 | `udp.fps.avg` | EWMA of completed-frame cadence, exposed as averaged frames per second. |
-| `udp.frame.count` | Number of completed video frames detected via RTP marker bits. |
-| `udp.frame.incomplete` | Frames that ended with missing video packets. |
-| `udp.frame.last_kib` | Size of the most recent completed video frame (KiB). |
-| `udp.frame.avg_kib` | EWMA of recent video frame sizes (KiB). |
-| `udp.sequence.expected` | The next video sequence number the receiver is waiting for. |
-| `udp.timestamp.last_video` | RTP timestamp from the most recent video packet. |
+| `udp.frames.count` | Number of completed video frames detected via RTP marker bits. |
+| `udp.frames.incomplete` | Frames that ended with missing video packets. |
+| `udp.frames.last_bytes` | Size of the most recent completed video frame (KiB, despite the historical token name). |
+| `udp.frames.avg_bytes` | EWMA of recent video frame sizes (KiB, despite the historical token name). |
+| `udp.expected_sequence` | The next video sequence number the receiver is waiting for. |
+| `udp.last_video_timestamp` | RTP timestamp from the most recent video packet. |
 | `udp.idr_requests` | Total HTTP IDR requests issued while attempting to recover corrupted streams. |
 
 The history buffer exposed through `udp.history.*` tokens retains the 512 most recent packet samples, including packet size,
