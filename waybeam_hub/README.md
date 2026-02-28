@@ -12,15 +12,16 @@ Waybeam Hub is a remote menu driver and WebUI companion for PixelPilot Mini RK. 
 - **Radio rule triggers** — fire commands automatically when a CRSF channel value enters a configured range, with debounce and latch logic to prevent accidental repeats.
 - **WebUI** — dark-themed browser dashboard with real-time state display, OSD text/value overrides, asset toggles, zoom, destination management, and debug recording/playback.
 - **Multi-destination UDP** — send OSD payloads to multiple PixelPilot instances simultaneously.
+- **JSON config file** — all settings (including tuning constants) are read from a single JSON file; no CLI flags required.
 
 ## Quick start
 
 ```sh
-# Run with defaults (connects to 127.0.0.1:5005, WebUI on port 8060)
+# Run with the bundled config.json (connects to 127.0.0.1:5005, WebUI on port 8060)
 python3 waybeam_hub.py
 
-# Custom target and WebUI port
-python3 waybeam_hub.py --host 192.168.1.100 --port 5005 --webui-port 8080
+# Use a custom config file
+python3 waybeam_hub.py --config /path/to/my_config.json
 
 # Open the WebUI in a browser
 # http://<device-ip>:8060
@@ -28,27 +29,83 @@ python3 waybeam_hub.py --host 192.168.1.100 --port 5005 --webui-port 8080
 
 No external Python dependencies are required — the script uses only the standard library.
 
-## CLI options
+## Configuration
 
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--host` | `127.0.0.1` | PixelPilot external OSD host |
-| `--port` | `5005` | External OSD UDP port |
-| `--interval-ms` | `400` | OSD payload re-send interval (ms) |
-| `--extra-destination` | `10.6.0.50:7777` | Additional `host:port` UDP targets (repeatable) |
-| `--initial-off` | *(none)* | Comma-separated asset IDs to start disabled (e.g. `2,5,7`) |
-| `--menu-asset-id` | `7` | Asset ID of the menu widget (force-disabled on exit) |
-| `--zoom-step` | `25` | Zoom percentage increment |
-| `--zoom-max` | `300` | Maximum zoom percentage |
-| `--actions-ini` | `menu.ini` | Path to INI file with menu actions and radio rules |
-| `--action-timeout-ms` | `5000` | Shell command timeout (ms) |
-| `--action-shell` | `$SHELL` / `/bin/sh` | Shell used to execute action commands |
-| `--webui-host` | `0.0.0.0` | WebUI HTTP bind address |
-| `--webui-port` | `8060` | WebUI HTTP port |
-| `--sse-url` | `http://127.0.0.1:8070/sse` | SSE endpoint providing CRSF channel data |
-| `--priority` | `serial` | Preferred input source (`serial` or `joystick`) |
-| `--priority-fallback-s` | `5.0` | Seconds before falling back to the non-priority source |
-| `--verbose` | off | Enable verbose SSE and debug logging |
+All settings are read from a JSON config file. The only CLI argument is `--config` (defaults to `config.json` beside the script).
+
+### Main settings
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `host` | string | `"127.0.0.1"` | PixelPilot external OSD host |
+| `port` | int | `5005` | External OSD UDP port |
+| `interval_ms` | int | `400` | OSD payload re-send interval (ms) |
+| `extra_destinations` | array | `["10.6.0.50:7777"]` | Additional `"host:port"` UDP targets |
+| `initial_off` | array | `[]` | Asset IDs to start disabled (e.g. `[2, 5, 7]`) |
+| `menu_asset_id` | int | `7` | Asset ID of the menu widget (force-disabled on exit) |
+| `zoom_step` | int | `25` | Zoom percentage increment |
+| `zoom_max` | int | `300` | Maximum zoom percentage |
+| `actions_ini` | string | `""` | Path to INI file with menu actions (defaults to bundled `menu.ini`) |
+| `action_timeout_ms` | int | `5000` | Shell command timeout (ms) |
+| `action_shell` | string | `""` | Shell for actions (`$SHELL` fallback `/bin/sh`) |
+| `webui_host` | string | `"0.0.0.0"` | WebUI HTTP bind address |
+| `webui_port` | int | `8060` | WebUI HTTP port |
+| `sse_url` | string | `"http://127.0.0.1:8070/sse"` | SSE endpoint providing CRSF channel data |
+| `priority` | string | `"serial"` | Preferred input source (`"serial"` or `"joystick"`) |
+| `priority_fallback_s` | float | `5.0` | Seconds before falling back to the non-priority source |
+| `verbose` | bool | `false` | Enable verbose SSE and debug logging |
+
+### Tuning settings
+
+The optional `tuning` object exposes internal constants for fine-tuning radio/joystick behaviour and menu timing. All keys have sensible defaults — omit the entire section to use them.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `crsf_axis_deadband` | int | `120` | Deadband around CRSF center for up/down navigation |
+| `crsf_action_threshold` | int | `1400` | Channel value threshold for select action |
+| `crsf_menu_toggle_ch_low_max` | int | `500` | Max channel value for "low" in menu-toggle combo |
+| `crsf_menu_toggle_ch4_min` | int | `1500` | Min CH4 value for menu-toggle combo |
+| `crsf_nav_debounce_ms` | int | `100` | Navigation key debounce (ms) |
+| `crsf_select_debounce_ms` | int | `250` | Select key debounce (ms) |
+| `crsf_menu_toggle_hold_s` | float | `1.0` | Hold time to toggle menu visibility (s) |
+| `crsf_sample_interval_ms` | int | `40` | Minimum interval between SSE sample processing (ms) |
+| `radio_trigger_debounce_ms` | int | `100` | Radio rule trigger debounce (ms) |
+| `radio_reset_debounce_ms` | int | `0` | Radio rule re-arm debounce (ms) |
+| `menu_inactivity_timeout_s` | float | `30.0` | Auto-hide menu after this many seconds of inactivity |
+| `source_stale_s` | float | `1.0` | Mark input source as stale after this many seconds |
+
+### Example config.json
+
+```json
+{
+  "host": "127.0.0.1",
+  "port": 5005,
+  "interval_ms": 400,
+  "initial_off": [],
+  "zoom_step": 25,
+  "zoom_max": 300,
+  "actions_ini": "",
+  "action_timeout_ms": 5000,
+  "action_shell": "",
+  "menu_asset_id": 7,
+  "webui_host": "0.0.0.0",
+  "webui_port": 8060,
+  "sse_url": "http://127.0.0.1:8070/sse",
+  "priority": "serial",
+  "priority_fallback_s": 5.0,
+  "extra_destinations": ["10.6.0.50:7777"],
+  "verbose": false,
+  "tuning": {
+    "crsf_axis_deadband": 120,
+    "crsf_action_threshold": 1400,
+    "crsf_nav_debounce_ms": 100,
+    "crsf_select_debounce_ms": 250,
+    "menu_inactivity_timeout_s": 30.0
+  }
+}
+```
+
+Only include the keys you want to override — missing keys use their defaults.
 
 ## Menu INI format
 
@@ -76,7 +133,7 @@ The built-in `[ASSETS]` and `[ZOOM]` sections are always present in the menu and
 
 ## Menu navigation (radio/joystick)
 
-Navigation uses centered CRSF channel values:
+Navigation uses centered CRSF channel values. The thresholds below reflect the defaults and can be adjusted via the `tuning` config section.
 
 | Input | Channel | Threshold | Debounce |
 | --- | --- | --- | --- |
@@ -143,5 +200,6 @@ line = {ext.text8}
 | File | Description |
 | --- | --- |
 | `waybeam_hub.py` | Main application — SSE client, menu engine, WebUI server, UDP sender |
+| `config.json` | Default JSON configuration (all settings and tuning constants) |
 | `index.html` | Browser-based control panel (served by the WebUI) |
 | `menu.ini` | Default menu actions and radio rule definitions |
