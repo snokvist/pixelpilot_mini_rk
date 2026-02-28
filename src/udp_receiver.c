@@ -44,6 +44,7 @@
 
 #define RTP_MIN_HEADER 12
 #define FRAME_EWMA_ALPHA 0.1
+#define FPS_EWMA_ALPHA 0.1
 #define JITTER_EWMA_ALPHA 0.1
 #define BITRATE_WINDOW_NS 100000000ULL // 100 ms
 #define BITRATE_EWMA_ALPHA 0.1
@@ -102,6 +103,7 @@ struct UdpReceiver {
     guint64 frame_bytes;
     gboolean frame_missing;
     guint64 frame_last_arrival_ns;
+    guint64 last_frame_complete_ns;
 
     gboolean transit_initialized;
     double last_transit;
@@ -372,6 +374,7 @@ static void reset_stats_locked(struct UdpReceiver *ur) {
     ur->frame_bytes = 0;
     ur->frame_missing = FALSE;
     ur->frame_last_arrival_ns = 0;
+    ur->last_frame_complete_ns = 0;
     ur->transit_initialized = FALSE;
     ur->last_transit = 0.0;
     ur->bitrate_window_start_ns = 0;
@@ -501,6 +504,18 @@ static void finalize_frame(struct UdpReceiver *ur, guint64 arrival_ns) {
     } else {
         ur->stats.frame_size_avg += ((double)ur->frame_bytes - ur->stats.frame_size_avg) * FRAME_EWMA_ALPHA;
     }
+    if (ur->last_frame_complete_ns != 0 && arrival_ns > ur->last_frame_complete_ns) {
+        double frame_interval_s = (double)(arrival_ns - ur->last_frame_complete_ns) / 1e9;
+        if (frame_interval_s > 0.0) {
+            double instant_fps = 1.0 / frame_interval_s;
+            if (ur->stats.fps_avg == 0.0) {
+                ur->stats.fps_avg = instant_fps;
+            } else {
+                ur->stats.fps_avg += (instant_fps - ur->stats.fps_avg) * FPS_EWMA_ALPHA;
+            }
+        }
+    }
+    ur->last_frame_complete_ns = arrival_ns;
     if (ur->frame_missing) {
         ur->stats.incomplete_frames++;
         maybe_trigger_idr_loss(ur, arrival_ns);

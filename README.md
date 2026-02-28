@@ -96,7 +96,7 @@ to the defaults listed in `src/config.c` when omitted.
 
 ## External OSD Control
 
-The application supports an external OSD control feed that allows third-party tools to push text, numeric values, zoom commands, and `waybeam_osd`-style `asset_updates` visibility toggles over UDP.
+The application supports an external OSD control feed that allows third-party tools to push text, numeric values, zoom commands, DRM gamma commands, and `waybeam_osd`-style `asset_updates` visibility toggles over UDP.
 
 *   **Default Port:** 5005
 *   **Protocol:** JSON over UDP
@@ -211,12 +211,13 @@ arriving on a different SSRC (or with a large sequence gap) is ignored entirely 
 | `udp.bitrate.avg_mbps` | Exponentially weighted moving average of the instantaneous video bitrate. |
 | `udp.jitter.latest_ms` | RFC 3550 style inter-arrival jitter derived from the video timestamps. |
 | `udp.jitter.avg_ms` | EWMA of the video jitter metric to smooth short-term spikes. |
-| `udp.frame.count` | Number of completed video frames detected via RTP marker bits. |
-| `udp.frame.incomplete` | Frames that ended with missing video packets. |
-| `udp.frame.last_kib` | Size of the most recent completed video frame (KiB). |
-| `udp.frame.avg_kib` | EWMA of recent video frame sizes (KiB). |
-| `udp.sequence.expected` | The next video sequence number the receiver is waiting for. |
-| `udp.timestamp.last_video` | RTP timestamp from the most recent video packet. |
+| `udp.fps.avg` | EWMA of completed-frame cadence, exposed as averaged frames per second. |
+| `udp.frames.count` | Number of completed video frames detected via RTP marker bits. |
+| `udp.frames.incomplete` | Frames that ended with missing video packets. |
+| `udp.frames.last_bytes` | Size of the most recent completed video frame (KiB, despite the historical token name). |
+| `udp.frames.avg_bytes` | EWMA of recent video frame sizes (KiB, despite the historical token name). |
+| `udp.expected_sequence` | The next video sequence number the receiver is waiting for. |
+| `udp.last_video_timestamp` | RTP timestamp from the most recent video packet. |
 | `udp.idr_requests` | Total HTTP IDR requests issued while attempting to recover corrupted streams. |
 
 The history buffer exposed through `udp.history.*` tokens retains the 512 most recent packet samples, including packet size,
@@ -244,7 +245,7 @@ data: {"have_stats":true,"total_packets":1234,"video_packets":1234,
        "audio_packets":0,"ignored_packets":0,"duplicate_packets":0,
        "lost_packets":2,"reordered_packets":1,"total_mbytes":9.42,
        "video_mbytes":9.42,"audio_mbytes":0.00,"frame_count":45,
-       "incomplete_frames":0,"last_frame_kib":112.5,"avg_frame_kib":108.3,
+       "incomplete_frames":0,"last_frame_kib":112.5,"avg_frame_kib":108.3,"fps_avg":59.82,
        "bitrate_mbps":12.340,"bitrate_avg_mbps":10.876,"jitter_ms":3.25,
        "jitter_avg_ms":2.97,"expected_sequence":54321,
        "idr_requests":7,"recording_enabled":true,

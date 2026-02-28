@@ -17,6 +17,7 @@ The payload is a JSON object. All fields are optional, but at least one should b
   "texts": ["string1", "string2", ...],
   "values": [1.23, 4.56, ...],
   "zoom": "200,200,50,50",
+  "gamma": "0.85,0.0,1.0,1.0,1.0,1.0",
   "asset_updates": [{"id": 0, "enabled": false}],
   "ttl_ms": 1000
 }
@@ -29,6 +30,7 @@ The payload is a JSON object. All fields are optional, but at least one should b
 | `texts` | Array of Strings | Updates the text slots. Max 8 items. Strings are mapped to slots 0-7 by index. |
 | `values` | Array of Numbers | Updates the value slots. Max 8 items. Values are mapped to slots 0-7 by index. |
 | `zoom` | String | Sets the zoom level and center point. See "Zoom Control" below. |
+| `gamma` | String | Sets DRM gamma LUT parameters. See "Gamma Control" below. |
 | `ttl_ms` | Integer | Time-to-live in milliseconds. If present, the updated slots will expire and clear after this duration. If omitted, updates are persistent until overwritten or cleared. |
 | `asset_updates` | Array of Objects | Optional compatibility field matching `waybeam_osd`. Each object supports `id` (0-7) and `enabled` (boolean) to show/hide a configured OSD element by configured asset `id`. |
 
@@ -59,6 +61,22 @@ Zoom can be controlled by sending a string in the `zoom` field.
 }
 ```
 This sets 2x zoom centered on the middle of the screen.
+
+
+## Gamma Control
+
+Gamma can be controlled by sending a string in the `gamma` field.
+
+*   **Command Format:** `GAMMA,LIFT,GAIN,R,G,B` (or `gamma=GAMMA,LIFT,GAIN,R,G,B`)
+    *   Valid ranges: `GAMMA` 0.20–5.00, `LIFT` -0.50–0.50, `GAIN` 0.50–1.50, `R/G/B` 0.50–1.50.
+*   **Disable Gamma Override:** `off` (or `gamma=off`). This restores a neutral LUT.
+
+**Example:**
+```json
+{
+  "gamma": "0.85,0.0,1.0,1.0,1.0,1.0"
+}
+```
 
 ## Examples
 

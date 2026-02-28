@@ -856,6 +856,10 @@ static int osd_token_format(const OsdRenderContext *ctx, const char *token, char
         snprintf(buf, buf_sz, "%.2f", kb);
         return 0;
     }
+    if (strcmp(key, "udp.fps.avg") == 0) {
+        snprintf(buf, buf_sz, "%.2f", ctx->stats.fps_avg);
+        return 0;
+    }
     if (strcmp(key, "udp.expected_sequence") == 0) {
         snprintf(buf, buf_sz, "%u", ctx->stats.expected_sequence);
         return 0;
@@ -922,6 +926,10 @@ static int osd_metric_sample(const OsdRenderContext *ctx, const char *key, doubl
     }
     if (metric && strcmp(metric, "udp.frames.count") == 0) {
         *out_value = (double)ctx->stats.frame_count;
+        return 1;
+    }
+    if (metric && strcmp(metric, "udp.fps.avg") == 0) {
+        *out_value = ctx->stats.fps_avg;
         return 1;
     }
     if (metric && strcmp(metric, "udp.idr_requests") == 0) {

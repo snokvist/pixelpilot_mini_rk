@@ -26,6 +26,19 @@ typedef struct {
     guint32 h;
 } VideoDecoderZoomRect;
 
+#define VIDEO_GAMMA_UPDATE_PARAMS (1u << 0)
+
+typedef struct VideoGammaUpdate {
+    uint32_t fields;
+    gboolean enabled;
+    double gamma;
+    double lift;
+    double gain;
+    double r;
+    double g;
+    double b;
+} VideoGammaUpdate;
+
 VideoDecoder *video_decoder_new(void);
 void video_decoder_free(VideoDecoder *vd);
 
@@ -44,6 +57,7 @@ int video_decoder_set_zoom(VideoDecoder *vd, gboolean enabled, const VideoDecode
 
 size_t video_decoder_max_packet_size(const VideoDecoder *vd);
 void video_decoder_apply_ctm_update(VideoDecoder *vd, const VideoCtmUpdate *update);
+void video_decoder_apply_gamma_update(VideoDecoder *vd, const VideoGammaUpdate *update);
 void video_decoder_get_ctm_metrics(const VideoDecoder *vd, VideoCtmMetrics *metrics);
 uint32_t video_decoder_get_plane_id(const VideoDecoder *vd);
 

@@ -32,6 +32,8 @@ typedef struct {
     uint64_t expiry_ns;
     uint64_t zoom_expiry_ns;
     char zoom_command[OSD_EXTERNAL_TEXT_LEN];
+    uint64_t gamma_expiry_ns;
+    char gamma_command[OSD_EXTERNAL_TEXT_LEN];
     uint8_t asset_enabled[OSD_EXTERNAL_MAX_ASSETS];
     uint8_t asset_active_mask;
     OsdExternalStatus status;
@@ -56,6 +58,7 @@ typedef struct {
     OsdExternalFeedSnapshot snapshot;
     uint64_t expiry_ns;
     uint64_t zoom_expiry_ns;
+    uint64_t gamma_expiry_ns;
     uint8_t asset_active_mask;
     uint8_t asset_enabled[OSD_EXTERNAL_MAX_ASSETS];
     uint64_t asset_expiry_ns[OSD_EXTERNAL_MAX_ASSETS];

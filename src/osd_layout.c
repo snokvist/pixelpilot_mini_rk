@@ -54,7 +54,7 @@ void osd_layout_defaults(OsdLayout *layout) {
         "Record {record.state} active={record.active} dur={record.duration_hms} bytes={record.megabytes}MiB",
         "Pipeline: {pipeline.state} restarts={pipeline.restart_count}{pipeline.audio_suffix}",
         "RTP vpkts={udp.video_packets} net-loss={udp.lost_packets} reo={udp.reordered_packets} dup={udp.duplicate_packets} jitter={udp.jitter.latest_ms}/{udp.jitter.avg_ms}ms",
-        "Frames={udp.frames.count} incomplete={udp.frames.incomplete} last={udp.frames.last_bytes}KB avg={udp.frames.avg_bytes}KB seq={udp.expected_sequence}"
+        "Frames={udp.frames.count} fps={udp.fps.avg} incomplete={udp.frames.incomplete} last={udp.frames.last_bytes}KB avg={udp.frames.avg_bytes}KB seq={udp.expected_sequence}"
     };
     for (size_t i = 0; i < sizeof(default_lines) / sizeof(default_lines[0]) && i < OSD_MAX_TEXT_LINES; ++i) {
         strncpy(text->data.text.lines[text->data.text.line_count].raw, default_lines[i],

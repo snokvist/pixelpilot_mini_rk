@@ -69,6 +69,19 @@ KEY_MENU_TOGGLE = -1002
 SSE_SOURCES = ("serial", "joystick")
 DEFAULT_EXTRA_DESTINATION = "10.6.0.50:7777"
 
+GAMMA_DEFAULT = 1.0
+GAMMA_LIFT_DEFAULT = 0.0
+GAMMA_GAIN_DEFAULT = 1.0
+GAMMA_CHANNEL_DEFAULT = 1.0
+GAMMA_MIN = 0.20
+GAMMA_MAX = 5.00
+GAMMA_LIFT_MIN = -0.50
+GAMMA_LIFT_MAX = 0.50
+GAMMA_GAIN_MIN = 0.50
+GAMMA_GAIN_MAX = 1.50
+GAMMA_CHANNEL_MIN = 0.50
+GAMMA_CHANNEL_MAX = 1.50
+
 
 @dataclass(frozen=True)
 class UdpDestination:
@@ -618,6 +631,68 @@ def current_zoom_command(zoom_enabled: bool, zoom_percent: int) -> str:
     return f"{zoom_percent},{zoom_percent},50,50"
 
 
+def _format_gamma_value(value: float) -> str:
+    return f"{value:.2f}"
+
+
+def current_gamma_command(
+    gamma_enabled: bool,
+    gamma_value: float,
+    gamma_lift: float,
+    gamma_gain: float,
+    gamma_r: float,
+    gamma_g: float,
+    gamma_b: float,
+) -> str:
+    if not gamma_enabled:
+        return "off"
+    values = (
+        gamma_value,
+        gamma_lift,
+        gamma_gain,
+        gamma_r,
+        gamma_g,
+        gamma_b,
+    )
+    return ",".join(_format_gamma_value(value) for value in values)
+
+
+def parse_gamma_command(command: str) -> Tuple[bool, Optional[Tuple[float, float, float, float, float, float]]]:
+    value = command.strip()
+    if not value:
+        return False, None
+
+    lowered = value.lower()
+    if lowered in ("off", "gamma=off"):
+        return False, None
+    if lowered.startswith("gamma="):
+        value = value[6:]
+
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 6 or any(part == "" for part in parts):
+        raise ValueError("expected gamma command as GAMMA,LIFT,GAIN,R,G,B")
+
+    try:
+        gamma_value, gamma_lift, gamma_gain, gamma_r, gamma_g, gamma_b = (float(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError("gamma command contains non-numeric values") from exc
+
+    if not (GAMMA_MIN <= gamma_value <= GAMMA_MAX):
+        raise ValueError(f"gamma must be between {GAMMA_MIN:.2f} and {GAMMA_MAX:.2f}")
+    if not (GAMMA_LIFT_MIN <= gamma_lift <= GAMMA_LIFT_MAX):
+        raise ValueError(f"lift must be between {GAMMA_LIFT_MIN:.2f} and {GAMMA_LIFT_MAX:.2f}")
+    if not (GAMMA_GAIN_MIN <= gamma_gain <= GAMMA_GAIN_MAX):
+        raise ValueError(f"gain must be between {GAMMA_GAIN_MIN:.2f} and {GAMMA_GAIN_MAX:.2f}")
+    if not (GAMMA_CHANNEL_MIN <= gamma_r <= GAMMA_CHANNEL_MAX):
+        raise ValueError(f"R must be between {GAMMA_CHANNEL_MIN:.2f} and {GAMMA_CHANNEL_MAX:.2f}")
+    if not (GAMMA_CHANNEL_MIN <= gamma_g <= GAMMA_CHANNEL_MAX):
+        raise ValueError(f"G must be between {GAMMA_CHANNEL_MIN:.2f} and {GAMMA_CHANNEL_MAX:.2f}")
+    if not (GAMMA_CHANNEL_MIN <= gamma_b <= GAMMA_CHANNEL_MAX):
+        raise ValueError(f"B must be between {GAMMA_CHANNEL_MIN:.2f} and {GAMMA_CHANNEL_MAX:.2f}")
+
+    return True, (gamma_value, gamma_lift, gamma_gain, gamma_r, gamma_g, gamma_b)
+
+
 def build_payload(menu_window: Tuple[str, str, str], zoom_enabled: bool, zoom_percent: int) -> dict:
     texts: List[Optional[str]] = [None] * MAX_OSD_SLOTS
     texts[MENU_TEXT_SLOT_START + 0] = clamp_text(menu_window[0])
@@ -1145,6 +1220,13 @@ def build_webui_state(
     asset_enabled: Sequence[Optional[bool]],
     zoom_enabled: bool,
     zoom_percent: int,
+    gamma_enabled: bool,
+    gamma_value: float,
+    gamma_lift: float,
+    gamma_gain: float,
+    gamma_r: float,
+    gamma_g: float,
+    gamma_b: float,
     destinations: Sequence[UdpDestination],
     source_states: Mapping[str, SourceInputState],
     active_source: Optional[str],
@@ -1188,6 +1270,24 @@ def build_webui_state(
         "status": status,
         "asset_enabled": list(asset_enabled),
         "zoom": current_zoom_command(zoom_enabled, zoom_percent),
+        "gamma": current_gamma_command(
+            gamma_enabled,
+            gamma_value,
+            gamma_lift,
+            gamma_gain,
+            gamma_r,
+            gamma_g,
+            gamma_b,
+        ),
+        "gamma_control": {
+            "enabled": gamma_enabled,
+            "gamma": gamma_value,
+            "lift": gamma_lift,
+            "gain": gamma_gain,
+            "r": gamma_r,
+            "g": gamma_g,
+            "b": gamma_b,
+        },
         "destinations": [{"host": destination.host, "port": destination.port} for destination in destinations],
         "asset_update_tx": {
             "count": asset_update_tx_count,
@@ -1246,7 +1346,9 @@ def run_controller(
     STOP_REQUESTED = False
 
     prev_sigint = signal.getsignal(signal.SIGINT)
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGINT, _on_sigint)
+    signal.signal(signal.SIGTERM, _on_sigint)
 
     def emit_status(message: str) -> None:
         print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
@@ -1264,6 +1366,13 @@ def run_controller(
 
         zoom_enabled = False
         zoom_percent = 100
+        gamma_enabled = False
+        gamma_value = GAMMA_DEFAULT
+        gamma_lift = GAMMA_LIFT_DEFAULT
+        gamma_gain = GAMMA_GAIN_DEFAULT
+        gamma_r = GAMMA_CHANNEL_DEFAULT
+        gamma_g = GAMMA_CHANNEL_DEFAULT
+        gamma_b = GAMMA_CHANNEL_DEFAULT
         top_entries = build_top_entries(action_sections)
         submenu_table = build_submenu_table(action_sections, actions_by_section)
         fallback_entries = [MenuEntry(kind="return")]
@@ -1282,9 +1391,11 @@ def run_controller(
         manual_text_overrides: List[Optional[str]] = [None] * MAX_OSD_SLOTS
         manual_value_overrides: List[Optional[float]] = [None] * MAX_OSD_SLOTS
         manual_asset_updates: List[dict] = []
+        manual_gamma_command = ""
         manual_text_overrides_pending = False
         manual_value_overrides_pending = False
         manual_asset_updates_pending = False
+        manual_gamma_pending = False
         asset_update_tx_count = 0
         asset_update_tx_last_monotonic = 0.0
         asset_update_tx_last_batch_size = 0
@@ -1430,6 +1541,36 @@ def run_controller(
                             elif manual_asset_updates_pending:
                                 manual_asset_updates_pending = False
 
+                        gamma_command = message.get("gamma")
+                        if isinstance(gamma_command, str):
+                            try:
+                                parsed_gamma_enabled, parsed_gamma_values = parse_gamma_command(gamma_command)
+                            except ValueError as exc:
+                                status = f"Ignored invalid gamma command: {exc}"
+                            else:
+                                gamma_enabled = parsed_gamma_enabled
+                                if parsed_gamma_values is not None:
+                                    (
+                                        gamma_value,
+                                        gamma_lift,
+                                        gamma_gain,
+                                        gamma_r,
+                                        gamma_g,
+                                        gamma_b,
+                                    ) = parsed_gamma_values
+                                manual_gamma_command = current_gamma_command(
+                                    gamma_enabled,
+                                    gamma_value,
+                                    gamma_lift,
+                                    gamma_gain,
+                                    gamma_r,
+                                    gamma_g,
+                                    gamma_b,
+                                )
+                                manual_gamma_pending = True
+                                last_menu_activity_monotonic = time.monotonic()
+                                dirty = True
+
                         if isinstance(message.get("destinations"), list):
                             destination_payload = message["destinations"]
                             requested_destinations = [
@@ -1535,6 +1676,13 @@ def run_controller(
                             asset_enabled,
                             zoom_enabled,
                             zoom_percent,
+                            gamma_enabled,
+                            gamma_value,
+                            gamma_lift,
+                            gamma_gain,
+                            gamma_r,
+                            gamma_g,
+                            gamma_b,
                             destinations,
                             source_states,
                             active_source,
@@ -1553,6 +1701,7 @@ def run_controller(
                         applied_value_overrides = False
                         applied_state_asset_updates = False
                         applied_asset_updates = False
+                        applied_gamma = False
 
                         if pending_asset_updates:
                             payload["asset_updates"] = [
@@ -1588,6 +1737,10 @@ def run_controller(
                             payload["asset_updates"] = merged_updates
                             applied_asset_updates = True
 
+                        if manual_gamma_pending and manual_gamma_command:
+                            payload["gamma"] = manual_gamma_command
+                            applied_gamma = True
+
                         failures = send_payloads(sock, destinations, payload)
                         last_send_monotonic = now
                         if failures:
@@ -1606,6 +1759,8 @@ def run_controller(
                                 pending_asset_updates.clear()
                             if applied_asset_updates:
                                 manual_asset_updates_pending = False
+                            if applied_gamma:
+                                manual_gamma_pending = False
                             dirty = False
 
                     if status != last_logged_status:
@@ -1732,6 +1887,7 @@ def run_controller(
         return 0
     finally:
         signal.signal(signal.SIGINT, prev_sigint)
+        signal.signal(signal.SIGTERM, prev_sigterm)
 
 
 _CONFIG_DEFAULTS: Dict[str, object] = {

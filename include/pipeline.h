@@ -71,6 +71,7 @@ int pipeline_get_ctm_metrics(const PipelineState *ps, VideoCtmMetrics *metrics);
 gboolean pipeline_consume_reinit_request(PipelineState *ps);
 void pipeline_apply_zoom_command(PipelineState *ps, gboolean enabled, const VideoDecoderZoomRequest *request);
 void pipeline_apply_ctm_update(PipelineState *ps, const VideoCtmUpdate *update);
+void pipeline_apply_gamma_update(PipelineState *ps, const VideoGammaUpdate *update);
 void pipeline_get_video_chain_handles(const PipelineState *ps,
                                       GstElement **depay_out,
                                       GstElement **parser_out,
