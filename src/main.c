@@ -223,7 +223,7 @@ static gboolean parse_gamma_command(const char *cmd, VideoGammaUpdate *out_updat
     if (!ok || idx != 6) {
         return FALSE;
     }
-    if (values[0] < 0.20 || values[0] > 5.00 || values[1] < -0.50 || values[1] > 0.50 || values[2] < 0.50 || values[2] > 1.50 ||
+    if (values[0] < 0.20 || values[0] > 5.00 || values[1] < -0.50 || values[1] > 0.50 || values[2] < 0.50 || values[2] > 3.00 ||
         values[3] < 0.50 || values[3] > 1.50 || values[4] < 0.50 || values[4] > 1.50 || values[5] < 0.50 || values[5] > 1.50) {
         return FALSE;
     }

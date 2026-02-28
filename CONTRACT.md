@@ -68,7 +68,7 @@ This sets 2x zoom centered on the middle of the screen.
 Gamma can be controlled by sending a string in the `gamma` field.
 
 *   **Command Format:** `GAMMA,LIFT,GAIN,R,G,B` (or `gamma=GAMMA,LIFT,GAIN,R,G,B`)
-    *   Valid ranges: `GAMMA` 0.20–5.00, `LIFT` -0.50–0.50, `GAIN` 0.50–1.50, `R/G/B` 0.50–1.50.
+    *   Valid ranges: `GAMMA` 0.20–5.00, `LIFT` -0.50–0.50, `GAIN` 0.50–3.00, `R/G/B` 0.50–1.50.
 *   **Disable Gamma Override:** `off` (or `gamma=off`). This restores a neutral LUT.
 
 **Example:**
