@@ -40,6 +40,7 @@ All settings are read from a JSON config file. The only CLI argument is `--confi
 | `host` | string | `"127.0.0.1"` | PixelPilot external OSD host |
 | `port` | int | `5005` | External OSD UDP port |
 | `interval_ms` | int | `400` | OSD payload re-send interval (ms) |
+| `asset_folder` | string | `"/etc/waybeam_hub"` | Directory containing bundled assets such as `index.html` and fallback `menu.ini`. Relative paths are resolved from the JSON config file location. |
 | `extra_destinations` | array | `["10.6.0.50:7777"]` | Additional `"host:port"` UDP targets |
 | `initial_off` | array | `[]` | Asset IDs to start disabled (e.g. `[2, 5, 7]`) |
 | `menu_asset_id` | int | `7` | Asset ID of the menu widget (force-disabled on exit) |
@@ -81,6 +82,7 @@ The optional `tuning` object exposes internal constants for fine-tuning radio/jo
   "host": "127.0.0.1",
   "port": 5005,
   "interval_ms": 400,
+  "asset_folder": "/etc/waybeam_hub",
   "initial_off": [],
   "zoom_step": 25,
   "zoom_max": 300,
@@ -106,6 +108,23 @@ The optional `tuning` object exposes internal constants for fine-tuning radio/jo
 ```
 
 Only include the keys you want to override — missing keys use their defaults.
+
+When `actions_ini` is left empty, Waybeam Hub looks for `menu.ini` inside `asset_folder`. The WebUI also serves `index.html` from the same directory. The default deployment layout now assumes:
+
+```text
+/usr/bin/waybeam_hub.py
+/etc/waybeam_hub/config.json
+/etc/waybeam_hub/index.html
+/etc/waybeam_hub/menu.ini
+```
+
+You can still install the assets elsewhere by setting:
+
+```json
+{
+  "asset_folder": "/usr/share/waybeam_hub"
+}
+```
 
 ## Menu INI format
 

@@ -1325,6 +1325,7 @@ def run_controller(
     host: str,
     port: int,
     interval_ms: int,
+    asset_folder: str,
     initial_off: Set[int],
     zoom_step: int,
     zoom_max: int,
@@ -1413,7 +1414,7 @@ def run_controller(
         }
         active_source: Optional[str] = None
 
-        ui_html_path = os.path.join(os.path.dirname(__file__), "index.html")
+        ui_html_path = os.path.join(asset_folder, "index.html")
         webui_bridge = WebUiBridge(webui_host, webui_port, ui_html_path)
 
         sse_events: "queue.Queue[dict]" = queue.Queue(maxsize=1024)
@@ -1894,6 +1895,7 @@ _CONFIG_DEFAULTS: Dict[str, object] = {
     "host": "127.0.0.1",
     "port": 5005,
     "interval_ms": 400,
+    "asset_folder": "",
     "initial_off": [],
     "zoom_step": 25,
     "zoom_max": 300,
@@ -2019,6 +2021,17 @@ def load_config(path: str) -> dict:
     return cfg
 
 
+def resolve_asset_folder(config_path: str, configured_asset_folder: object) -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    asset_folder = str(configured_asset_folder or "").strip()
+    if not asset_folder:
+        return script_dir
+    if os.path.isabs(asset_folder):
+        return asset_folder
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    return os.path.abspath(os.path.join(config_dir, asset_folder))
+
+
 def apply_tuning(tuning: dict) -> None:
     """Override module-level tuning constants from the config's tuning section."""
     global CRSF_AXIS_DEADBAND, CRSF_ACTION_THRESHOLD
@@ -2060,10 +2073,11 @@ def main() -> int:
 
     cfg = load_config(args.config)
     apply_tuning(cfg["tuning"])
+    asset_folder = resolve_asset_folder(args.config, cfg["asset_folder"])
 
     actions_ini_path = str(cfg["actions_ini"]).strip()
     if not actions_ini_path:
-        bundled_actions_ini = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menu.ini")
+        bundled_actions_ini = os.path.join(asset_folder, "menu.ini")
         if os.path.isfile(bundled_actions_ini):
             actions_ini_path = bundled_actions_ini
 
@@ -2082,6 +2096,7 @@ def main() -> int:
         str(cfg["host"]),
         cfg["port"],
         cfg["interval_ms"],
+        asset_folder,
         cfg["initial_off"],
         cfg["zoom_step"],
         cfg["zoom_max"],

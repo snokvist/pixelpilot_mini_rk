@@ -2,6 +2,7 @@
   "host": "127.0.0.1",
   "port": 5005,
   "interval_ms": 400,
+  "asset_folder": "/etc/waybeam_hub",
   "initial_off": [],
   "zoom_step": 25,
   "zoom_max": 300,

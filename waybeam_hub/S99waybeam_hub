@@ -3,7 +3,7 @@
 
 PYTHON="/usr/bin/python3"
 SCRIPT="/usr/bin/waybeam_hub.py"
-SCRIPT_ARGS="--config /etc/waybeam_hub.json"
+SCRIPT_ARGS="--config /etc/waybeam_hub/config.json"
 NAME="$(basename "$SCRIPT")"
 
 get_pids() {
