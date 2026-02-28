@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import copy
 import json
 import os
 import queue
@@ -1733,87 +1734,180 @@ def run_controller(
         signal.signal(signal.SIGINT, prev_sigint)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=(
-            "SSE-driven remote menu that sends PixelPilot external OSD texts + "
-            "asset updates over UDP and serves an HTTP JSON WebUI endpoint"
-        )
-    )
-    parser.add_argument("--host", default="127.0.0.1", help="Target host running pixelpilot_mini_rk")
-    parser.add_argument("--port", type=int, default=5005, help="External OSD UDP port (default: 5005)")
-    parser.add_argument("--interval-ms", type=int, default=400, help="Re-send interval in milliseconds (default: 400)")
-    parser.add_argument("--initial-off", default="", help="Comma-separated asset ids to start OFF (example: '2,5,7')")
-    parser.add_argument("--zoom-step", type=int, default=25, help="Zoom percentage step (default: 25)")
-    parser.add_argument("--zoom-max", type=int, default=300, help="Maximum zoom percentage (default: 300)")
-    parser.add_argument(
-        "--actions-ini",
-        default="",
-        help="Optional INI file of local command actions (defaults to menu.ini beside this script when present)",
-    )
-    parser.add_argument("--action-timeout-ms", type=int, default=5000, help="Action command timeout in ms (default: 5000)")
-    parser.add_argument("--action-shell", default="", help="Shell executable for actions (default: $SHELL, fallback /bin/sh)")
-    parser.add_argument("--menu-asset-id", type=int, default=7, help="Asset id of menu widget to force-disable on exit (default: 7)")
+_CONFIG_DEFAULTS: Dict[str, object] = {
+    "host": "127.0.0.1",
+    "port": 5005,
+    "interval_ms": 400,
+    "initial_off": [],
+    "zoom_step": 25,
+    "zoom_max": 300,
+    "actions_ini": "",
+    "action_timeout_ms": 5000,
+    "action_shell": "",
+    "menu_asset_id": 7,
+    "webui_host": "0.0.0.0",
+    "webui_port": 8060,
+    "sse_url": "http://127.0.0.1:8070/sse",
+    "priority": "serial",
+    "priority_fallback_s": 5.0,
+    "extra_destinations": ["10.6.0.50:7777"],
+    "verbose": False,
+}
 
-    parser.add_argument("--webui-host", default="0.0.0.0", help="WebUI bind host (default: 0.0.0.0)")
-    parser.add_argument("--webui-port", type=int, default=8060, help="WebUI HTTP bind port (default: 8060)")
+_TUNING_DEFAULTS: Dict[str, object] = {
+    "crsf_axis_deadband": 120,
+    "crsf_action_threshold": 1400,
+    "crsf_menu_toggle_ch_low_max": 500,
+    "crsf_menu_toggle_ch4_min": 1500,
+    "crsf_nav_debounce_ms": 100,
+    "crsf_select_debounce_ms": 250,
+    "crsf_menu_toggle_hold_s": 1.0,
+    "crsf_sample_interval_ms": 40,
+    "radio_trigger_debounce_ms": 100,
+    "radio_reset_debounce_ms": 0,
+    "menu_inactivity_timeout_s": 30.0,
+    "source_stale_s": 1.0,
+}
 
-    parser.add_argument("--sse-url", default="http://127.0.0.1:8070/sse", help="SSE endpoint URL")
-    parser.add_argument(
-        "--priority",
-        choices=["serial", "joystick"],
-        default="serial",
-        help="Preferred SSE control source when both are active (default: serial)",
-    )
-    parser.add_argument(
-        "--priority-fallback-s",
-        type=float,
-        default=5.0,
-        help="Use non-priority source only if priority is silent for this many seconds (default: 5.0)",
-    )
 
-    parser.add_argument(
-        "--extra-destination",
-        action="append",
-        default=None,
-        help=(
-            "Additional UDP destination as host:port. Repeat to add multiple. "
-            f"If omitted, defaults to {DEFAULT_EXTRA_DESTINATION}."
-        ),
-    )
+def load_config(path: str) -> dict:
+    """Read *path* as JSON and return a validated config dict with defaults applied."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except FileNotFoundError:
+        raise SystemExit(f"config file not found: {path}")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"config JSON parse error in {path}: {exc}")
 
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose SSE/debug logs")
-    return parser.parse_args()
+    if not isinstance(raw, dict):
+        raise SystemExit(f"config file must contain a JSON object, got {type(raw).__name__}")
+
+    cfg: dict = {}
+    for key, default in _CONFIG_DEFAULTS.items():
+        cfg[key] = raw.get(key, copy.deepcopy(default))
+
+    tuning_raw = raw.get("tuning", {})
+    if not isinstance(tuning_raw, dict):
+        raise SystemExit("'tuning' must be a JSON object")
+    tuning: dict = {}
+    for key, default in _TUNING_DEFAULTS.items():
+        tuning[key] = tuning_raw.get(key, default)
+    cfg["tuning"] = tuning
+
+    # --- type coercion and validation ---
+    cfg["port"] = int(cfg["port"])
+    if cfg["port"] <= 0 or cfg["port"] > 65535:
+        raise SystemExit("'port' must be in range 1..65535")
+
+    cfg["interval_ms"] = int(cfg["interval_ms"])
+    if cfg["interval_ms"] <= 0:
+        raise SystemExit("'interval_ms' must be > 0")
+
+    cfg["zoom_step"] = int(cfg["zoom_step"])
+    if cfg["zoom_step"] <= 0:
+        raise SystemExit("'zoom_step' must be > 0")
+
+    cfg["zoom_max"] = int(cfg["zoom_max"])
+    if cfg["zoom_max"] < 100:
+        raise SystemExit("'zoom_max' must be >= 100")
+
+    cfg["action_timeout_ms"] = int(cfg["action_timeout_ms"])
+    if cfg["action_timeout_ms"] <= 0:
+        raise SystemExit("'action_timeout_ms' must be > 0")
+
+    cfg["menu_asset_id"] = int(cfg["menu_asset_id"])
+    if cfg["menu_asset_id"] < 0 or cfg["menu_asset_id"] >= ASSET_COUNT:
+        raise SystemExit(f"'menu_asset_id' must be in range 0..{ASSET_COUNT - 1}")
+
+    cfg["webui_port"] = int(cfg["webui_port"])
+    if cfg["webui_port"] <= 0 or cfg["webui_port"] > 65535:
+        raise SystemExit("'webui_port' must be in range 1..65535")
+
+    cfg["priority_fallback_s"] = float(cfg["priority_fallback_s"])
+    if cfg["priority_fallback_s"] <= 0:
+        raise SystemExit("'priority_fallback_s' must be > 0")
+
+    if cfg["priority"] not in ("serial", "joystick"):
+        raise SystemExit("'priority' must be 'serial' or 'joystick'")
+
+    cfg["verbose"] = bool(cfg["verbose"])
+
+    # initial_off: accept JSON array of ints
+    initial_off_raw = cfg["initial_off"]
+    if isinstance(initial_off_raw, str):
+        try:
+            cfg["initial_off"] = parse_asset_id_list(initial_off_raw)
+        except ValueError as exc:
+            raise SystemExit(f"'initial_off' parse error: {exc}") from exc
+    elif isinstance(initial_off_raw, list):
+        parsed_off: Set[int] = set()
+        for item in initial_off_raw:
+            aid = int(item)
+            if aid < 0 or aid >= ASSET_COUNT:
+                raise SystemExit(f"'initial_off' asset id {aid} out of range (0..{ASSET_COUNT - 1})")
+            parsed_off.add(aid)
+        cfg["initial_off"] = parsed_off
+    else:
+        raise SystemExit("'initial_off' must be an array of asset ids")
+
+    # extra_destinations: accept JSON array of "host:port" strings
+    extra_raw = cfg["extra_destinations"]
+    if not isinstance(extra_raw, list):
+        raise SystemExit("'extra_destinations' must be an array of 'host:port' strings")
+    try:
+        cfg["extra_destinations"] = [parse_destination_spec(spec) for spec in extra_raw if str(spec).strip()]
+    except ValueError as exc:
+        raise SystemExit(f"'extra_destinations' parse error: {exc}") from exc
+
+    return cfg
+
+
+def apply_tuning(tuning: dict) -> None:
+    """Override module-level tuning constants from the config's tuning section."""
+    global CRSF_AXIS_DEADBAND, CRSF_ACTION_THRESHOLD
+    global CRSF_MENU_TOGGLE_CH_LOW_MAX, CRSF_MENU_TOGGLE_CH4_MIN
+    global CRSF_NAV_DEBOUNCE_MS, CRSF_SELECT_DEBOUNCE_MS
+    global CRSF_MENU_TOGGLE_HOLD_S, CRSF_SAMPLE_INTERVAL_MS
+    global RADIO_TRIGGER_DEBOUNCE_MS, RADIO_RESET_DEBOUNCE_MS
+    global MENU_INACTIVITY_TIMEOUT_S, SOURCE_STALE_S
+
+    CRSF_AXIS_DEADBAND = int(tuning["crsf_axis_deadband"])
+    CRSF_ACTION_THRESHOLD = int(tuning["crsf_action_threshold"])
+    CRSF_MENU_TOGGLE_CH_LOW_MAX = int(tuning["crsf_menu_toggle_ch_low_max"])
+    CRSF_MENU_TOGGLE_CH4_MIN = int(tuning["crsf_menu_toggle_ch4_min"])
+    CRSF_NAV_DEBOUNCE_MS = int(tuning["crsf_nav_debounce_ms"])
+    CRSF_SELECT_DEBOUNCE_MS = int(tuning["crsf_select_debounce_ms"])
+    CRSF_MENU_TOGGLE_HOLD_S = float(tuning["crsf_menu_toggle_hold_s"])
+    CRSF_SAMPLE_INTERVAL_MS = int(tuning["crsf_sample_interval_ms"])
+    RADIO_TRIGGER_DEBOUNCE_MS = int(tuning["radio_trigger_debounce_ms"])
+    RADIO_RESET_DEBOUNCE_MS = int(tuning["radio_reset_debounce_ms"])
+    MENU_INACTIVITY_TIMEOUT_S = float(tuning["menu_inactivity_timeout_s"])
+    SOURCE_STALE_S = float(tuning["source_stale_s"])
 
 
 def main() -> int:
-    args = parse_args()
+    parser = argparse.ArgumentParser(
+        description=(
+            "SSE-driven remote menu that sends PixelPilot external OSD texts + "
+            "asset updates over UDP and serves an HTTP JSON WebUI endpoint. "
+            "All settings are read from a JSON config file."
+        )
+    )
+    default_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    parser.add_argument(
+        "--config",
+        default=default_config,
+        help=f"Path to JSON config file (default: {default_config})",
+    )
+    args = parser.parse_args()
 
-    if args.port <= 0 or args.port > 65535:
-        raise SystemExit("--port must be in range 1..65535")
-    if args.interval_ms <= 0:
-        raise SystemExit("--interval-ms must be > 0")
-    if args.zoom_step <= 0:
-        raise SystemExit("--zoom-step must be > 0")
-    if args.zoom_max < 100:
-        raise SystemExit("--zoom-max must be >= 100")
-    if args.action_timeout_ms <= 0:
-        raise SystemExit("--action-timeout-ms must be > 0")
-    if args.menu_asset_id < 0 or args.menu_asset_id >= ASSET_COUNT:
-        raise SystemExit(f"--menu-asset-id must be in range 0..{ASSET_COUNT - 1}")
-    if args.webui_port <= 0 or args.webui_port > 65535:
-        raise SystemExit("--webui-port must be in range 1..65535")
-    if args.priority_fallback_s <= 0:
-        raise SystemExit("--priority-fallback-s must be > 0")
+    cfg = load_config(args.config)
+    apply_tuning(cfg["tuning"])
 
-    try:
-        initial_off = parse_asset_id_list(args.initial_off)
-    except ValueError as exc:
-        raise SystemExit(f"--initial-off parse error: {exc}") from exc
-
-    actions_ini_path = args.actions_ini
+    actions_ini_path = str(cfg["actions_ini"]).strip()
     if not actions_ini_path:
-        bundled_actions_ini = os.path.join(os.path.dirname(__file__), "menu.ini")
+        bundled_actions_ini = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menu.ini")
         if os.path.isfile(bundled_actions_ini):
             actions_ini_path = bundled_actions_ini
 
@@ -1822,38 +1916,32 @@ def main() -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    extra_specs = [DEFAULT_EXTRA_DESTINATION] if args.extra_destination is None else args.extra_destination
-    try:
-        extra_destinations = [parse_destination_spec(spec) for spec in extra_specs if str(spec).strip()]
-    except ValueError as exc:
-        raise SystemExit(f"--extra-destination parse error: {exc}") from exc
-
-    action_shell = resolve_action_shell(args.action_shell)
+    action_shell = resolve_action_shell(str(cfg["action_shell"]))
     if not os.path.isfile(action_shell):
         raise SystemExit(f"action shell does not exist: {action_shell}")
     if not os.access(action_shell, os.X_OK):
         raise SystemExit(f"action shell is not executable: {action_shell}")
 
     return run_controller(
-        args.host,
-        args.port,
-        args.interval_ms,
-        initial_off,
-        args.zoom_step,
-        args.zoom_max,
+        str(cfg["host"]),
+        cfg["port"],
+        cfg["interval_ms"],
+        cfg["initial_off"],
+        cfg["zoom_step"],
+        cfg["zoom_max"],
         action_sections,
         actions_by_section,
         radio_rules,
-        args.action_timeout_ms,
+        cfg["action_timeout_ms"],
         action_shell,
-        args.menu_asset_id,
-        args.webui_host,
-        args.webui_port,
-        args.sse_url,
-        args.priority,
-        args.priority_fallback_s,
-        extra_destinations,
-        args.verbose,
+        cfg["menu_asset_id"],
+        str(cfg["webui_host"]),
+        cfg["webui_port"],
+        str(cfg["sse_url"]),
+        str(cfg["priority"]),
+        cfg["priority_fallback_s"],
+        cfg["extra_destinations"],
+        cfg["verbose"],
     )
 
 
