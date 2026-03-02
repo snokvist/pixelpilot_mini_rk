@@ -1,0 +1,18 @@
+# Makefile.hub — waybeam_hub C port
+#
+# Native:  make -f Makefile.hub
+# Cross:   make -f Makefile.hub CC=arm-openipc-linux-gnueabihf-gcc
+
+CC      ?= gcc
+CFLAGS  ?= -Os -Wall -Wextra -std=c11
+CFLAGS  += -ffunction-sections -fdata-sections -Wno-format-truncation
+LDFLAGS += -Wl,--gc-sections -s
+TARGET  := waybeam_hub
+
+$(TARGET): waybeam_hub.c
+	$(CC) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+clean:
+	rm -f $(TARGET)
+
+.PHONY: clean
