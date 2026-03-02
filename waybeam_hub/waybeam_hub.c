@@ -1204,6 +1204,8 @@ static int sse_handle_line(sse_client_t *sse, const char *line, app_state_t *app
     /* End of event — dispatch */
     if (sse->data_len > 0) {
       sse->data_buf[sse->data_len] = '\0';
+      LOGV(app, "SSE raw event=%s data=%.200s",
+           sse->event_name, sse->data_buf);
       /* Determine if this is a joystick/serial event */
       const char *event = sse->event_name;
       int channels[CRSF_DISPLAY_CHANNELS];
@@ -1263,6 +1265,13 @@ static int sse_handle_line(sse_client_t *sse, const char *line, app_state_t *app
         ss->last_update_mono = now;
         ss->link_up = 1;
 
+        LOGV(app, "SSE rx src=%s ch=[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]",
+             src == 0 ? "serial" : "joystick",
+             channels[0], channels[1], channels[2], channels[3],
+             channels[4], channels[5], channels[6], channels[7],
+             channels[8], channels[9], channels[10], channels[11],
+             channels[12], channels[13], channels[14], channels[15]);
+
         /* Update radio resets on every sample */
         if (app->radio_rule_count > 0) {
           radio_rule_state_t *rs = app->radio_states[src];
@@ -1291,6 +1300,8 @@ static int sse_handle_line(sse_client_t *sse, const char *line, app_state_t *app
         }
 
         app->dirty = 1;
+        sse->data_len = 0;
+        sse->event_name[0] = '\0';
         return 1;
       }
     }
@@ -1449,6 +1460,13 @@ static void poll_source_keys(app_state_t *app, int src_idx, int menu_visible, do
     s->channels[3] > t->crsf_menu_toggle_ch4_min
   );
   s->combo_active = combo_active;
+
+  LOGV(app, "Keys: ch1=%d<%d ch2=%d<%d ch3=%d<%d ch4=%d>%d combo=%d nav=%s sel=%d menu=%d",
+       s->channels[0], t->crsf_menu_toggle_ch_low_max,
+       s->channels[1], t->crsf_menu_toggle_ch_low_max,
+       s->channels[2], t->crsf_menu_toggle_ch_low_max,
+       s->channels[3], t->crsf_menu_toggle_ch4_min,
+       combo_active, nav_direction, select_active, menu_visible);
   if (combo_active) {
     if (s->combo_started_mono <= 0.0)
       s->combo_started_mono = now;
@@ -1614,6 +1632,11 @@ static void evaluate_radio_rules(app_state_t *app, int src_idx, double now) {
     int val = s->channels[rule->channel_index];
     int in_range = (val > rule->min_value && val < rule->max_value);
 
+    LOGV(app, "Radio[%d] %d<ch%d=%d<%d in_range=%d enter=%.1f latched=%d",
+         i, rule->min_value, rule->channel_index + 1, val, rule->max_value,
+         in_range, st->enter_started > 0 ? (now - st->enter_started) * 1000.0 : 0.0,
+         st->latched_in_range);
+
     if (!in_range) {
       st->enter_started = 0.0;
       if (st->latched_in_range) {
@@ -1644,6 +1667,10 @@ static void evaluate_radio_rules(app_state_t *app, int src_idx, double now) {
     st->latched_in_range = 1;
     st->enter_started = 0.0;
     st->trigger_count++;
+
+    LOGV(app, "Radio[%d] FIRED: %d<ch%d=%d<%d -> action[%d] cmd='%s'",
+         i, rule->min_value, rule->channel_index + 1, val, rule->max_value,
+         rule->action_index, app->actions[rule->action_index].command);
 
     char result[256];
     execute_action(&app->actions[rule->action_index], app->cfg.action_timeout_ms,
@@ -1706,6 +1733,7 @@ static void init_asset_state(app_state_t *app) {
 
 static void set_asset_enabled(app_state_t *app, int id, int enabled) {
   if (id < 0 || id >= ASSET_COUNT) return;
+  LOGV(app, "Asset %d: %d -> %d", id, app->asset_enabled[id], enabled);
   app->asset_enabled[id] = enabled;
   app->pending_asset_updates[id] = enabled;
 }
@@ -1953,9 +1981,9 @@ static int run_controller(app_state_t *app) {
       app->last_menu_activity_mono = now;
     }
 
-    /* Send OSD payload if dirty or interval elapsed */
+    /* Send OSD payload only when state actually changed */
     now = monotonic_s();
-    if (app->dirty || (now - app->last_send_mono) * 1000.0 >= app->cfg.interval_ms) {
+    if (app->dirty) {
       /* Re-get entries after possible state changes */
       get_current_entries(app, &entries, &entry_count);
       app->selected = clamp_i(app->selected, 0, entry_count > 0 ? entry_count - 1 : 0);
@@ -1965,6 +1993,7 @@ static int run_controller(app_state_t *app) {
 
       char payload[PAYLOAD_BUF];
       int plen = build_osd_payload(app, texts, payload, sizeof(payload));
+      LOGV(app, "OSD send (%d bytes): %.*s", plen, plen > 200 ? 200 : plen, payload);
       send_all_destinations(app, payload, plen);
 
       app->last_send_mono = now;
@@ -2125,10 +2154,13 @@ int main(int argc, char *argv[]) {
       config_path = argv[++i];
     } else if (strncmp(argv[i], "--config=", 9) == 0) {
       config_path = argv[i] + 9;
+    } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+      /* Handled after config load — just mark for now */
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-      fprintf(stderr, "Usage: %s [--config <path>]\n", argv[0]);
+      fprintf(stderr, "Usage: %s [--config <path>] [-v|--verbose]\n", argv[0]);
       fprintf(stderr, "  SSE-driven OSD menu controller (C port of waybeam_hub.py)\n");
       fprintf(stderr, "  Default config: config.json next to binary\n");
+      fprintf(stderr, "  -v, --verbose  Enable verbose logging (overrides config)\n");
       return 0;
     }
   }
@@ -2159,6 +2191,12 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
+  /* CLI -v overrides config verbose */
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0)
+      app.cfg.verbose = 1;
+  }
+
   resolve_action_shell(&app.cfg);
   resolve_actions_ini(&app);
 
@@ -2171,6 +2209,12 @@ int main(int argc, char *argv[]) {
        app.cfg.host, app.cfg.port, app.cfg.sse_url, app.cfg.priority);
   LOGI("Actions: %d actions in %d sections, %d radio rules",
        app.action_count, app.section_count, app.radio_rule_count);
+  for (int i = 0; i < app.radio_rule_count; i++) {
+    radio_rule_t *r = &app.radio_rules[i];
+    LOGV(&app, "  Radio[%d]: %d<ch%d<%d -> action[%d] '%s'",
+         i, r->min_value, r->channel_index + 1, r->max_value,
+         r->action_index, app.actions[r->action_index].command);
+  }
 
   /* Install signal handlers */
   struct sigaction sa;
