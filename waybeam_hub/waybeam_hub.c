@@ -53,6 +53,7 @@
 #define MAX_MENU_ENTRIES   32
 #define MAX_ACTIONS        64
 #define MAX_RADIO_RULES    16
+#define MAX_CONDITIONS_PER_RULE 4
 #define MAX_SECTIONS       16
 #define MAX_DESTINATIONS   4
 #define MAX_KEY_QUEUE      8
@@ -167,9 +168,12 @@ typedef struct {
 } menu_entry_t;
 
 typedef struct {
-  int channel_index; /* 0-based */
-  int min_value;
-  int max_value;
+  int condition_count;
+  struct {
+    int channel_index; /* 0-based */
+    int min_value;
+    int max_value;
+  } conds[MAX_CONDITIONS_PER_RULE];
   int action_index; /* into actions[] */
   char name[ACTION_NAME_LEN];
 } radio_rule_t;
@@ -677,13 +681,7 @@ static int load_actions_ini(const char *path, app_state_t *app) {
     if (!name[0] || !value[0]) continue;
 
     if (in_radio) {
-      /* Parse radio rule: name is the condition, value is the command */
-      int ch_idx, min_val, max_val;
-      if (parse_radio_condition(name, &ch_idx, &min_val, &max_val) < 0) {
-        LOGW("Invalid RADIO rule: '%s'", name);
-        continue;
-      }
-
+      /* Parse radio rule: name is one or more conditions joined by '&&' */
       if (app->radio_rule_count >= MAX_RADIO_RULES) {
         LOGW("Max radio rules reached, skipping");
         continue;
@@ -693,18 +691,63 @@ static int load_actions_ini(const char *path, app_state_t *app) {
         continue;
       }
 
-      /* Create action for this rule */
+      radio_rule_t rule;
+      memset(&rule, 0, sizeof(rule));
+      rule.condition_count = 0;
+
+      /* Split name on '&&' and parse each condition */
+      char cond_buf[ACTION_NAME_LEN];
+      snprintf(cond_buf, sizeof(cond_buf), "%s", name);
+      char *saveptr = NULL;
+      char *token = strtok_r(cond_buf, "&", &saveptr);
+      int parse_ok = 1;
+
+      while (token) {
+        /* Skip empty tokens (from '&&' splitting on single '&') */
+        while (isspace((unsigned char)*token)) token++;
+        if (*token == '\0') { token = strtok_r(NULL, "&", &saveptr); continue; }
+
+        if (rule.condition_count >= MAX_CONDITIONS_PER_RULE) {
+          LOGW("Too many conditions in RADIO rule (max %d): '%s'", MAX_CONDITIONS_PER_RULE, name);
+          parse_ok = 0;
+          break;
+        }
+
+        int ch_idx, min_val, max_val;
+        if (parse_radio_condition(token, &ch_idx, &min_val, &max_val) < 0) {
+          LOGW("Invalid RADIO condition: '%s' in rule '%s'", token, name);
+          parse_ok = 0;
+          break;
+        }
+
+        rule.conds[rule.condition_count].channel_index = ch_idx;
+        rule.conds[rule.condition_count].min_value = min_val;
+        rule.conds[rule.condition_count].max_value = max_val;
+        rule.condition_count++;
+
+        token = strtok_r(NULL, "&", &saveptr);
+      }
+
+      if (!parse_ok || rule.condition_count == 0) continue;
+
+      /* Build action name from all conditions */
+      char action_name[ACTION_NAME_LEN];
+      int pos = 0;
+      for (int c = 0; c < rule.condition_count; c++) {
+        if (c > 0) pos += snprintf(action_name + pos, ACTION_NAME_LEN - pos, " && ");
+        pos += snprintf(action_name + pos, ACTION_NAME_LEN - pos, "%d<ch%d<%d",
+                        rule.conds[c].min_value, rule.conds[c].channel_index + 1,
+                        rule.conds[c].max_value);
+      }
+
       int ai = app->action_count++;
       snprintf(app->actions[ai].section, SECTION_NAME_LEN, "RADIO");
-      snprintf(app->actions[ai].name, ACTION_NAME_LEN, "%d<ch%d<%d", min_val, ch_idx + 1, max_val);
+      snprintf(app->actions[ai].name, ACTION_NAME_LEN, "%s", action_name);
       snprintf(app->actions[ai].command, ACTION_CMD_LEN, "%s", value);
 
-      radio_rule_t *r = &app->radio_rules[app->radio_rule_count++];
-      r->channel_index = ch_idx;
-      r->min_value = min_val;
-      r->max_value = max_val;
-      r->action_index = ai;
-      memcpy(r->name, app->actions[ai].name, ACTION_NAME_LEN);
+      rule.action_index = ai;
+      snprintf(rule.name, ACTION_NAME_LEN, "%s", action_name);
+      app->radio_rules[app->radio_rule_count++] = rule;
     } else {
       /* Regular action */
       if (app->action_count >= MAX_ACTIONS) {
@@ -1277,9 +1320,14 @@ static int sse_handle_line(sse_client_t *sse, const char *line, app_state_t *app
           radio_rule_state_t *rs = app->radio_states[src];
           for (int i = 0; i < app->radio_rule_count; i++) {
             radio_rule_t *rule = &app->radio_rules[i];
-            if (rule->channel_index >= CRSF_DISPLAY_CHANNELS) continue;
-            int val = ss->channels[rule->channel_index];
-            int in_range = (val > rule->min_value && val < rule->max_value);
+            int in_range = 1;
+            for (int c = 0; c < rule->condition_count; c++) {
+              int ci = rule->conds[c].channel_index;
+              if (ci >= CRSF_DISPLAY_CHANNELS) { in_range = 0; break; }
+              int val = ss->channels[ci];
+              if (!(val > rule->conds[c].min_value && val < rule->conds[c].max_value))
+                { in_range = 0; break; }
+            }
             if (!in_range) {
               rs[i].enter_started = 0.0;
               if (rs[i].latched_in_range) {
@@ -1623,19 +1671,19 @@ static void evaluate_radio_rules(app_state_t *app, int src_idx, double now) {
     radio_rule_t *rule = &app->radio_rules[i];
     radio_rule_state_t *st = &rs[i];
 
-    if (rule->channel_index >= CRSF_DISPLAY_CHANNELS) {
-      st->enter_started = 0.0;
-      st->outside_started = 0.0;
-      st->latched_in_range = 0;
-      continue;
+    /* Evaluate all conditions — rule is in-range only when ALL are met */
+    int in_range = 1;
+    for (int c = 0; c < rule->condition_count; c++) {
+      int ci = rule->conds[c].channel_index;
+      if (ci >= CRSF_DISPLAY_CHANNELS) { in_range = 0; break; }
+      int val = s->channels[ci];
+      if (!(val > rule->conds[c].min_value && val < rule->conds[c].max_value))
+        { in_range = 0; break; }
     }
 
-    int val = s->channels[rule->channel_index];
-    int in_range = (val > rule->min_value && val < rule->max_value);
-
-    LOGV(app, "Radio[%d] %d<ch%d=%d<%d in_range=%d enter=%.1f latched=%d",
-         i, rule->min_value, rule->channel_index + 1, val, rule->max_value,
-         in_range, st->enter_started > 0 ? (now - st->enter_started) * 1000.0 : 0.0,
+    LOGV(app, "Radio[%d] '%s' in_range=%d enter=%.1f latched=%d",
+         i, rule->name, in_range,
+         st->enter_started > 0 ? (now - st->enter_started) * 1000.0 : 0.0,
          st->latched_in_range);
 
     if (!in_range) {
@@ -1669,18 +1717,17 @@ static void evaluate_radio_rules(app_state_t *app, int src_idx, double now) {
     st->enter_started = 0.0;
     st->trigger_count++;
 
-    LOGV(app, "Radio[%d] FIRED: %d<ch%d=%d<%d -> action[%d] cmd='%s'",
-         i, rule->min_value, rule->channel_index + 1, val, rule->max_value,
-         rule->action_index, app->actions[rule->action_index].command);
+    LOGV(app, "Radio[%d] FIRED: '%s' -> action[%d] cmd='%s'",
+         i, rule->name, rule->action_index,
+         app->actions[rule->action_index].command);
 
     char result[256];
     execute_action(&app->actions[rule->action_index], app->cfg.action_timeout_ms,
                    app->cfg.action_shell, result, sizeof(result));
 
     snprintf(app->status, sizeof(app->status),
-             "%s (trigger #%d %d<ch%d=%d<%d)",
-             result, st->trigger_count, rule->min_value,
-             rule->channel_index + 1, val, rule->max_value);
+             "%s (trigger #%d '%s')",
+             result, st->trigger_count, rule->name);
     app->dirty = 1;
   }
 }
@@ -2216,8 +2263,8 @@ int main(int argc, char *argv[]) {
        app.action_count, app.section_count, app.radio_rule_count);
   for (int i = 0; i < app.radio_rule_count; i++) {
     radio_rule_t *r = &app.radio_rules[i];
-    LOGV(&app, "  Radio[%d]: %d<ch%d<%d -> action[%d] '%s'",
-         i, r->min_value, r->channel_index + 1, r->max_value,
+    LOGV(&app, "  Radio[%d]: '%s' (%d cond%s) -> action[%d] '%s'",
+         i, r->name, r->condition_count, r->condition_count > 1 ? "s" : "",
          r->action_index, app.actions[r->action_index].command);
   }
 
