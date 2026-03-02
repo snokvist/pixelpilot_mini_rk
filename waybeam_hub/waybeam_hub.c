@@ -1299,7 +1299,6 @@ static int sse_handle_line(sse_client_t *sse, const char *line, app_state_t *app
           }
         }
 
-        app->dirty = 1;
         sse->data_len = 0;
         sse->event_name[0] = '\0';
         return 1;
@@ -1336,7 +1335,7 @@ static int sse_handle_line(sse_client_t *sse, const char *line, app_state_t *app
 }
 
 /* Read and process available data from SSE socket.
- * Returns: 0=ok, -1=error/disconnect */
+ * Returns: 1=channel update, 0=ok no update, -1=error/disconnect */
 static int sse_process(sse_client_t *sse, app_state_t *app) {
   char buf[2048];
   ssize_t n = read(sse->fd, buf, sizeof(buf));
@@ -1347,19 +1346,21 @@ static int sse_process(sse_client_t *sse, app_state_t *app) {
     return -1;
   }
 
+  int got_update = 0;
   for (ssize_t i = 0; i < n; i++) {
     char c = buf[i];
     if (c == '\r') continue;
     if (c == '\n') {
       sse->line_buf[sse->line_len] = '\0';
-      sse_handle_line(sse, sse->line_buf, app);
+      if (sse_handle_line(sse, sse->line_buf, app) > 0)
+        got_update = 1;
       sse->line_len = 0;
     } else {
       if (sse->line_len < SSE_LINE_BUF - 1)
         sse->line_buf[sse->line_len++] = c;
     }
   }
-  return 0;
+  return got_update;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1903,15 +1904,19 @@ static int run_controller(app_state_t *app) {
     }
 
     /* Poll SSE fd */
+    int got_channel_update = 0;
     if (app->sse.fd >= 0) {
       struct pollfd pfd = { .fd = app->sse.fd, .events = POLLIN };
       int rc = poll(&pfd, 1, 50); /* 50ms timeout */
       if (rc > 0 && (pfd.revents & POLLIN)) {
-        if (sse_process(&app->sse, app) < 0) {
+        int src = sse_process(&app->sse, app);
+        if (src < 0) {
           LOGW("SSE disconnected, will reconnect");
           sse_disconnect(&app->sse);
           snprintf(app->status, sizeof(app->status), "SSE disconnected, reconnecting");
           app->dirty = 1;
+        } else if (src > 0) {
+          got_channel_update = 1;
         }
       } else if (rc > 0 && (pfd.revents & (POLLERR | POLLHUP))) {
         sse_disconnect(&app->sse);
@@ -1956,12 +1961,12 @@ static int run_controller(app_state_t *app) {
     get_current_entries(app, &entries, &entry_count);
     app->selected = clamp_i(app->selected, 0, entry_count > 0 ? entry_count - 1 : 0);
 
-    /* Poll keys from active source */
+    /* Poll keys and radio rules only when new channel data arrived */
     int menu_visible = (app->cfg.menu_asset_id >= 0 &&
                         app->cfg.menu_asset_id < ASSET_COUNT &&
                         app->asset_enabled[app->cfg.menu_asset_id] == 1);
 
-    if (app->active_source >= 0) {
+    if (got_channel_update && app->active_source >= 0) {
       poll_source_keys(app, app->active_source, menu_visible, now);
 
       /* Evaluate radio rules */
