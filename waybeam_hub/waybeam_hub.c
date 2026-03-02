@@ -1481,9 +1481,15 @@ static void poll_source_keys(app_state_t *app, int src_idx, int menu_visible, do
     s->combo_latched = 0;
   }
 
-  /* When menu hidden, only allow toggle */
-  if (!menu_visible) {
+  /* When menu hidden or combo active, suppress nav/select */
+  if (!menu_visible || combo_active) {
     s->select_pressed = select_active;
+    /* Reset nav state so debounce starts fresh after combo release */
+    if (combo_active) {
+      snprintf(s->nav_candidate, sizeof(s->nav_candidate), "neutral");
+      s->nav_candidate_since = 0.0;
+      s->nav_latched = 0;
+    }
     return;
   }
 
