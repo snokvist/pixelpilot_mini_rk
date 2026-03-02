@@ -128,8 +128,6 @@ typedef struct {
   int interval_ms;
   int initial_off[ASSET_COUNT];
   int initial_off_count;
-  int zoom_step;
-  int zoom_max;
   char actions_ini[PATH_LEN];
   int action_timeout_ms;
   char action_shell[PATH_LEN];
@@ -155,8 +153,6 @@ enum entry_kind {
   ENTRY_EXIT,
   ENTRY_RETURN,
   ENTRY_ASSET,
-  ENTRY_ZOOM_IN,
-  ENTRY_ZOOM_OUT,
   ENTRY_ACTION,
 };
 
@@ -254,9 +250,6 @@ typedef struct {
   int selected;
   int asset_enabled[ASSET_COUNT]; /* -1=unknown, 0=off, 1=on */
   int pending_asset_updates[ASSET_COUNT]; /* -1=no update, 0=off, 1=on */
-  int zoom_enabled;
-  int zoom_percent;
-
   /* Network */
   int udp_fd;
   udp_dest_t destinations[MAX_DESTINATIONS];
@@ -417,8 +410,6 @@ static void config_defaults(config_t *cfg) {
   snprintf(cfg->host, sizeof(cfg->host), "127.0.0.1");
   cfg->port = 5005;
   cfg->interval_ms = 400;
-  cfg->zoom_step = 25;
-  cfg->zoom_max = 300;
   cfg->action_timeout_ms = 5000;
   cfg->menu_asset_id = 7;
   snprintf(cfg->sse_url, sizeof(cfg->sse_url), "http://127.0.0.1:8070/sse");
@@ -507,8 +498,6 @@ static int parse_config_json(const char *path, config_t *cfg) {
     if (strcmp(key, "host") == 0) { p = parse_string(p, cfg->host, sizeof(cfg->host)); }
     else if (strcmp(key, "port") == 0) { p = parse_json_int(p, &cfg->port); }
     else if (strcmp(key, "interval_ms") == 0) { p = parse_json_int(p, &cfg->interval_ms); }
-    else if (strcmp(key, "zoom_step") == 0) { p = parse_json_int(p, &cfg->zoom_step); }
-    else if (strcmp(key, "zoom_max") == 0) { p = parse_json_int(p, &cfg->zoom_max); }
     else if (strcmp(key, "actions_ini") == 0) { p = parse_string(p, cfg->actions_ini, sizeof(cfg->actions_ini)); }
     else if (strcmp(key, "action_timeout_ms") == 0) { p = parse_json_int(p, &cfg->action_timeout_ms); }
     else if (strcmp(key, "action_shell") == 0) { p = parse_string(p, cfg->action_shell, sizeof(cfg->action_shell)); }
@@ -637,10 +626,9 @@ static int load_actions_ini(const char *path, app_state_t *app) {
       snprintf(current_section, sizeof(current_section), "%s", sec);
       in_radio = (strcasecmp_section(sec, "RADIO") == 0);
 
-      /* Skip reserved sections (ASSETS, ZOOM, RADIO) */
+      /* Skip reserved sections (ASSETS, RADIO) */
       if (in_radio) continue;
       if (strcasecmp_section(sec, "ASSETS") == 0) continue;
-      if (strcasecmp_section(sec, "ZOOM") == 0) continue;
 
       /* Register section in order */
       if (app->section_count < MAX_SECTIONS) {
@@ -779,13 +767,6 @@ static void build_top_entries(app_state_t *app) {
   app->top_entries[n].action_index = -1;
   n++;
 
-  /* ZOOM section */
-  app->top_entries[n].kind = ENTRY_SECTION;
-  snprintf(app->top_entries[n].section, SECTION_NAME_LEN, "ZOOM");
-  app->top_entries[n].asset_id = -1;
-  app->top_entries[n].action_index = -1;
-  n++;
-
   /* Custom sections */
   for (int i = 0; i < app->section_count && n < MAX_MENU_ENTRIES - 1; i++) {
     app->top_entries[n].kind = ENTRY_SECTION;
@@ -826,17 +807,6 @@ static void build_sub_entries_for(app_state_t *app, const char *section) {
       app->sub_entries[si][n].section[0] = '\0';
       n++;
     }
-  } else if (strcasecmp_section(section, "ZOOM") == 0) {
-    app->sub_entries[si][n].kind = ENTRY_ZOOM_IN;
-    app->sub_entries[si][n].asset_id = -1;
-    app->sub_entries[si][n].action_index = -1;
-    app->sub_entries[si][n].section[0] = '\0';
-    n++;
-    app->sub_entries[si][n].kind = ENTRY_ZOOM_OUT;
-    app->sub_entries[si][n].asset_id = -1;
-    app->sub_entries[si][n].action_index = -1;
-    app->sub_entries[si][n].section[0] = '\0';
-    n++;
   } else {
     /* Action items for this section */
     for (int a = 0; a < app->action_count && n < MAX_MENU_ENTRIES - 1; a++) {
@@ -864,7 +834,6 @@ static void build_all_menus(app_state_t *app) {
   app->sub_section_count = 0;
   build_top_entries(app);
   build_sub_entries_for(app, "ASSETS");
-  build_sub_entries_for(app, "ZOOM");
   for (int i = 0; i < app->section_count; i++)
     build_sub_entries_for(app, app->section_order[i]);
 }
@@ -891,13 +860,6 @@ static void get_current_entries(app_state_t *app, menu_entry_t **entries, int *c
  * Menu Renderer
  * --------------------------------------------------------------------------- */
 
-static const char *zoom_state_text(int zoom_enabled, int zoom_percent) {
-  static char buf[16];
-  if (!zoom_enabled) return "OFF";
-  snprintf(buf, sizeof(buf), "%d%%", zoom_percent);
-  return buf;
-}
-
 static int display_entry_text(const app_state_t *app, const menu_entry_t *e, char *out, int out_sz) {
   switch (e->kind) {
     case ENTRY_SECTION:
@@ -911,10 +873,6 @@ static int display_entry_text(const app_state_t *app, const menu_entry_t *e, cha
       const char *s = state < 0 ? "?" : (state ? "ON" : "OFF");
       return snprintf(out, out_sz, "ASSET %d %s", e->asset_id, s);
     }
-    case ENTRY_ZOOM_IN:
-      return snprintf(out, out_sz, "ZOOM IN (%s)", zoom_state_text(app->zoom_enabled, app->zoom_percent));
-    case ENTRY_ZOOM_OUT:
-      return snprintf(out, out_sz, "ZOOM OUT (%s)", zoom_state_text(app->zoom_enabled, app->zoom_percent));
     case ENTRY_ACTION:
       if (e->action_index >= 0 && e->action_index < app->action_count)
         return snprintf(out, out_sz, "%s", app->actions[e->action_index].name);
@@ -1004,13 +962,6 @@ static int build_osd_payload(app_state_t *app, char texts[3][MAX_OSD_TEXT_CHARS 
   int n = snprintf(buf, buf_sz,
     "{\"texts\":[null,null,null,null,null,\"%s\",\"%s\",\"%s\"]",
     esc[0], esc[1], esc[2]);
-
-  /* Zoom */
-  if (app->zoom_enabled && app->zoom_percent > 100)
-    n += snprintf(buf + n, buf_sz - n, ",\"zoom\":\"%d,%d,50,50\"",
-                  app->zoom_percent, app->zoom_percent);
-  else
-    n += snprintf(buf + n, buf_sz - n, ",\"zoom\":\"off\"");
 
   /* Asset updates */
   int has_updates = 0;
@@ -1918,8 +1869,6 @@ static int run_controller(app_state_t *app) {
   app->key_count = 0;
   app->current_section[0] = '\0';
   app->selected = 0;
-  app->zoom_enabled = 0;
-  app->zoom_percent = 100;
   app->status[0] = '\0';
   app->last_logged_status[0] = '\0';
 
@@ -2154,25 +2103,7 @@ static int run_controller(app_state_t *app) {
         continue;
       }
 
-      if (e->kind == ENTRY_ZOOM_IN) {
-        app->zoom_percent = clamp_i(app->zoom_percent + app->cfg.zoom_step, 100, app->cfg.zoom_max);
-        app->zoom_enabled = (app->zoom_percent > 100);
-        snprintf(app->status, sizeof(app->status),
-                 "Zoom set to %s", zoom_state_text(app->zoom_enabled, app->zoom_percent));
-        app->last_menu_activity_mono = monotonic_s();
-        app->dirty = 1;
-        continue;
-      }
 
-      if (e->kind == ENTRY_ZOOM_OUT) {
-        app->zoom_percent = clamp_i(app->zoom_percent - app->cfg.zoom_step, 100, app->cfg.zoom_max);
-        if (app->zoom_percent <= 100) app->zoom_enabled = 0;
-        snprintf(app->status, sizeof(app->status),
-                 "Zoom set to %s", zoom_state_text(app->zoom_enabled, app->zoom_percent));
-        app->last_menu_activity_mono = monotonic_s();
-        app->dirty = 1;
-        continue;
-      }
 
       if (e->kind == ENTRY_ACTION && e->action_index >= 0 && e->action_index < app->action_count) {
         char result[256];
