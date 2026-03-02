@@ -541,12 +541,8 @@ static int strcasecmp_section(const char *a, const char *b) {
 }
 
 static int parse_radio_condition(const char *spec, int *ch_idx, int *min_val, int *max_val) {
-  /* Format: "1200<ch1<1500" */
+  /* Format: "1200<ch1<1500" — manual parse */
   int mn, ch, mx;
-  char ch_prefix[4];
-  if (sscanf(spec, "%d < %2[cC] %*[hH] %d < %d", &mn, ch_prefix, &ch, &mx) >= 3) {
-    /* sscanf may struggle with this format; use manual parsing */
-  }
 
   /* Manual parse: digits '<' 'ch' digits '<' digits */
   const char *p = spec;
@@ -962,6 +958,7 @@ static int build_osd_payload(app_state_t *app, char texts[3][MAX_OSD_TEXT_CHARS 
   int n = snprintf(buf, buf_sz,
     "{\"texts\":[null,null,null,null,null,\"%s\",\"%s\",\"%s\"]",
     esc[0], esc[1], esc[2]);
+  if (n >= buf_sz) n = buf_sz - 1;
 
   /* Asset updates */
   int has_updates = 0;
@@ -970,18 +967,22 @@ static int build_osd_payload(app_state_t *app, char texts[3][MAX_OSD_TEXT_CHARS 
   }
   if (has_updates) {
     n += snprintf(buf + n, buf_sz - n, ",\"asset_updates\":[");
+    if (n >= buf_sz) n = buf_sz - 1;
     int first = 1;
     for (int i = 0; i < ASSET_COUNT; i++) {
       if (app->pending_asset_updates[i] < 0) continue;
-      if (!first) n += snprintf(buf + n, buf_sz - n, ",");
+      if (!first) { n += snprintf(buf + n, buf_sz - n, ","); if (n >= buf_sz) n = buf_sz - 1; }
       n += snprintf(buf + n, buf_sz - n, "{\"id\":%d,\"enabled\":%s}",
                     i, app->pending_asset_updates[i] ? "true" : "false");
+      if (n >= buf_sz) n = buf_sz - 1;
       first = 0;
     }
     n += snprintf(buf + n, buf_sz - n, "]");
+    if (n >= buf_sz) n = buf_sz - 1;
   }
 
   n += snprintf(buf + n, buf_sz - n, "}");
+  if (n >= buf_sz) n = buf_sz - 1;
   return n;
 }
 
@@ -1339,9 +1340,9 @@ static int sse_process(sse_client_t *sse, app_state_t *app) {
   char buf[2048];
   ssize_t n = read(sse->fd, buf, sizeof(buf));
   if (n <= 0) {
-    if (n == 0) LOGI("SSE: connection closed");
-    else if (errno != EAGAIN && errno != EINTR)
-      LOGW("SSE: read error: %s", strerror(errno));
+    if (n == 0) { LOGI("SSE: connection closed"); return -1; }
+    if (errno == EAGAIN || errno == EINTR) return 0;
+    LOGW("SSE: read error: %s", strerror(errno));
     return -1;
   }
 
@@ -1929,8 +1930,7 @@ static int run_controller(app_state_t *app) {
       }
     } else {
       /* Not connected; just sleep a bit */
-      struct pollfd dummy;
-      poll(&dummy, 0, 50);
+      poll(NULL, 0, 50);
     }
 
     now = monotonic_s();
@@ -2156,6 +2156,7 @@ int main(int argc, char *argv[]) {
 
   /* Default config path: next to binary */
   char default_config[PATH_LEN];
+  snprintf(default_config, sizeof(default_config), "config.json");
   if (!config_path) {
     /* Try to find config.json next to argv[0] */
     char *slash = strrchr(argv[0], '/');
@@ -2165,8 +2166,6 @@ int main(int argc, char *argv[]) {
         memcpy(default_config, argv[0], dirlen);
         snprintf(default_config + dirlen, sizeof(default_config) - dirlen, "config.json");
       }
-    } else {
-      snprintf(default_config, sizeof(default_config), "config.json");
     }
     config_path = default_config;
   }
