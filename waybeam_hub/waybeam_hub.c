@@ -123,6 +123,15 @@ typedef struct {
 } tuning_t;
 
 typedef struct {
+  int enabled;
+  int asset_id;
+  double duration_s;
+  int opacity;
+  double delay_s;
+  double fadeout_s;
+} splashscreen_t;
+
+typedef struct {
   char host[HOST_LEN];
   int port;
   int interval_ms;
@@ -139,6 +148,7 @@ typedef struct {
   int extra_dest_count;
   int verbose;
   tuning_t tuning;
+  splashscreen_t splashscreen;
 } config_t;
 
 typedef struct {
@@ -260,6 +270,22 @@ typedef struct {
   source_state_t sources[2]; /* 0=serial, 1=joystick */
   int active_source; /* -1=none, 0=serial, 1=joystick */
   radio_rule_state_t radio_states[2][MAX_RADIO_RULES];
+
+  /* Async action execution */
+  pid_t action_pid;        /* -1 = no running action */
+  int action_pipe_fd;      /* read end of stdout/stderr pipe */
+  double action_deadline;  /* monotonic deadline for timeout */
+  char action_label[128];  /* "[section] name" for status */
+  char action_output[CMD_OUTPUT_BUF];
+  int action_output_len;
+
+  /* Splashscreen state machine */
+  enum { SPLASH_IDLE=0, SPLASH_DELAY, SPLASH_SHOWING, SPLASH_FADING, SPLASH_DONE } splash_phase;
+  double splash_next_event;     /* next phase transition time, 0.0 = not yet armed */
+  double splash_fade_end;       /* when fade completes (FADING phase only) */
+  double splash_fade_tick_s;    /* interval between fade opacity sends */
+  int splash_last_opacity;      /* last sent opacity for dedup */
+  int splash_pending_opacity;   /* queued opacity-only update, -1 = none */
 
   /* Loop state */
   int dirty;
@@ -417,6 +443,14 @@ static void config_defaults(config_t *cfg) {
   cfg->priority_fallback_s = 5.0;
   cfg->extra_dest_count = 0;
 
+  /* Splashscreen defaults */
+  cfg->splashscreen.enabled = 0;
+  cfg->splashscreen.asset_id = -1;
+  cfg->splashscreen.duration_s = 5.0;
+  cfg->splashscreen.opacity = -1;
+  cfg->splashscreen.delay_s = 0.0;
+  cfg->splashscreen.fadeout_s = 0.0;
+
   /* Tuning defaults */
   tuning_t *t = &cfg->tuning;
   t->crsf_axis_deadband = 120;
@@ -459,6 +493,37 @@ static int parse_tuning_object(const char *p, tuning_t *t) {
     else if (strcmp(key, "radio_reset_debounce_ms") == 0) { p = parse_json_int(p, &t->radio_reset_debounce_ms); }
     else if (strcmp(key, "menu_inactivity_timeout_s") == 0) { p = parse_json_double(p, &t->menu_inactivity_timeout_s); }
     else if (strcmp(key, "source_stale_s") == 0) { p = parse_json_double(p, &t->source_stale_s); }
+    else { p = skip_json_value(p); }
+
+    if (!p) return -1;
+    p = skip_ws(p);
+    if (*p == ',') { ++p; continue; }
+    if (*p == '}') return 0;
+    return -1;
+  }
+  return -1;
+}
+
+static int parse_splashscreen_object(const char *p, splashscreen_t *s) {
+  if (!p || *p != '{') return -1;
+  ++p;
+  while (*p) {
+    p = skip_ws(p);
+    if (*p == '}') return 0;
+    if (*p != '"') return -1;
+    char key[64];
+    const char *next = parse_string(p, key, sizeof(key));
+    if (!next) return -1;
+    p = skip_ws(next);
+    if (*p != ':') return -1;
+    ++p; p = skip_ws(p);
+
+    if (strcmp(key, "enabled") == 0) { p = parse_json_bool(p, &s->enabled); }
+    else if (strcmp(key, "asset_id") == 0) { p = parse_json_int(p, &s->asset_id); }
+    else if (strcmp(key, "duration_s") == 0) { p = parse_json_double(p, &s->duration_s); }
+    else if (strcmp(key, "opacity") == 0) { p = parse_json_int(p, &s->opacity); }
+    else if (strcmp(key, "delay_s") == 0) { p = parse_json_double(p, &s->delay_s); }
+    else if (strcmp(key, "fadeout_s") == 0) { p = parse_json_double(p, &s->fadeout_s); }
     else { p = skip_json_value(p); }
 
     if (!p) return -1;
@@ -514,6 +579,10 @@ static int parse_config_json(const char *path, config_t *cfg) {
     }
     else if (strcmp(key, "tuning") == 0) {
       if (parse_tuning_object(p, &cfg->tuning) < 0) return -1;
+      p = skip_json_value(p);
+    }
+    else if (strcmp(key, "splashscreen") == 0) {
+      if (parse_splashscreen_object(p, &cfg->splashscreen) < 0) return -1;
       p = skip_json_value(p);
     }
     else { p = skip_json_value(p); }
@@ -682,34 +751,53 @@ static int load_actions_ini(const char *path, app_state_t *app) {
       /* Split name on '&&' and parse each condition */
       char cond_buf[ACTION_NAME_LEN];
       snprintf(cond_buf, sizeof(cond_buf), "%s", name);
-      char *saveptr = NULL;
-      char *token = strtok_r(cond_buf, "&", &saveptr);
       int parse_ok = 1;
 
-      while (token) {
-        /* Skip empty tokens (from '&&' splitting on single '&') */
-        while (isspace((unsigned char)*token)) token++;
-        if (*token == '\0') { token = strtok_r(NULL, "&", &saveptr); continue; }
+      char *cursor = cond_buf;
+      while (*cursor) {
+        while (isspace((unsigned char)*cursor)) cursor++;
+        if (*cursor == '\0') break;
 
-        if (rule.condition_count >= MAX_CONDITIONS_PER_RULE) {
-          LOGW("Too many conditions in RADIO rule (max %d): '%s'", MAX_CONDITIONS_PER_RULE, name);
-          parse_ok = 0;
-          break;
+        /* Find next '&&' delimiter */
+        char *delim = strstr(cursor, "&&");
+        char *token_end;
+        if (delim) {
+          token_end = delim;
+        } else {
+          token_end = cursor + strlen(cursor);
         }
 
-        int ch_idx, min_val, max_val;
-        if (parse_radio_condition(token, &ch_idx, &min_val, &max_val) < 0) {
-          LOGW("Invalid RADIO condition: '%s' in rule '%s'", token, name);
-          parse_ok = 0;
-          break;
+        /* Trim trailing whitespace from token */
+        char *te = token_end;
+        while (te > cursor && isspace((unsigned char)te[-1])) te--;
+        char saved = *te;
+        *te = '\0';
+
+        if (*cursor != '\0') {
+          if (rule.condition_count >= MAX_CONDITIONS_PER_RULE) {
+            LOGW("Too many conditions in RADIO rule (max %d): '%s'", MAX_CONDITIONS_PER_RULE, name);
+            parse_ok = 0;
+            break;
+          }
+
+          int ch_idx, min_val, max_val;
+          if (parse_radio_condition(cursor, &ch_idx, &min_val, &max_val) < 0) {
+            LOGW("Invalid RADIO condition: '%s' in rule '%s'", cursor, name);
+            parse_ok = 0;
+            break;
+          }
+
+          rule.conds[rule.condition_count].channel_index = ch_idx;
+          rule.conds[rule.condition_count].min_value = min_val;
+          rule.conds[rule.condition_count].max_value = max_val;
+          rule.condition_count++;
         }
 
-        rule.conds[rule.condition_count].channel_index = ch_idx;
-        rule.conds[rule.condition_count].min_value = min_val;
-        rule.conds[rule.condition_count].max_value = max_val;
-        rule.condition_count++;
-
-        token = strtok_r(NULL, "&", &saveptr);
+        *te = saved;
+        if (delim)
+          cursor = delim + 2; /* skip past '&&' */
+        else
+          break;
       }
 
       if (!parse_ok || rule.condition_count == 0) continue;
@@ -965,17 +1053,40 @@ static int build_osd_payload(app_state_t *app, char texts[3][MAX_OSD_TEXT_CHARS 
   for (int i = 0; i < ASSET_COUNT; i++) {
     if (app->pending_asset_updates[i] >= 0) { has_updates = 1; break; }
   }
+  if (app->splash_pending_opacity >= 0) has_updates = 1;
   if (has_updates) {
     n += snprintf(buf + n, buf_sz - n, ",\"asset_updates\":[");
     if (n >= buf_sz) n = buf_sz - 1;
     int first = 1;
+    int splash_asset_emitted = 0;
+    splashscreen_t *sp = &app->cfg.splashscreen;
     for (int i = 0; i < ASSET_COUNT; i++) {
       if (app->pending_asset_updates[i] < 0) continue;
       if (!first) { n += snprintf(buf + n, buf_sz - n, ","); if (n >= buf_sz) n = buf_sz - 1; }
-      n += snprintf(buf + n, buf_sz - n, "{\"id\":%d,\"enabled\":%s}",
-                    i, app->pending_asset_updates[i] ? "true" : "false");
+      /* Include opacity for splash asset enable */
+      if (sp->enabled && i == sp->asset_id && app->pending_asset_updates[i] == 1 &&
+          sp->opacity >= 0) {
+        int opa = (app->splash_pending_opacity >= 0) ? app->splash_pending_opacity : sp->opacity;
+        n += snprintf(buf + n, buf_sz - n,
+                      "{\"id\":%d,\"enabled\":true,\"opacity\":%d}",
+                      i, opa);
+        splash_asset_emitted = 1;
+      } else {
+        n += snprintf(buf + n, buf_sz - n, "{\"id\":%d,\"enabled\":%s}",
+                      i, app->pending_asset_updates[i] ? "true" : "false");
+        if (sp->enabled && i == sp->asset_id) splash_asset_emitted = 1;
+      }
       if (n >= buf_sz) n = buf_sz - 1;
       first = 0;
+    }
+    /* Opacity-only update for splash asset (no enable/disable already emitted) */
+    if (app->splash_pending_opacity >= 0 && !splash_asset_emitted &&
+        sp->enabled && sp->asset_id >= 0 && sp->asset_id < ASSET_COUNT) {
+      if (!first) { n += snprintf(buf + n, buf_sz - n, ","); if (n >= buf_sz) n = buf_sz - 1; }
+      n += snprintf(buf + n, buf_sz - n,
+                    "{\"id\":%d,\"opacity\":%d}",
+                    sp->asset_id, app->splash_pending_opacity);
+      if (n >= buf_sz) n = buf_sz - 1;
     }
     n += snprintf(buf + n, buf_sz - n, "]");
     if (n >= buf_sz) n = buf_sz - 1;
@@ -1081,17 +1192,34 @@ static int sse_try_connect(sse_client_t *sse) {
     freeaddrinfo(res);
   }
 
-  int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
   if (fd < 0) return -1;
 
-  /* Set connect timeout via SO_SNDTIMEO */
-  struct timeval tv = { .tv_sec = 2, .tv_usec = 0 };
-  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
   if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    close(fd);
-    return -1;
+    if (errno != EINPROGRESS) {
+      close(fd);
+      return -1;
+    }
+    /* Non-blocking connect in progress — wait with poll() up to 2s */
+    struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+    int rc = poll(&pfd, 1, 2000);
+    if (rc <= 0 || !(pfd.revents & POLLOUT)) {
+      close(fd);
+      return -1;
+    }
+    /* Check for connect error */
+    int err = 0;
+    socklen_t elen = sizeof(err);
+    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen);
+    if (err) {
+      close(fd);
+      return -1;
+    }
   }
+
+  /* Clear non-blocking for simpler read/write, set read timeout */
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 
   /* Send HTTP GET for SSE */
   char req[512];
@@ -1518,106 +1646,130 @@ static void poll_source_keys(app_state_t *app, int src_idx, int menu_visible, do
  * Radio Triggers (port of evaluate_radio_rules)
  * --------------------------------------------------------------------------- */
 
-static void execute_action(const menu_action_t *action, int timeout_ms,
-                           const char *shell, char *result, int result_sz) {
-  double timeout_s = timeout_ms / 1000.0;
-  if (timeout_s < 0.1) timeout_s = 0.1;
+/* Extract first non-empty line from output buffer */
+static void extract_first_line(char *buf, int len, char *out, int out_sz) {
+  out[0] = '\0';
+  for (int i = 0; i < len; i++) {
+    if (buf[i] == '\n' || buf[i] == '\r') {
+      buf[i] = '\0';
+      if (buf[0]) { snprintf(out, out_sz, "%s", buf); return; }
+      int rem = len - i - 1;
+      if (rem > 0) memmove(buf, buf + i + 1, rem);
+      buf[rem] = '\0';
+      len = rem;
+      i = -1;
+    }
+  }
+  if (buf[0]) snprintf(out, out_sz, "%s", buf);
+}
+
+/* Launch an action asynchronously. Returns 0 on success (child started). */
+static int action_launch(app_state_t *app, const menu_action_t *action) {
+  if (app->action_pid > 0) {
+    LOGW("Action already running (pid %d), ignoring launch of [%s] %s",
+         (int)app->action_pid, action->section, action->name);
+    return -1;
+  }
 
   int pipefd[2];
   if (pipe(pipefd) < 0) {
-    snprintf(result, result_sz, "ERR pipe: %s", strerror(errno));
-    return;
+    snprintf(app->status, sizeof(app->status), "ERR pipe: %s", strerror(errno));
+    app->dirty = 1;
+    return -1;
   }
 
   pid_t pid = fork();
   if (pid < 0) {
     close(pipefd[0]); close(pipefd[1]);
-    snprintf(result, result_sz, "ERR fork: %s", strerror(errno));
-    return;
+    snprintf(app->status, sizeof(app->status), "ERR fork: %s", strerror(errno));
+    app->dirty = 1;
+    return -1;
   }
 
   if (pid == 0) {
-    /* Child */
     close(pipefd[0]);
     dup2(pipefd[1], STDOUT_FILENO);
     dup2(pipefd[1], STDERR_FILENO);
     close(pipefd[1]);
-    const char *sh = (shell && shell[0]) ? shell : "/bin/sh";
+    const char *sh = (app->cfg.action_shell[0]) ? app->cfg.action_shell : "/bin/sh";
     execl(sh, sh, "-c", action->command, (char *)NULL);
     _exit(127);
   }
 
-  /* Parent */
   close(pipefd[1]);
+  /* Set pipe to non-blocking so main loop can drain it incrementally */
+  int flags = fcntl(pipefd[0], F_GETFL, 0);
+  if (flags >= 0) fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
 
-  char out_buf[CMD_OUTPUT_BUF];
-  int out_len = 0;
+  app->action_pid = pid;
+  app->action_pipe_fd = pipefd[0];
+  app->action_output_len = 0;
+  app->action_output[0] = '\0';
+  double timeout_s = app->cfg.action_timeout_ms / 1000.0;
+  if (timeout_s < 0.1) timeout_s = 0.1;
+  app->action_deadline = monotonic_s() + timeout_s;
+  snprintf(app->action_label, sizeof(app->action_label), "[%s] %s", action->section, action->name);
 
-  struct pollfd pfd = { .fd = pipefd[0], .events = POLLIN };
-  double deadline = monotonic_s() + timeout_s;
+  snprintf(app->status, sizeof(app->status), "Running %s ...", app->action_label);
+  app->dirty = 1;
+  return 0;
+}
 
-  while (1) {
-    double remain = deadline - monotonic_s();
-    if (remain <= 0) break;
-    int ms = (int)(remain * 1000.0);
-    if (ms < 1) ms = 1;
-    int rc = poll(&pfd, 1, ms);
-    if (rc <= 0) break;
-    if (pfd.revents & POLLIN) {
-      ssize_t r = read(pipefd[0], out_buf + out_len,
-                       sizeof(out_buf) - 1 - out_len);
-      if (r <= 0) break;
-      out_len += (int)r;
-      if (out_len >= (int)sizeof(out_buf) - 1) break;
+/* Poll a running async action. Called each iteration of the main loop.
+ * When the action finishes or times out, updates app->status and resets state. */
+static void action_poll(app_state_t *app) {
+  if (app->action_pid <= 0) return;
+
+  /* Try to read available output */
+  int space = CMD_OUTPUT_BUF - 1 - app->action_output_len;
+  if (app->action_pipe_fd >= 0 && space > 0) {
+    ssize_t r = read(app->action_pipe_fd,
+                     app->action_output + app->action_output_len,
+                     (size_t)space);
+    if (r > 0) {
+      app->action_output_len += (int)r;
+      app->action_output[app->action_output_len] = '\0';
     }
-    if (pfd.revents & (POLLHUP | POLLERR)) break;
   }
-  close(pipefd[0]);
-  out_buf[out_len] = '\0';
 
-  /* Wait for child */
-  int status;
-  pid_t wp = waitpid(pid, &status, WNOHANG);
+  /* Check if child exited */
+  int wstatus;
+  pid_t wp = waitpid(app->action_pid, &wstatus, WNOHANG);
+
   if (wp == 0) {
-    /* Still running, kill it */
-    kill(pid, SIGKILL);
-    waitpid(pid, &status, 0);
-    snprintf(result, result_sz, "Action timeout: [%s] %s", action->section, action->name);
-    return;
+    /* Still running — check timeout */
+    if (monotonic_s() >= app->action_deadline) {
+      kill(app->action_pid, SIGKILL);
+      waitpid(app->action_pid, &wstatus, 0);
+      snprintf(app->status, sizeof(app->status), "Action timeout: %s", app->action_label);
+      goto cleanup;
+    }
+    return; /* still running, not timed out */
   }
 
-  /* Get first non-empty line from output */
-  char condensed[MAX_OSD_TEXT_CHARS + 1] = "";
-  for (int i = 0; i < out_len; i++) {
-    if (out_buf[i] == '\n' || out_buf[i] == '\r') {
-      out_buf[i] = '\0';
-      if (out_buf[0]) {
-        snprintf(condensed, sizeof(condensed), "%s", out_buf);
-        break;
-      }
-      /* Shift remaining */
-      int rem = out_len - i - 1;
-      if (rem > 0) memmove(out_buf, out_buf + i + 1, rem);
-      out_buf[rem] = '\0';
-      out_len = rem;
-      i = -1;
+  /* Child finished (or waitpid error) */
+  {
+    char condensed[MAX_OSD_TEXT_CHARS + 1];
+    extract_first_line(app->action_output, app->action_output_len, condensed, sizeof(condensed));
+
+    int rc = (wp > 0 && WIFEXITED(wstatus)) ? WEXITSTATUS(wstatus) : -1;
+    if (rc == 0) {
+      if (condensed[0])
+        snprintf(app->status, sizeof(app->status), "OK %s: %s", app->action_label, condensed);
+      else
+        snprintf(app->status, sizeof(app->status), "OK %s", app->action_label);
+    } else {
+      if (condensed[0])
+        snprintf(app->status, sizeof(app->status), "ERR %d %s: %s", rc, app->action_label, condensed);
+      else
+        snprintf(app->status, sizeof(app->status), "ERR %d %s", rc, app->action_label);
     }
   }
-  if (!condensed[0] && out_buf[0])
-    snprintf(condensed, sizeof(condensed), "%s", out_buf);
 
-  int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-  if (rc == 0) {
-    if (condensed[0])
-      snprintf(result, result_sz, "OK [%s] %s: %s", action->section, action->name, condensed);
-    else
-      snprintf(result, result_sz, "OK [%s] %s", action->section, action->name);
-  } else {
-    if (condensed[0])
-      snprintf(result, result_sz, "ERR %d [%s] %s: %s", rc, action->section, action->name, condensed);
-    else
-      snprintf(result, result_sz, "ERR %d [%s] %s", rc, action->section, action->name);
-  }
+cleanup:
+  if (app->action_pipe_fd >= 0) { close(app->action_pipe_fd); app->action_pipe_fd = -1; }
+  app->action_pid = -1;
+  app->dirty = 1;
 }
 
 static void evaluate_radio_rules(app_state_t *app, int src_idx, double now) {
@@ -1679,13 +1831,11 @@ static void evaluate_radio_rules(app_state_t *app, int src_idx, double now) {
          i, rule->name, rule->action_index,
          app->actions[rule->action_index].command);
 
-    char result[256];
-    execute_action(&app->actions[rule->action_index], app->cfg.action_timeout_ms,
-                   app->cfg.action_shell, result, sizeof(result));
-
-    snprintf(app->status, sizeof(app->status),
-             "%s (trigger #%d '%s')",
-             result, st->trigger_count, rule->name);
+    if (action_launch(app, &app->actions[rule->action_index]) == 0) {
+      snprintf(app->status, sizeof(app->status),
+               "Radio trigger #%d '%s' -> %s",
+               st->trigger_count, rule->name, app->action_label);
+    }
     app->dirty = 1;
   }
 }
@@ -1734,6 +1884,26 @@ static void init_asset_state(app_state_t *app) {
   if (mid >= 0 && mid < ASSET_COUNT) {
     app->asset_enabled[mid] = 0;
     app->pending_asset_updates[mid] = 0;
+  }
+
+  /* Splashscreen: set initial phase */
+  splashscreen_t *sp = &app->cfg.splashscreen;
+  if (sp->enabled && sp->asset_id >= 0 && sp->asset_id < ASSET_COUNT &&
+      sp->asset_id == app->cfg.menu_asset_id) {
+    LOGW("Splashscreen asset_id %d collides with menu_asset_id; splash disabled", sp->asset_id);
+    sp->enabled = 0;
+  }
+  if (sp->enabled && sp->asset_id >= 0 && sp->asset_id < ASSET_COUNT &&
+      app->splash_phase == SPLASH_IDLE) {
+    if (sp->delay_s > 0.0) {
+      /* Delay phase: don't enable asset yet */
+      app->splash_phase = SPLASH_DELAY;
+    } else {
+      /* No delay: enable asset immediately */
+      app->asset_enabled[sp->asset_id] = 1;
+      app->pending_asset_updates[sp->asset_id] = 1;
+      app->splash_phase = SPLASH_SHOWING;
+    }
   }
 }
 
@@ -1841,6 +2011,11 @@ static int reload_config(app_state_t *app) {
   /* Re-init radio states */
   memset(app->radio_states, 0, sizeof(app->radio_states));
 
+  /* Reset splash state machine (config may have changed splash settings) */
+  app->splash_phase = SPLASH_DONE;
+  app->splash_next_event = 0.0;
+  app->splash_pending_opacity = -1;
+
   snprintf(app->status, sizeof(app->status), "Config reloaded");
   app->dirty = 1;
   return 0;
@@ -1870,6 +2045,10 @@ static int run_controller(app_state_t *app) {
   app->sse.last_connect_attempt = 0.0;
 
   app->active_source = -1;
+  app->splash_pending_opacity = -1;
+  app->splash_last_opacity = -1;
+  app->action_pid = -1;
+  app->action_pipe_fd = -1;
   app->dirty = 1;
   app->last_send_mono = 0.0;
   app->last_menu_activity_mono = monotonic_s();
@@ -1884,6 +2063,15 @@ static int run_controller(app_state_t *app) {
   LOGI("waybeam_hub started, SSE=%s, destinations=%d", app->cfg.sse_url, app->dest_count);
   for (int i = 0; i < app->dest_count; i++)
     LOGI("  -> %s:%d", app->destinations[i].host, app->destinations[i].port);
+
+  {
+    splashscreen_t *sp = &app->cfg.splashscreen;
+    if (sp->enabled)
+      LOGI("Splashscreen: asset_id=%d, duration=%.1fs, opacity=%d, delay=%.1fs, fadeout=%.1fs",
+           sp->asset_id, sp->duration_s, sp->opacity, sp->delay_s, sp->fadeout_s);
+    else
+      LOGV(app, "Splashscreen: disabled");
+  }
 
   while (!g_stop) {
     now = monotonic_s();
@@ -1934,6 +2122,9 @@ static int run_controller(app_state_t *app) {
     }
 
     now = monotonic_s();
+
+    /* Poll async action */
+    action_poll(app);
 
     /* Refresh source links */
     refresh_source_links(app, now);
@@ -1988,6 +2179,70 @@ static int run_controller(app_state_t *app) {
       app->last_menu_activity_mono = now;
     }
 
+    /* Splashscreen state machine */
+    now = monotonic_s();
+    if (app->splash_next_event > 0.0 && now >= app->splash_next_event) {
+      splashscreen_t *sp = &app->cfg.splashscreen;
+      switch (app->splash_phase) {
+      case SPLASH_DELAY:
+        /* Delay expired — enable asset, transition to SHOWING */
+        LOGI("Splashscreen: delay elapsed, enabling asset %d", sp->asset_id);
+        set_asset_enabled(app, sp->asset_id, 1);
+        app->splash_phase = SPLASH_SHOWING;
+        app->splash_next_event = now + sp->duration_s;
+        app->dirty = 1;
+        break;
+      case SPLASH_SHOWING:
+        /* Duration expired — fade or disable */
+        if (sp->fadeout_s > 0.0) {
+          LOGI("Splashscreen: starting %.1fs fade on asset %d", sp->fadeout_s, sp->asset_id);
+          app->splash_phase = SPLASH_FADING;
+          app->splash_fade_end = now + sp->fadeout_s;
+          /* Max 8 fade steps, each sends full enabled+opacity update */
+          int start_opa = (sp->opacity >= 0) ? sp->opacity : 100;
+          double tick_s = sp->fadeout_s / 8.0;
+          if (tick_s < 0.1) tick_s = 0.1;
+          app->splash_fade_tick_s = tick_s;
+          app->splash_next_event = now + tick_s;
+          app->splash_last_opacity = start_opa;
+        } else {
+          LOGI("Splashscreen: hiding asset %d after %.1fs", sp->asset_id, sp->duration_s);
+          set_asset_enabled(app, sp->asset_id, 0);
+          app->splash_phase = SPLASH_DONE;
+          app->splash_next_event = 0.0;
+          app->dirty = 1;
+        }
+        break;
+      case SPLASH_FADING: {
+        /* Interpolate opacity */
+        double remaining = app->splash_fade_end - now;
+        if (remaining <= 0.0) {
+          LOGI("Splashscreen: fade complete, hiding asset %d", sp->asset_id);
+          set_asset_enabled(app, sp->asset_id, 0);
+          app->splash_phase = SPLASH_DONE;
+          app->splash_next_event = 0.0;
+          app->dirty = 1;
+        } else {
+          int start_opa = (sp->opacity >= 0) ? sp->opacity : 100;
+          int cur_opa = (int)(start_opa * (remaining / sp->fadeout_s));
+          if (cur_opa < 0) cur_opa = 0;
+          if (cur_opa != app->splash_last_opacity) {
+            app->splash_pending_opacity = cur_opa;
+            app->splash_last_opacity = cur_opa;
+            /* Re-set pending enable so payload includes enabled:true + opacity */
+            app->pending_asset_updates[sp->asset_id] = 1;
+            app->dirty = 1;
+          }
+          app->splash_next_event = now + app->splash_fade_tick_s;
+        }
+        break;
+      }
+      default:
+        app->splash_next_event = 0.0;
+        break;
+      }
+    }
+
     /* Send OSD payload only when state actually changed */
     now = monotonic_s();
     if (app->dirty) {
@@ -2005,9 +2260,23 @@ static int run_controller(app_state_t *app) {
 
       app->last_send_mono = now;
 
+      /* Arm splashscreen timer after first send */
+      if (app->splash_next_event <= 0.0 && app->splash_phase != SPLASH_DONE &&
+          app->splash_phase != SPLASH_IDLE) {
+        splashscreen_t *sp = &app->cfg.splashscreen;
+        if (app->splash_phase == SPLASH_DELAY) {
+          app->splash_next_event = now + sp->delay_s;
+          LOGI("Splashscreen: delaying %.1fs before enabling asset %d", sp->delay_s, sp->asset_id);
+        } else if (app->splash_phase == SPLASH_SHOWING) {
+          app->splash_next_event = now + sp->duration_s;
+          LOGI("Splashscreen: enabled asset %d for %.1fs", sp->asset_id, sp->duration_s);
+        }
+      }
+
       /* Clear pending after successful send */
       for (int i = 0; i < ASSET_COUNT; i++)
         app->pending_asset_updates[i] = -1;
+      app->splash_pending_opacity = -1;
       app->dirty = 0;
     }
 
@@ -2109,15 +2378,9 @@ static int run_controller(app_state_t *app) {
         continue;
       }
 
-
-
       if (e->kind == ENTRY_ACTION && e->action_index >= 0 && e->action_index < app->action_count) {
-        char result[256];
-        execute_action(&app->actions[e->action_index], app->cfg.action_timeout_ms,
-                       app->cfg.action_shell, result, sizeof(result));
-        snprintf(app->status, sizeof(app->status), "%s", result);
+        action_launch(app, &app->actions[e->action_index]);
         app->last_menu_activity_mono = monotonic_s();
-        app->dirty = 1;
         continue;
       }
     }
@@ -2125,6 +2388,12 @@ static int run_controller(app_state_t *app) {
 
   /* Cleanup */
   LOGI("Shutting down");
+  if (app->action_pid > 0) {
+    kill(app->action_pid, SIGKILL);
+    waitpid(app->action_pid, NULL, 0);
+    if (app->action_pipe_fd >= 0) close(app->action_pipe_fd);
+    app->action_pid = -1;
+  }
   send_clear_payload(app);
   sse_disconnect(&app->sse);
   if (app->udp_fd >= 0) close(app->udp_fd);
