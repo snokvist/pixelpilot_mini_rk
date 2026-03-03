@@ -1,6 +1,12 @@
 /*
  * waybeam_hub.c — Minified C port of waybeam_hub.py for SigmaStar Infinity6E
  *
+ * autod – Autod Personal Use License
+ * Copyright (c) 2025 Joakim Snökvist
+ * Licensed for personal, non-commercial use only.
+ * Redistribution or commercial use requires prior written approval from Joakim Snökvist.
+ * See LICENSE.md for full terms.
+ *
  * Single-threaded, poll()-based SSE consumer + UDP OSD producer.
  * Reads config.json + menu.ini for drop-in compatibility with the Python version.
  * No WebUI, no threads, no malloc — pure libc.

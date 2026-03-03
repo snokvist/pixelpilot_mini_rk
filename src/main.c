@@ -1,4 +1,9 @@
-// SPDX-License-Identifier: MIT
+// autod – Autod Personal Use License
+// Copyright (c) 2025 Joakim Snökvist
+// Licensed for personal, non-commercial use only.
+// Redistribution or commercial use requires prior written approval from Joakim Snökvist.
+// See LICENSE.md for full terms.
+//
 // pixelpilot_mini_rk — HDMI + atomic KMS + udev hotplug + GStreamer runner + OSD
 
 #define _GNU_SOURCE
