@@ -1,12 +1,12 @@
 {
   "host": "127.0.0.1",
-  "port": 5005,
+  "port": 7777,
   "interval_ms": 400,
-  "asset_folder": "/etc/waybeam_hub",
+  "asset_folder": "/etc/",
   "initial_off": [],
   "zoom_step": 25,
   "zoom_max": 300,
-  "actions_ini": "",
+  "actions_ini": "/etc/menu.ini",
   "action_timeout_ms": 5000,
   "action_shell": "",
   "menu_asset_id": 7,
@@ -15,17 +15,14 @@
   "sse_url": "http://127.0.0.1:8070/sse",
   "priority": "serial",
   "priority_fallback_s": 5.0,
-  "extra_destinations": [
-    "10.6.0.50:7777"
-  ],
   "verbose": false,
   "splashscreen": {
-    "enabled": false,
-    "asset_id": 6,
+    "enabled": true,
+    "asset_id": 7,
     "duration_s": 5.0,
     "opacity": 80,
-    "delay_s": 0.0,
-    "fadeout_s": 0.0
+    "delay_s": 1.0,
+    "fadeout_s": 2.0
   },
   "tuning": {
     "crsf_axis_deadband": 120,
