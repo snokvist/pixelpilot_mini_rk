@@ -64,6 +64,8 @@
 #define MAX_SECTIONS       16
 #define MAX_DESTINATIONS   4
 #define MAX_KEY_QUEUE      8
+#define MAX_SUBSCRIBERS    8
+#define MAX_CMD_ENTRIES   16
 
 #define SSE_LINE_BUF       4096
 #define SSE_DATA_BUF       4096
@@ -76,7 +78,7 @@
 #define SYNC_MAX_ACTIONS      16
 #define SYNC_BUF              1280
 #define WEB_REQ_BUF        4096
-#define WEB_HTML_BUF      16384
+#define WEB_HTML_BUF      32768
 
 #define SECTION_NAME_LEN   32
 #define ACTION_NAME_LEN    64
@@ -149,6 +151,11 @@ typedef struct {
 } splashscreen_t;
 
 typedef struct {
+  char name[ACTION_NAME_LEN];
+  char command[ACTION_CMD_LEN];
+} cmd_entry_t;
+
+typedef struct {
   char host[HOST_LEN];
   int port;
   int interval_ms;
@@ -171,6 +178,11 @@ typedef struct {
   splashscreen_t splashscreen;
   char sync_peer[HOST_LEN];
   char sync_role[16];
+  char identity[HOST_LEN];
+  char subscribe_video_cmd[ACTION_CMD_LEN];
+  int subscriber_timeout_s;
+  cmd_entry_t cmds[MAX_CMD_ENTRIES];
+  int cmd_count;
 } config_t;
 
 typedef struct {
@@ -214,6 +226,13 @@ typedef struct {
 } radio_rule_state_t;
 
 typedef struct {
+  char identity[HOST_LEN];
+  char ip[HOST_LEN];
+  int video_port;
+  double last_seen_mono;
+} subscriber_t;
+
+typedef struct {
   int channels[CRSF_DISPLAY_CHANNELS];
   int select_pressed;
   int back_pressed;
@@ -255,6 +274,7 @@ typedef struct {
 typedef struct {
   int server_fd;
   int client_fd;
+  char client_ip[HOST_LEN];
   char req_buf[WEB_REQ_BUF];
   int req_len;
   char html[WEB_HTML_BUF];
@@ -379,6 +399,8 @@ typedef struct app_state {
   char last_logged_status[256];
   webui_server_t webui;
   sync_state_t sync;
+  subscriber_t subscribers[MAX_SUBSCRIBERS];
+  int subscriber_count;
 } app_state_t;
 
 /* ---------------------------------------------------------------------------
@@ -538,6 +560,14 @@ static void config_defaults(config_t *cfg) {
   cfg->splashscreen.delay_s = 0.0;
   cfg->splashscreen.fadeout_s = 0.0;
 
+  /* Subscriber defaults */
+  cfg->subscribe_video_cmd[0] = '\0';
+  cfg->subscriber_timeout_s = 120;
+
+  /* Identity defaults to hostname */
+  if (gethostname(cfg->identity, sizeof(cfg->identity)) != 0)
+    snprintf(cfg->identity, sizeof(cfg->identity), "waybeam-hub");
+
   /* Sync defaults */
   cfg->sync_peer[0] = '\0';
   snprintf(cfg->sync_role, sizeof(cfg->sync_role), "vehicle");
@@ -626,6 +656,42 @@ static int parse_splashscreen_object(const char *p, splashscreen_t *s) {
   return -1;
 }
 
+static int parse_cmd_object(const char *p, config_t *cfg) {
+  if (!p || *p != '{') return -1;
+  ++p;
+  cfg->cmd_count = 0;
+  while (*p) {
+    p = skip_ws(p);
+    if (*p == '}') return 0;
+    if (*p != '"') return -1;
+    if (cfg->cmd_count >= MAX_CMD_ENTRIES) {
+      p = skip_json_value(p);        /* skip key */
+      if (!p) return -1;
+      p = skip_ws(p);
+      if (*p != ':') return -1;
+      ++p; p = skip_ws(p);
+      p = skip_json_value(p);        /* skip value */
+      if (!p) return -1;
+    } else {
+      cmd_entry_t *c = &cfg->cmds[cfg->cmd_count];
+      const char *next = parse_string(p, c->name, sizeof(c->name));
+      if (!next) return -1;
+      p = skip_ws(next);
+      if (*p != ':') return -1;
+      ++p; p = skip_ws(p);
+      next = parse_string(p, c->command, sizeof(c->command));
+      if (!next) return -1;
+      p = next;
+      cfg->cmd_count++;
+    }
+    p = skip_ws(p);
+    if (*p == ',') { ++p; continue; }
+    if (*p == '}') return 0;
+    return -1;
+  }
+  return -1;
+}
+
 static int parse_config_json(const char *path, config_t *cfg) {
   config_defaults(cfg);
 
@@ -665,8 +731,11 @@ static int parse_config_json(const char *path, config_t *cfg) {
     else if (strcmp(key, "priority") == 0) { p = parse_string(p, cfg->priority, sizeof(cfg->priority)); }
     else if (strcmp(key, "priority_fallback_s") == 0) { p = parse_json_double(p, &cfg->priority_fallback_s); }
     else if (strcmp(key, "verbose") == 0) { p = parse_json_bool(p, &cfg->verbose); }
+    else if (strcmp(key, "identity") == 0) { p = parse_string(p, cfg->identity, sizeof(cfg->identity)); }
     else if (strcmp(key, "sync_peer") == 0) { p = parse_string(p, cfg->sync_peer, sizeof(cfg->sync_peer)); }
     else if (strcmp(key, "sync_role") == 0) { p = parse_string(p, cfg->sync_role, sizeof(cfg->sync_role)); }
+    else if (strcmp(key, "subscribe_video_cmd") == 0) { p = parse_string(p, cfg->subscribe_video_cmd, sizeof(cfg->subscribe_video_cmd)); }
+    else if (strcmp(key, "subscriber_timeout_s") == 0) { p = parse_json_int(p, &cfg->subscriber_timeout_s); }
     else if (strcmp(key, "initial_off") == 0) {
       p = parse_json_int_array(p, cfg->initial_off, ASSET_COUNT, &cfg->initial_off_count);
     }
@@ -679,6 +748,10 @@ static int parse_config_json(const char *path, config_t *cfg) {
     }
     else if (strcmp(key, "splashscreen") == 0) {
       if (parse_splashscreen_object(p, &cfg->splashscreen) < 0) return -1;
+      p = skip_json_value(p);
+    }
+    else if (strcmp(key, "cmd") == 0) {
+      if (parse_cmd_object(p, cfg) < 0) return -1;
       p = skip_json_value(p);
     }
     else { p = skip_json_value(p); }
@@ -1458,6 +1531,8 @@ static void parse_destinations_array(const char *body, app_state_t *app) {
   }
 }
 
+static int action_launch(app_state_t *app, const menu_action_t *action);
+
 static int webui_enqueue_command(app_state_t *app, const char *body) {
   /* Commands that contain "menu" as substring must be checked FIRST */
   if (strstr(body, "\"show_menu\"")) {
@@ -1486,6 +1561,39 @@ static int webui_enqueue_command(app_state_t *app, const char *body) {
       set_asset_enabled(app, i, 0);
     app->dirty = 1;
     return 0;
+  }
+  if (strstr(body, "\"run_action\"")) {
+    char section[SECTION_NAME_LEN] = "", name[ACTION_NAME_LEN] = "";
+    const char *sp = strstr(body, "\"section\"");
+    if (sp) { sp += 9; while (*sp && (*sp == ' ' || *sp == ':')) sp++; if (*sp == '"') parse_string(sp, section, sizeof(section)); }
+    const char *np = strstr(body, "\"name\"");
+    if (np) { np += 6; while (*np && (*np == ' ' || *np == ':')) np++; if (*np == '"') parse_string(np, name, sizeof(name)); }
+    if (section[0] && name[0]) {
+      for (int i = 0; i < app->action_count; i++) {
+        if (strcmp(app->actions[i].section, section) == 0 &&
+            strcmp(app->actions[i].name, name) == 0) {
+          return action_launch(app, &app->actions[i]);
+        }
+      }
+    }
+    return -1;
+  }
+  if (strstr(body, "\"run_cmd\"")) {
+    char name[ACTION_NAME_LEN] = "";
+    const char *np = strstr(body, "\"name\"");
+    if (np) { np += 6; while (*np && (*np == ' ' || *np == ':')) np++; if (*np == '"') parse_string(np, name, sizeof(name)); }
+    if (name[0]) {
+      for (int i = 0; i < app->cfg.cmd_count; i++) {
+        if (strcmp(app->cfg.cmds[i].name, name) == 0) {
+          menu_action_t action;
+          snprintf(action.section, sizeof(action.section), "cmd");
+          snprintf(action.name, sizeof(action.name), "%s", app->cfg.cmds[i].name);
+          snprintf(action.command, sizeof(action.command), "%s", app->cfg.cmds[i].command);
+          return action_launch(app, &action);
+        }
+      }
+    }
+    return -1;
   }
   if (strstr(body, "\"remote_action\"")) {
     if (!app->sync.enabled) return -1;
@@ -1554,6 +1662,100 @@ static int webui_enqueue_command(app_state_t *app, const char *body) {
   return -1;
 }
 
+/* ---------------------------------------------------------------------------
+ * Subscriber tracking
+ * --------------------------------------------------------------------------- */
+
+static subscriber_t *subscriber_find_or_create(app_state_t *app, const char *identity) {
+  /* Find existing by identity */
+  for (int i = 0; i < app->subscriber_count; i++) {
+    if (strcmp(app->subscribers[i].identity, identity) == 0)
+      return &app->subscribers[i];
+  }
+  /* Allocate new slot */
+  if (app->subscriber_count < MAX_SUBSCRIBERS) {
+    subscriber_t *s = &app->subscribers[app->subscriber_count++];
+    memset(s, 0, sizeof(*s));
+    snprintf(s->identity, sizeof(s->identity), "%s", identity);
+    return s;
+  }
+  /* Evict oldest */
+  int oldest = 0;
+  for (int i = 1; i < app->subscriber_count; i++) {
+    if (app->subscribers[i].last_seen_mono < app->subscribers[oldest].last_seen_mono)
+      oldest = i;
+  }
+  subscriber_t *s = &app->subscribers[oldest];
+  memset(s, 0, sizeof(*s));
+  snprintf(s->identity, sizeof(s->identity), "%s", identity);
+  return s;
+}
+
+static void subscriber_expire(app_state_t *app, double now) {
+  double timeout = (double)app->cfg.subscriber_timeout_s;
+  int i = 0;
+  while (i < app->subscriber_count) {
+    if ((now - app->subscribers[i].last_seen_mono) >= timeout) {
+      LOGI("Subscriber expired: %s (%s)", app->subscribers[i].identity, app->subscribers[i].ip);
+      app->subscribers[i] = app->subscribers[app->subscriber_count - 1];
+      app->subscriber_count--;
+    } else {
+      i++;
+    }
+  }
+}
+
+static int subscribe_video_exec(app_state_t *app, const char *ip, int port) {
+  if (!app->cfg.subscribe_video_cmd[0]) return -1;
+
+  /* Validate IP */
+  struct in_addr tmp;
+  if (inet_pton(AF_INET, ip, &tmp) != 1) {
+    LOGW("subscribe_video: invalid IP '%s'", ip);
+    return -1;
+  }
+  /* Validate port */
+  if (port < 1 || port > 65535) {
+    LOGW("subscribe_video: invalid port %d", port);
+    return -1;
+  }
+
+  /* Build command by replacing {ip} and {port} */
+  char cmd[ACTION_CMD_LEN];
+  char port_str[8];
+  snprintf(port_str, sizeof(port_str), "%d", port);
+
+  int ci = 0;
+  const char *p = app->cfg.subscribe_video_cmd;
+  while (*p && ci < (int)sizeof(cmd) - 1) {
+    if (strncmp(p, "{ip}", 4) == 0) {
+      int len = (int)strlen(ip);
+      if (ci + len >= (int)sizeof(cmd)) break;
+      memcpy(cmd + ci, ip, len);
+      ci += len;
+      p += 4;
+    } else if (strncmp(p, "{port}", 6) == 0) {
+      int len = (int)strlen(port_str);
+      if (ci + len >= (int)sizeof(cmd)) break;
+      memcpy(cmd + ci, port_str, len);
+      ci += len;
+      p += 6;
+    } else {
+      cmd[ci++] = *p++;
+    }
+  }
+  cmd[ci] = '\0';
+
+  /* Launch via action_launch using a temporary action struct */
+  menu_action_t action;
+  snprintf(action.section, sizeof(action.section), "subscribe");
+  snprintf(action.name, sizeof(action.name), "video→%s:%d", ip, port);
+  snprintf(action.command, sizeof(action.command), "%s", cmd);
+
+  LOGI("subscribe_video: executing: %s", cmd);
+  return action_launch(app, &action);
+}
+
 static int webui_build_state_json(app_state_t *app, char *out, int out_sz) {
   menu_entry_t *entries;
   int entry_count;
@@ -1591,9 +1793,12 @@ static int webui_build_state_json(app_state_t *app, char *out, int out_sz) {
   int combo_active = src ? src->combo_active : 0;
   int combo_latched = src ? src->combo_latched : 0;
 
+  char identity_esc[HOST_LEN * 2];
+  json_escape(app->cfg.identity, identity_esc, sizeof(identity_esc));
+
   int n = 0;
   n += snprintf(out + n, out_sz - n,
-                "{\"type\":\"menu_state\",\"status\":\"%s\","
+                "{\"type\":\"menu_state\",\"identity\":\"%s\",\"status\":\"%s\","
                 "\"active_source\":\"%s\",\"menu_visible\":%s,"
                 "\"current_section\":\"%s\",\"selected\":%d,\"entry_count\":%d,"
                 "\"selected_label\":\"%s\","
@@ -1601,6 +1806,7 @@ static int webui_build_state_json(app_state_t *app, char *out, int out_sz) {
                 "\"channels\":%s,\"last_update_age_ms\":%d,"
                 "\"nav_direction\":\"%s\",\"select_pressed\":%s,"
                 "\"combo_active\":%s,\"combo_latched\":%s}",
+                identity_esc,
                 status_esc,
                 app->active_source == 0 ? "serial" : (app->active_source == 1 ? "joystick" : "none"),
                 menu_visible ? "true" : "false",
@@ -1708,6 +1914,58 @@ static int webui_build_state_json(app_state_t *app, char *out, int out_sz) {
     if (n >= out_sz) n = out_sz - 1;
   }
 
+  /* Subscribers */
+  n += snprintf(out + n, out_sz - n, ",\"subscribers\":[");
+  if (n >= out_sz) n = out_sz - 1;
+  for (int i = 0; i < app->subscriber_count; i++) {
+    subscriber_t *s = &app->subscribers[i];
+    char id_esc[HOST_LEN * 2], ip_esc[HOST_LEN * 2];
+    json_escape(s->identity, id_esc, sizeof(id_esc));
+    json_escape(s->ip, ip_esc, sizeof(ip_esc));
+    int age_ms = (int)((now - s->last_seen_mono) * 1000.0);
+    n += snprintf(out + n, out_sz - n, "%s{\"identity\":\"%s\",\"ip\":\"%s\",\"video_port\":%d,\"age_ms\":%d}",
+                  i ? "," : "", id_esc, ip_esc, s->video_port, age_ms);
+    if (n >= out_sz) n = out_sz - 1;
+  }
+  n += snprintf(out + n, out_sz - n, "]");
+  if (n >= out_sz) n = out_sz - 1;
+
+  /* Subscribe video capability */
+  n += snprintf(out + n, out_sz - n, ",\"has_subscribe_video\":%s",
+                app->cfg.subscribe_video_cmd[0] ? "true" : "false");
+  if (n >= out_sz) n = out_sz - 1;
+
+  /* Menu.ini actions */
+  n += snprintf(out + n, out_sz - n, ",\"actions\":[");
+  if (n >= out_sz) n = out_sz - 1;
+  for (int i = 0; i < app->action_count; i++) {
+    char se[64], ne[128];
+    json_escape(app->actions[i].section, se, sizeof(se));
+    json_escape(app->actions[i].name, ne, sizeof(ne));
+    n += snprintf(out + n, out_sz - n, "%s{\"section\":\"%s\",\"name\":\"%s\"}",
+                  i ? "," : "", se, ne);
+    if (n >= out_sz) n = out_sz - 1;
+  }
+  n += snprintf(out + n, out_sz - n, "]");
+  if (n >= out_sz) n = out_sz - 1;
+
+  /* Config commands */
+  n += snprintf(out + n, out_sz - n, ",\"cmds\":[");
+  if (n >= out_sz) n = out_sz - 1;
+  for (int i = 0; i < app->cfg.cmd_count; i++) {
+    char ne[128];
+    json_escape(app->cfg.cmds[i].name, ne, sizeof(ne));
+    n += snprintf(out + n, out_sz - n, "%s{\"name\":\"%s\"}", i ? "," : "", ne);
+    if (n >= out_sz) n = out_sz - 1;
+  }
+  n += snprintf(out + n, out_sz - n, "]");
+  if (n >= out_sz) n = out_sz - 1;
+
+  /* Action running state */
+  n += snprintf(out + n, out_sz - n, ",\"action_running\":%s",
+                app->action_pid > 0 ? "true" : "false");
+  if (n >= out_sz) n = out_sz - 1;
+
   n += snprintf(out + n, out_sz - n, "}");
   if (n >= out_sz) n = out_sz - 1;
   return n;
@@ -1812,7 +2070,7 @@ static void webui_handle_request(app_state_t *app, const char *req, int req_len)
   }
 
   if (strcmp(method, "GET") == 0 && strcmp(path, "/state") == 0) {
-    char json[4096];
+    char json[16384];
     int n = webui_build_state_json(app, json, sizeof(json));
     if (n < 0) n = 0;
     if (n >= (int)sizeof(json)) n = (int)sizeof(json) - 1;
@@ -1833,6 +2091,74 @@ static void webui_handle_request(app_state_t *app, const char *req, int req_len)
     return;
   }
 
+  if (strcmp(method, "POST") == 0 && strcmp(path, "/subscribe") == 0) {
+    char tmp[512];
+    int copy_n = body_len;
+    if (copy_n >= (int)sizeof(tmp)) copy_n = (int)sizeof(tmp) - 1;
+    memcpy(tmp, body, (size_t)copy_n);
+    tmp[copy_n] = '\0';
+
+    /* Parse identity, ip, video_port from JSON body */
+    char identity[HOST_LEN] = "";
+    char ip[HOST_LEN] = "";
+    int video_port = 5600;
+
+    const char *pp = strstr(tmp, "\"identity\"");
+    if (pp) { pp += 10; while (*pp && (*pp == ' ' || *pp == ':')) pp++; if (*pp == '"') parse_string(pp, identity, sizeof(identity)); }
+    pp = strstr(tmp, "\"ip\"");
+    if (pp) { pp += 4; while (*pp && (*pp == ' ' || *pp == ':')) pp++; if (*pp == '"') parse_string(pp, ip, sizeof(ip)); }
+    pp = strstr(tmp, "\"video_port\"");
+    if (pp) { pp += 12; while (*pp && (*pp == ' ' || *pp == ':')) pp++; parse_json_int(pp, &video_port); }
+
+    /* Default ip to connecting client */
+    if (!ip[0]) snprintf(ip, sizeof(ip), "%s", web->client_ip);
+    /* Default identity to ip */
+    if (!identity[0]) snprintf(identity, sizeof(identity), "%s", ip);
+
+    subscriber_t *s = subscriber_find_or_create(app, identity);
+    snprintf(s->ip, sizeof(s->ip), "%s", ip);
+    s->video_port = video_port;
+    s->last_seen_mono = monotonic_s();
+    LOGI("Subscriber registered: %s (%s:%d)", s->identity, s->ip, s->video_port);
+
+    char resp[128];
+    int rn = snprintf(resp, sizeof(resp), "{\"ok\":true,\"subscribers\":%d}", app->subscriber_count);
+    webui_send_response(web->client_fd, "200 OK", "application/json", resp, rn);
+    return;
+  }
+
+  if (strcmp(method, "POST") == 0 && strcmp(path, "/subscribe_video") == 0) {
+    if (!app->cfg.subscribe_video_cmd[0]) {
+      webui_send_response(web->client_fd, "400 Bad Request", "application/json",
+                          "{\"error\":\"subscribe_video_cmd not configured\"}", 46);
+      return;
+    }
+
+    char tmp[512];
+    int copy_n = body_len;
+    if (copy_n >= (int)sizeof(tmp)) copy_n = (int)sizeof(tmp) - 1;
+    memcpy(tmp, body, (size_t)copy_n);
+    tmp[copy_n] = '\0';
+
+    char ip[HOST_LEN] = "";
+    int port = 5600;
+
+    const char *pp = strstr(tmp, "\"ip\"");
+    if (pp) { pp += 4; while (*pp && (*pp == ' ' || *pp == ':')) pp++; if (*pp == '"') parse_string(pp, ip, sizeof(ip)); }
+    pp = strstr(tmp, "\"port\"");
+    if (pp) { pp += 6; while (*pp && (*pp == ' ' || *pp == ':')) pp++; parse_json_int(pp, &port); }
+
+    /* Default ip to connecting client */
+    if (!ip[0]) snprintf(ip, sizeof(ip), "%s", web->client_ip);
+
+    if (subscribe_video_exec(app, ip, port) == 0)
+      webui_send_response(web->client_fd, "200 OK", "application/json", "{\"ok\":true}", 11);
+    else
+      webui_send_response(web->client_fd, "500 Internal Server Error", "application/json",
+                          "{\"error\":\"action failed\"}", 25);
+    return;
+  }
+
   webui_send_response(web->client_fd, "404 Not Found", "application/json", "{\"error\":\"not found\"}", 21);
 }
 
@@ -1847,6 +2173,7 @@ static void webui_poll(app_state_t *app) {
     if (cfd >= 0) {
       web->client_fd = cfd;
       web->req_len = 0;
+      inet_ntop(AF_INET, &cli_addr.sin_addr, web->client_ip, sizeof(web->client_ip));
     }
   } else {
     char *buf = web->req_buf;
@@ -3462,6 +3789,9 @@ static int run_controller(app_state_t *app) {
 
       app->dirty = 0;
     }
+
+    /* Expire stale subscribers */
+    subscriber_expire(app, monotonic_s());
 
     /* Sync hello timer and peer timeout */
     if (app->sync.enabled) {
