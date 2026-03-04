@@ -437,6 +437,11 @@ struct VideoDecoder {
     uint32_t frame_fourcc;
     RK_U32 frame_hor_stride;
     RK_U32 frame_ver_stride;
+
+    DecoderErrorMode error_mode;
+    guint feed_retry_sleep_us;
+    guint idle_sleep_us;
+    guint output_timeout_us;
 };
 
 VideoDecoder *video_decoder_new(void) {
@@ -1319,7 +1324,7 @@ static gpointer frame_thread_func(gpointer data) {
         MppFrame frame = NULL;
         MPP_RET ret = vd->mpi->decode_get_frame(vd->ctx, &frame);
         if (ret != MPP_OK || frame == NULL) {
-            g_usleep(1000);
+            g_usleep(vd->idle_sleep_us);
             continue;
         }
 
@@ -1329,16 +1334,23 @@ static gpointer frame_thread_func(gpointer data) {
             RK_U32 errinfo = mpp_frame_get_errinfo(frame);
             RK_U32 discard = mpp_frame_get_discard(frame);
             if (G_UNLIKELY(errinfo || discard)) {
-                LOGW("MPP: dropping frame errinfo=%u discard=%u", errinfo, discard);
+                gboolean drop_frame = (vd->error_mode == DECODER_ERROR_MODE_STRICT);
+                if (drop_frame) {
+                    LOGW("MPP: dropping frame errinfo=%u discard=%u (strict mode)", errinfo, discard);
+                } else {
+                    LOGW("MPP: presenting partial frame errinfo=%u discard=%u", errinfo, discard);
+                }
                 if (vd->idr_requester != NULL) {
                     idr_requester_handle_warning(vd->idr_requester);
                 }
-                vd->eos_received = mpp_frame_get_eos(frame) ? TRUE : FALSE;
-                mpp_frame_deinit(&frame);
-                if (vd->eos_received) {
-                    break;
+                if (drop_frame) {
+                    vd->eos_received = mpp_frame_get_eos(frame) ? TRUE : FALSE;
+                    mpp_frame_deinit(&frame);
+                    if (vd->eos_received) {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
             }
 
             MppBuffer buffer = mpp_frame_get_buffer(frame);
@@ -1635,6 +1647,11 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     }
     vd->plane_id = chosen_plane;
 
+    vd->error_mode = cfg->decoder_error_mode;
+    vd->feed_retry_sleep_us = cfg->decoder_feed_retry_us > 0 ? (guint)cfg->decoder_feed_retry_us : 2000u;
+    vd->idle_sleep_us = cfg->decoder_idle_sleep_us > 0 ? (guint)cfg->decoder_idle_sleep_us : 1000u;
+    vd->output_timeout_us = cfg->decoder_output_timeout_us > 0 ? (guint)cfg->decoder_output_timeout_us : 5000u;
+
     vd->packet_buf_size = DECODER_READ_BUF_SIZE;
     vd->packet_buf = g_malloc0(vd->packet_buf_size);
     if (vd->packet_buf == NULL) {
@@ -1743,12 +1760,12 @@ int video_decoder_init(VideoDecoder *vd, const AppCfg *cfg, const ModesetResult 
     set_mpp_decoding_parameters(vd);
 
 #if defined(MPP_SET_OUTPUT_TIMEOUT)
-    int64_t timeout = 5000; // allow decode_get_frame() to wake at ~5 ms intervals
+    int64_t timeout = (int64_t)vd->output_timeout_us;
     if (vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_TIMEOUT, &timeout) != MPP_OK) {
         LOGW("Video decoder: failed to set output timeout");
     }
 #else
-    int block = 5; // poll with a small timeout so shutdown does not block indefinitely
+    int block = (int)MAX(1u, (vd->output_timeout_us + 999u) / 1000u);
     if (vd->mpi->control(vd->ctx, MPP_SET_OUTPUT_BLOCK, &block) != MPP_OK) {
         LOGW("Video decoder: failed to set output block timeout");
     }
@@ -1904,7 +1921,7 @@ int video_decoder_feed(VideoDecoder *vd, const guint8 *data, size_t size) {
         if (ret == MPP_OK) {
             return 0;
         }
-        g_usleep(2000);
+        g_usleep(vd->feed_retry_sleep_us);
     }
     return -1;
 }
@@ -1933,7 +1950,7 @@ void video_decoder_send_eos(VideoDecoder *vd) {
             LOGW("Video decoder: giving up on EOS after %d attempts", attempts);
             break;
         }
-        g_usleep(2000);
+        g_usleep(vd->feed_retry_sleep_us);
     }
 }
 

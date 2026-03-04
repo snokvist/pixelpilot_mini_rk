@@ -288,6 +288,36 @@ static char *trim(char *s) {
     return s;
 }
 
+static int parse_positive_u32_strict(const char *value, unsigned int *out) {
+    if (value == NULL || out == NULL) {
+        return -1;
+    }
+
+    while (isspace((unsigned char)*value)) {
+        ++value;
+    }
+    if (*value == '\0' || *value == '-' || *value == '+') {
+        return -1;
+    }
+
+    errno = 0;
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (end == value || errno == ERANGE || parsed == 0 || parsed > UINT_MAX) {
+        return -1;
+    }
+
+    while (end != NULL && isspace((unsigned char)*end)) {
+        ++end;
+    }
+    if (end == NULL || *end != '\0') {
+        return -1;
+    }
+
+    *out = (unsigned int)parsed;
+    return 0;
+}
+
 static int parse_bool(const char *value, int *out) {
     if (!value || !out) {
         return -1;
@@ -1289,6 +1319,47 @@ static int apply_general_key(AppCfg *cfg, const char *section, const char *key, 
         }
         return -1;
     }
+    if (strcasecmp(section, "decoder") == 0 || strcasecmp(section, "video.decoder") == 0 ||
+        strcasecmp(section, "video_decoder") == 0) {
+        if (strcasecmp(key, "error-mode") == 0 || strcasecmp(key, "mode") == 0) {
+            DecoderErrorMode mode;
+            if (cfg_parse_decoder_error_mode(value, &mode) != 0) {
+                LOGE("config: decoder.error-mode '%s' must be strict or partial", value);
+                return -1;
+            }
+            cfg->decoder_error_mode = mode;
+            return 0;
+        }
+        if (strcasecmp(key, "feed-retry-us") == 0) {
+            unsigned int parsed = 0;
+            if (parse_positive_u32_strict(value, &parsed) != 0) {
+                LOGE("config: decoder.feed-retry-us '%s' must be a positive integer <= %u", value, UINT_MAX);
+                return -1;
+            }
+            cfg->decoder_feed_retry_us = parsed;
+            return 0;
+        }
+        if (strcasecmp(key, "idle-sleep-us") == 0) {
+            unsigned int parsed = 0;
+            if (parse_positive_u32_strict(value, &parsed) != 0) {
+                LOGE("config: decoder.idle-sleep-us '%s' must be a positive integer <= %u", value, UINT_MAX);
+                return -1;
+            }
+            cfg->decoder_idle_sleep_us = parsed;
+            return 0;
+        }
+        if (strcasecmp(key, "output-timeout-us") == 0) {
+            unsigned int parsed = 0;
+            if (parse_positive_u32_strict(value, &parsed) != 0) {
+                LOGE("config: decoder.output-timeout-us '%s' must be a positive integer <= %u", value, UINT_MAX);
+                return -1;
+            }
+            cfg->decoder_output_timeout_us = parsed;
+            return 0;
+        }
+        return -1;
+    }
+
     if (strcasecmp(section, "gst") == 0) {
         if (strcasecmp(key, "log") == 0) {
             int v = 0;

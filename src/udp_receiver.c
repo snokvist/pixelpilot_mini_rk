@@ -44,7 +44,8 @@
 
 #define RTP_MIN_HEADER 12
 #define FRAME_EWMA_ALPHA 0.1
-#define FPS_EWMA_ALPHA 0.1
+#define FPS_WINDOW_NS 1000000000ULL // 1 s
+#define FPS_WINDOW_FRAMES 512
 #define JITTER_EWMA_ALPHA 0.1
 #define BITRATE_WINDOW_NS 100000000ULL // 100 ms
 #define BITRATE_EWMA_ALPHA 0.1
@@ -104,6 +105,9 @@ struct UdpReceiver {
     gboolean frame_missing;
     guint64 frame_last_arrival_ns;
     guint64 last_frame_complete_ns;
+    guint64 fps_frame_times_ns[FPS_WINDOW_FRAMES];
+    guint fps_window_head;
+    guint fps_window_count;
 
     gboolean transit_initialized;
     double last_transit;
@@ -462,6 +466,48 @@ static void maybe_trigger_idr_loss(struct UdpReceiver *ur, guint64 arrival_ns) {
     }
 }
 
+/*
+ * Compute FPS from frame completions over a rolling 1-second window.
+ * This is robust against single tiny inter-frame intervals that can make
+ * reciprocal-interval EWMA estimates spike into unrealistic values.
+ */
+static void update_fps_window(struct UdpReceiver *ur, guint64 arrival_ns) {
+    if (ur == NULL || arrival_ns == 0) {
+        return;
+    }
+
+    guint idx = (ur->fps_window_head + ur->fps_window_count) % FPS_WINDOW_FRAMES;
+    ur->fps_frame_times_ns[idx] = arrival_ns;
+    if (ur->fps_window_count < FPS_WINDOW_FRAMES) {
+        ur->fps_window_count++;
+    } else {
+        ur->fps_window_head = (ur->fps_window_head + 1) % FPS_WINDOW_FRAMES;
+    }
+
+    while (ur->fps_window_count > 1) {
+        guint64 oldest = ur->fps_frame_times_ns[ur->fps_window_head];
+        if (arrival_ns >= oldest && (arrival_ns - oldest) > FPS_WINDOW_NS) {
+            ur->fps_window_head = (ur->fps_window_head + 1) % FPS_WINDOW_FRAMES;
+            ur->fps_window_count--;
+        } else {
+            break;
+        }
+    }
+
+    if (ur->fps_window_count >= 2) {
+        guint oldest_idx = ur->fps_window_head;
+        guint newest_idx = (ur->fps_window_head + ur->fps_window_count - 1) % FPS_WINDOW_FRAMES;
+        guint64 oldest_ns = ur->fps_frame_times_ns[oldest_idx];
+        guint64 newest_ns = ur->fps_frame_times_ns[newest_idx];
+        if (newest_ns > oldest_ns) {
+            double span_s = (double)(newest_ns - oldest_ns) / 1e9;
+            ur->stats.fps_avg = (double)(ur->fps_window_count - 1u) / span_s;
+        }
+    } else if (ur->fps_window_count == 1) {
+        ur->stats.fps_avg = 0.0;
+    }
+}
+
 static void maybe_trigger_idr_jitter(struct UdpReceiver *ur, guint64 arrival_ns) {
     if (!idr_stats_triggers_enabled(ur)) {
         return;
@@ -504,17 +550,7 @@ static void finalize_frame(struct UdpReceiver *ur, guint64 arrival_ns) {
     } else {
         ur->stats.frame_size_avg += ((double)ur->frame_bytes - ur->stats.frame_size_avg) * FRAME_EWMA_ALPHA;
     }
-    if (ur->last_frame_complete_ns != 0 && arrival_ns > ur->last_frame_complete_ns) {
-        double frame_interval_s = (double)(arrival_ns - ur->last_frame_complete_ns) / 1e9;
-        if (frame_interval_s > 0.0) {
-            double instant_fps = 1.0 / frame_interval_s;
-            if (ur->stats.fps_avg == 0.0) {
-                ur->stats.fps_avg = instant_fps;
-            } else {
-                ur->stats.fps_avg += (instant_fps - ur->stats.fps_avg) * FPS_EWMA_ALPHA;
-            }
-        }
-    }
+    update_fps_window(ur, arrival_ns);
     ur->last_frame_complete_ns = arrival_ns;
     if (ur->frame_missing) {
         ur->stats.incomplete_frames++;
@@ -569,6 +605,10 @@ static void process_rtp(struct UdpReceiver *ur,
         ur->idr_loss_window_start_ns = 0;
         ur->idr_loss_events = 0;
         ur->idr_jitter_last_ns = 0;
+        ur->last_frame_complete_ns = 0;
+        ur->fps_window_head = 0;
+        ur->fps_window_count = 0;
+        ur->stats.fps_avg = 0.0;
     }
 
     ur->stats.total_packets++;
