@@ -21,7 +21,7 @@
       background: #1f2d4f;
     }
     .wrap { max-width: 800px; margin: 20px auto; padding: 0 16px; }
-    h1 { margin: 0 0 14px; font-size: 22px; }
+    h1 { margin: 0 0 0; font-size: 22px; }
     h3 { margin: 0 0 10px; font-size: 15px; }
     .card {
       background: linear-gradient(180deg, #182943 0%, var(--panel) 100%);
@@ -41,6 +41,7 @@
       font-size: 14px;
     }
     button:hover { background: #3a5078; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
     pre {
       background: var(--bg);
       color: var(--muted);
@@ -97,61 +98,153 @@
       background: #23c7ff;
       transition: width 80ms linear;
     }
+    .tabs {
+      display: flex;
+      gap: 0;
+      margin: 10px 0 14px;
+      border-bottom: 2px solid var(--border);
+    }
+    .tab-btn {
+      padding: 8px 18px;
+      cursor: pointer;
+      background: none;
+      color: var(--muted);
+      border: none;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      font-size: 14px;
+      font-weight: 600;
+      border-radius: 0;
+    }
+    .tab-btn:hover { color: var(--text); background: none; }
+    .tab-btn.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    select {
+      padding: 8px 12px;
+      background: #2d3f5d;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      min-width: 200px;
+    }
+    .cmd-section-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 4px;
+    }
+    .cmd-status {
+      margin-bottom: 10px;
+      padding: 8px 12px;
+      background: var(--bg);
+      border-radius: 8px;
+      font-size: 13px;
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Waybeam Hub (C)</h1>
-
-  <div class="card">
-    <strong>Status:</strong> <span id="status">connecting...</span><br />
-    <strong>Source:</strong> <span id="source">-</span><br />
-    <strong>Section:</strong> <span id="section">-</span><br />
-    <strong>Selected:</strong> <span id="selected">-</span>
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('dashboard')">Dashboard</button>
+    <button class="tab-btn" onclick="switchTab('commands')">Commands</button>
   </div>
 
-  <div class="card">
-    <div class="row">
-      <button onclick="send('menu')">Menu</button>
-      <button onclick="send('up')">Up</button>
-      <button onclick="send('down')">Down</button>
-      <button onclick="send('select')">Select</button>
+  <div id="tab-dashboard" class="tab-content active">
+    <div class="card">
+      <strong>Status:</strong> <span id="status">connecting...</span><br />
+      <strong>Source:</strong> <span id="source">-</span><br />
+      <strong>Section:</strong> <span id="section">-</span><br />
+      <strong>Selected:</strong> <span id="selected">-</span>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button onclick="send('menu')">Menu</button>
+        <button onclick="send('up')">Up</button>
+        <button onclick="send('down')">Down</button>
+        <button onclick="send('select')">Select</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>CRSF Input <span id="crsf-link" class="pill off">OFF</span></h3>
+      <div id="crsf-summary" class="state">No CRSF data.</div>
+      <div class="crsf-grid" id="crsf-grid"></div>
+    </div>
+
+    <div class="card" id="peer-card" style="display:none">
+      <h3>Peer Hub <span id="peer-pill" class="pill off">OFFLINE</span></h3>
+      <div class="state">
+        <strong>Role:</strong> <span id="peer-role">-</span>
+        <strong>Runtime:</strong> <span id="peer-runtime">-</span><br/>
+        <strong>Status:</strong> <span id="peer-hub-status">-</span><br/>
+        <strong>Section:</strong> <span id="peer-section">-</span>
+        <strong>Selected:</strong> <span id="peer-selected">-</span>
+      </div>
+      <div id="peer-actions" class="row" style="margin-top:8px"></div>
+      <div id="peer-result" style="margin-top:8px;display:none">
+        <strong>Last result:</strong> <span id="peer-result-text" class="state"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <strong>Raw state</strong>
+      <pre id="raw">{}</pre>
     </div>
   </div>
 
-  <div class="card">
-    <h3>CRSF Input <span id="crsf-link" class="pill off">OFF</span></h3>
-    <div id="crsf-summary" class="state">No CRSF data.</div>
-    <div class="crsf-grid" id="crsf-grid"></div>
-  </div>
-
-  <div class="card" id="peer-card" style="display:none">
-    <h3>Peer Hub <span id="peer-pill" class="pill off">OFFLINE</span></h3>
-    <div class="state">
-      <strong>Role:</strong> <span id="peer-role">-</span>
-      <strong>Runtime:</strong> <span id="peer-runtime">-</span><br/>
-      <strong>Status:</strong> <span id="peer-hub-status">-</span><br/>
-      <strong>Section:</strong> <span id="peer-section">-</span>
-      <strong>Selected:</strong> <span id="peer-selected">-</span>
+  <div id="tab-commands" class="tab-content">
+    <div class="cmd-status">
+      <strong>Status:</strong> <span id="cmd-status">-</span>
     </div>
-    <div id="peer-actions" class="row" style="margin-top:8px"></div>
-    <div id="peer-result" style="margin-top:8px;display:none">
-      <strong>Last result:</strong> <span id="peer-result-text" class="state"></span>
-    </div>
-  </div>
 
-  <div class="card">
-    <strong>Raw state</strong>
-    <pre id="raw">{}</pre>
+    <div class="card" id="cmd-actions-card" style="display:none">
+      <h3>Menu Actions</h3>
+      <div class="row" id="cmd-actions"></div>
+    </div>
+
+    <div class="card" id="cmd-cmds-card" style="display:none">
+      <h3>Config Commands</h3>
+      <div class="row" id="cmd-cmds"></div>
+    </div>
+
+    <div class="card" id="cmd-subscribe-card" style="display:none">
+      <h3>Subscribe Video</h3>
+      <div class="row">
+        <select id="cmd-subscriber-select" onchange="document.getElementById('cmd-subscribe-btn').disabled=!this.value">
+          <option value="">No subscribers available</option>
+        </select>
+        <button id="cmd-subscribe-btn" onclick="subscribeVideo()" disabled>Subscribe</button>
+      </div>
+    </div>
   </div>
 </div>
 
 <script>
+  function switchTab(name) {
+    var tabs = document.querySelectorAll('.tab-btn');
+    var contents = document.querySelectorAll('.tab-content');
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].className = 'tab-btn' + (tabs[i].textContent.toLowerCase().indexOf(name) >= 0 || (name === 'dashboard' && i === 0) || (name === 'commands' && i === 1) ? ' active' : '');
+    }
+    tabs[0].className = 'tab-btn' + (name === 'dashboard' ? ' active' : '');
+    tabs[1].className = 'tab-btn' + (name === 'commands' ? ' active' : '');
+    document.getElementById('tab-dashboard').className = 'tab-content' + (name === 'dashboard' ? ' active' : '');
+    document.getElementById('tab-commands').className = 'tab-content' + (name === 'commands' ? ' active' : '');
+  }
+
   async function send(command) {
     await fetch('/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command })
+      body: JSON.stringify({ command: command })
     });
     await refresh();
   }
@@ -262,6 +355,135 @@
     await refresh();
   }
 
+  function renderCommands(data) {
+    var running = data.action_running;
+
+    /* Status */
+    document.getElementById('cmd-status').textContent = data.status || '-';
+
+    /* Menu Actions */
+    var actCard = document.getElementById('cmd-actions-card');
+    var actDiv = document.getElementById('cmd-actions');
+    var actions = Array.isArray(data.actions) ? data.actions : [];
+    if (actions.length > 0) {
+      actCard.style.display = '';
+      actDiv.innerHTML = '';
+      for (var i = 0; i < actions.length; i++) {
+        var btn = document.createElement('button');
+        btn.innerHTML = '<span class="cmd-section-label">[' + actions[i].section + ']</span> ' + actions[i].name;
+        btn.disabled = running;
+        btn.onclick = (function(s, n) {
+          return function() { runAction(s, n); };
+        })(actions[i].section, actions[i].name);
+        actDiv.appendChild(btn);
+      }
+    } else {
+      actCard.style.display = 'none';
+    }
+
+    /* Config Commands */
+    var cmdCard = document.getElementById('cmd-cmds-card');
+    var cmdDiv = document.getElementById('cmd-cmds');
+    var cmds = Array.isArray(data.cmds) ? data.cmds : [];
+    if (cmds.length > 0) {
+      cmdCard.style.display = '';
+      cmdDiv.innerHTML = '';
+      for (var i = 0; i < cmds.length; i++) {
+        var btn = document.createElement('button');
+        btn.textContent = cmds[i].name;
+        btn.disabled = running;
+        btn.onclick = (function(n) {
+          return function() { runCmd(n); };
+        })(cmds[i].name);
+        cmdDiv.appendChild(btn);
+      }
+    } else {
+      cmdCard.style.display = 'none';
+    }
+
+    /* Subscribe Video — only rebuild dropdown when list changes */
+    var subCard = document.getElementById('cmd-subscribe-card');
+    var subBtn = document.getElementById('cmd-subscribe-btn');
+    if (data.has_subscribe_video) {
+      subCard.style.display = '';
+      var sel = document.getElementById('cmd-subscriber-select');
+      var subs = Array.isArray(data.subscribers) ? data.subscribers : [];
+      var key = subs.map(function(s) { return s.identity + '|' + s.ip + ':' + s.video_port; }).join(',');
+      if (key !== _lastSubKey) {
+        _lastSubKey = key;
+        var prev = sel.value;
+        if (subs.length === 0) {
+          sel.innerHTML = '<option value="">No subscribers available</option>';
+        } else {
+          sel.innerHTML = '<option value="">-- select subscriber --</option>';
+          for (var i = 0; i < subs.length; i++) {
+            var s = subs[i];
+            var val = s.ip + ':' + s.video_port;
+            var opt = document.createElement('option');
+            opt.value = val;
+            opt.textContent = s.identity + ' (' + val + ')';
+            sel.appendChild(opt);
+          }
+        }
+        if (prev) sel.value = prev;
+      }
+      if (!_subBtnTimer) subBtn.disabled = !sel.value;
+    } else {
+      subCard.style.display = 'none';
+    }
+  }
+
+  async function runAction(section, name) {
+    await fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'run_action', section: section, name: name })
+    });
+    await refresh();
+  }
+
+  async function runCmd(name) {
+    await fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'run_cmd', name: name })
+    });
+    await refresh();
+  }
+
+  var _subBtnTimer = null;
+  var _lastSubKey = '';
+  async function subscribeVideo() {
+    var sel = document.getElementById('cmd-subscriber-select');
+    var btn = document.getElementById('cmd-subscribe-btn');
+    var val = sel.value;
+    if (!val) return;
+    var parts = val.split(':');
+    var ip = parts[0], port = parseInt(parts[1], 10);
+
+    btn.disabled = true;
+    btn.textContent = 'Subscribing...';
+    try {
+      var res = await fetch('/subscribe_video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ip: ip, port: port })
+      });
+      var ok = res.ok;
+      btn.textContent = ok ? 'OK' : 'Error';
+      btn.style.borderColor = ok ? '#0f5f40' : '#6c1c27';
+    } catch (e) {
+      btn.textContent = 'Error';
+      btn.style.borderColor = '#6c1c27';
+    }
+    if (_subBtnTimer) clearTimeout(_subBtnTimer);
+    _subBtnTimer = setTimeout(function() {
+      btn.disabled = false;
+      btn.textContent = 'Subscribe';
+      btn.style.borderColor = '';
+    }, 3000);
+  }
+
   async function refresh() {
     try {
       var res = await fetch('/state');
@@ -272,6 +494,7 @@
       document.getElementById('selected').textContent = data.selected_label || '-';
       renderCrsf(data);
       renderPeer(data);
+      renderCommands(data);
       document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
     } catch (e) {}
   }
