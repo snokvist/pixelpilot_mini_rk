@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Waybeam Hub C</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; max-width: 760px; }
+    .card { border: 1px solid #ccc; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { padding: 10px 12px; cursor: pointer; }
+    pre { background: #f5f5f5; padding: 10px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Waybeam Hub (C)</h1>
+  <div class="card">
+    <strong>Status:</strong> <span id="status">connecting...</span><br />
+    <strong>Source:</strong> <span id="source">-</span><br />
+    <strong>Section:</strong> <span id="section">-</span><br />
+    <strong>Selected:</strong> <span id="selected">-</span>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button onclick="send('menu')">Menu</button>
+      <button onclick="send('up')">Up</button>
+      <button onclick="send('down')">Down</button>
+      <button onclick="send('select')">Select</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>Raw state</strong>
+    <pre id="raw">{}</pre>
+  </div>
+
+  <script>
+    async function send(command) {
+      await fetch('/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command })
+      });
+      await refresh();
+    }
+
+    async function refresh() {
+      const res = await fetch('/state');
+      const data = await res.json();
+      document.getElementById('status').textContent = data.status || '-';
+      document.getElementById('source').textContent = data.active_source || '-';
+      document.getElementById('section').textContent = data.current_section || '-';
+      document.getElementById('selected').textContent = data.selected_label || '-';
+      document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
+    }
+
+    setInterval(refresh, 350);
+    refresh();
+  </script>
+</body>
+</html>

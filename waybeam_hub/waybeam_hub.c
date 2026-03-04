@@ -9,7 +9,7 @@
  *
  * Single-threaded, poll()-based SSE consumer + UDP OSD producer.
  * Reads config.json + menu.ini for drop-in compatibility with the Python version.
- * No WebUI, no threads, no malloc — pure libc.
+ * Includes a small single-user WebUI bridge for setup/config workflows.
  *
  * Build:  make -f Makefile.hub
  * Cross:  make -f Makefile.hub CC=arm-openipc-linux-gnueabihf-gcc
@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -70,6 +71,8 @@
 #define INI_LINE_BUF       512
 #define CMD_OUTPUT_BUF     256
 #define PAYLOAD_BUF        1280
+#define WEB_REQ_BUF        4096
+#define WEB_HTML_BUF      16384
 
 #define SECTION_NAME_LEN   32
 #define ACTION_NAME_LEN    64
@@ -147,6 +150,9 @@ typedef struct {
   int action_timeout_ms;
   char action_shell[PATH_LEN];
   int menu_asset_id;
+  char webui_host[HOST_LEN];
+  int webui_port;
+  char webui_html[PATH_LEN];
   char sse_url[URL_LEN];
   char priority[16]; /* "serial" or "joystick" */
   double priority_fallback_s;
@@ -237,6 +243,15 @@ typedef struct {
 } sse_client_t;
 
 typedef struct {
+  int server_fd;
+  int client_fd;
+  char req_buf[WEB_REQ_BUF];
+  int req_len;
+  char html[WEB_HTML_BUF];
+  int html_len;
+} webui_server_t;
+
+typedef struct {
   char host[HOST_LEN];
   int port;
   struct sockaddr_in addr;
@@ -301,6 +316,7 @@ typedef struct {
   int key_count;
   char status[256];
   char last_logged_status[256];
+  webui_server_t webui;
 } app_state_t;
 
 /* ---------------------------------------------------------------------------
@@ -444,6 +460,9 @@ static void config_defaults(config_t *cfg) {
   cfg->interval_ms = 400;
   cfg->action_timeout_ms = 5000;
   cfg->menu_asset_id = 7;
+  snprintf(cfg->webui_host, sizeof(cfg->webui_host), "0.0.0.0");
+  cfg->webui_port = 8060;
+  snprintf(cfg->webui_html, sizeof(cfg->webui_html), "waybeam_hub_c.html");
   snprintf(cfg->sse_url, sizeof(cfg->sse_url), "http://127.0.0.1:8070/sse");
   snprintf(cfg->priority, sizeof(cfg->priority), "serial");
   cfg->priority_fallback_s = 5.0;
@@ -573,6 +592,9 @@ static int parse_config_json(const char *path, config_t *cfg) {
     else if (strcmp(key, "action_timeout_ms") == 0) { p = parse_json_int(p, &cfg->action_timeout_ms); }
     else if (strcmp(key, "action_shell") == 0) { p = parse_string(p, cfg->action_shell, sizeof(cfg->action_shell)); }
     else if (strcmp(key, "menu_asset_id") == 0) { p = parse_json_int(p, &cfg->menu_asset_id); }
+    else if (strcmp(key, "webui_host") == 0) { p = parse_string(p, cfg->webui_host, sizeof(cfg->webui_host)); }
+    else if (strcmp(key, "webui_port") == 0) { p = parse_json_int(p, &cfg->webui_port); }
+    else if (strcmp(key, "webui_html") == 0) { p = parse_string(p, cfg->webui_html, sizeof(cfg->webui_html)); }
     else if (strcmp(key, "sse_url") == 0) { p = parse_string(p, cfg->sse_url, sizeof(cfg->sse_url)); }
     else if (strcmp(key, "priority") == 0) { p = parse_string(p, cfg->priority, sizeof(cfg->priority)); }
     else if (strcmp(key, "priority_fallback_s") == 0) { p = parse_json_double(p, &cfg->priority_fallback_s); }
@@ -1123,6 +1145,245 @@ static void send_clear_payload(app_state_t *app) {
     "\"asset_updates\":[{\"id\":%d,\"enabled\":false}]}",
     app->cfg.menu_asset_id);
   send_all_destinations(app, buf, n);
+}
+
+/* ---------------------------------------------------------------------------
+ * WebUI bridge (single-user HTTP)
+ * --------------------------------------------------------------------------- */
+
+static int queue_key(app_state_t *app, int key) {
+  if (app->key_count >= MAX_KEY_QUEUE) return -1;
+  app->key_queue[app->key_count++] = key;
+  return 0;
+}
+
+static void webui_send_response(int fd, const char *status, const char *content_type,
+                                const char *body, int body_len) {
+  char head[256];
+  int n = snprintf(head, sizeof(head),
+                   "HTTP/1.1 %s\r\n"
+                   "Content-Type: %s\r\n"
+                   "Content-Length: %d\r\n"
+                   "Access-Control-Allow-Origin: *\r\n"
+                   "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                   "Access-Control-Allow-Headers: Content-Type\r\n"
+                   "Connection: close\r\n\r\n",
+                   status, content_type, body_len);
+  if (n < 0) return;
+  send(fd, head, (size_t)n, MSG_NOSIGNAL);
+  if (body_len > 0) send(fd, body, (size_t)body_len, MSG_NOSIGNAL);
+}
+
+static int webui_find_content_length(const char *headers) {
+  const char *p = headers;
+  while ((p = strstr(p, "\n")) != NULL) {
+    p++;
+    if (strncasecmp(p, "Content-Length:", 15) == 0) {
+      p += 15;
+      while (*p == ' ' || *p == '\t') p++;
+      return atoi(p);
+    }
+  }
+  return 0;
+}
+
+static int webui_enqueue_command(app_state_t *app, const char *body) {
+  if (strstr(body, "\"menu\"")) return queue_key(app, KEY_MENU_TOGGLE);
+  if (strstr(body, "\"up\"")) return queue_key(app, KEY_UP);
+  if (strstr(body, "\"down\"")) return queue_key(app, KEY_DOWN);
+  if (strstr(body, "\"select\"")) return queue_key(app, KEY_SELECT);
+  return -1;
+}
+
+static int webui_build_state_json(app_state_t *app, char *out, int out_sz) {
+  menu_entry_t *entries;
+  int entry_count;
+  get_current_entries(app, &entries, &entry_count);
+  int menu_visible = (app->cfg.menu_asset_id >= 0 && app->cfg.menu_asset_id < ASSET_COUNT &&
+                      app->asset_enabled[app->cfg.menu_asset_id] == 1);
+
+  char status_esc[512];
+  char section_esc[128];
+  char selected_esc[128];
+  char selected_raw[96] = "";
+  if (entry_count > 0 && app->selected >= 0 && app->selected < entry_count)
+    display_entry_text(app, &entries[app->selected], selected_raw, sizeof(selected_raw));
+  json_escape(app->status, status_esc, sizeof(status_esc));
+  json_escape(app->current_section[0] ? app->current_section : "ROOT", section_esc, sizeof(section_esc));
+  json_escape(selected_raw, selected_esc, sizeof(selected_esc));
+
+  return snprintf(out, out_sz,
+                  "{\"type\":\"menu_state\",\"status\":\"%s\","
+                  "\"active_source\":\"%s\",\"menu_visible\":%s,"
+                  "\"current_section\":\"%s\",\"selected\":%d,\"entry_count\":%d,"
+                  "\"selected_label\":\"%s\"}",
+                  status_esc,
+                  app->active_source == 0 ? "serial" : (app->active_source == 1 ? "joystick" : "none"),
+                  menu_visible ? "true" : "false",
+                  section_esc,
+                  app->selected,
+                  entry_count,
+                  selected_esc);
+}
+
+static void webui_close_client(webui_server_t *web) {
+  if (web->client_fd >= 0) close(web->client_fd);
+  web->client_fd = -1;
+  web->req_len = 0;
+}
+
+static int webui_load_html(app_state_t *app) {
+  FILE *f = fopen(app->cfg.webui_html, "r");
+  if (!f) {
+    webui_server_t *web = &app->webui;
+    web->html_len = snprintf(web->html, sizeof(web->html),
+                             "<html><body><h1>waybeam_hub</h1><p>Missing UI file: %s</p></body></html>",
+                             app->cfg.webui_html);
+    return -1;
+  }
+  webui_server_t *web = &app->webui;
+  size_t n = fread(web->html, 1, sizeof(web->html) - 1, f);
+  fclose(f);
+  web->html[n] = '\0';
+  web->html_len = (int)n;
+  return 0;
+}
+
+static int webui_init(app_state_t *app) {
+  webui_server_t *web = &app->webui;
+  web->server_fd = -1;
+  web->client_fd = -1;
+  web->req_len = 0;
+  webui_load_html(app);
+
+  if (app->cfg.webui_port <= 0 || app->cfg.webui_port > 65535) {
+    LOGW("WebUI disabled: invalid port %d", app->cfg.webui_port);
+    return -1;
+  }
+
+  int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  if (fd < 0) {
+    LOGW("WebUI socket failed: %s", strerror(errno));
+    return -1;
+  }
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)app->cfg.webui_port);
+  if (inet_pton(AF_INET, app->cfg.webui_host, &addr.sin_addr) != 1) {
+    LOGW("WebUI disabled: invalid host %s", app->cfg.webui_host);
+    close(fd);
+    return -1;
+  }
+  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 || listen(fd, 2) < 0) {
+    LOGW("WebUI disabled: bind/listen failed: %s", strerror(errno));
+    close(fd);
+    return -1;
+  }
+
+  web->server_fd = fd;
+  LOGI("WebUI listening on http://%s:%d", app->cfg.webui_host, app->cfg.webui_port);
+  return 0;
+}
+
+static void webui_shutdown(app_state_t *app) {
+  webui_server_t *web = &app->webui;
+  webui_close_client(web);
+  if (web->server_fd >= 0) close(web->server_fd);
+  web->server_fd = -1;
+}
+
+static void webui_handle_request(app_state_t *app, const char *req, int req_len) {
+  webui_server_t *web = &app->webui;
+  const char *hdr_end = strstr(req, "\r\n\r\n");
+  if (!hdr_end) {
+    webui_send_response(web->client_fd, "400 Bad Request", "application/json",
+                        "{\"error\":\"bad request\"}", 23);
+    return;
+  }
+
+  char method[8] = "";
+  char path[128] = "";
+  sscanf(req, "%7s %127s", method, path);
+
+  int header_len = (int)(hdr_end - req) + 4;
+  int body_len = req_len - header_len;
+  const char *body = req + header_len;
+
+  if (strcmp(method, "OPTIONS") == 0) {
+    webui_send_response(web->client_fd, "204 No Content", "text/plain", "", 0);
+    return;
+  }
+
+  if (strcmp(method, "GET") == 0 && (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)) {
+    webui_send_response(web->client_fd, "200 OK", "text/html; charset=utf-8", web->html, web->html_len);
+    return;
+  }
+
+  if (strcmp(method, "GET") == 0 && strcmp(path, "/state") == 0) {
+    char json[1024];
+    int n = webui_build_state_json(app, json, sizeof(json));
+    if (n < 0) n = 0;
+    if (n >= (int)sizeof(json)) n = (int)sizeof(json) - 1;
+    webui_send_response(web->client_fd, "200 OK", "application/json", json, n);
+    return;
+  }
+
+  if (strcmp(method, "POST") == 0 && strcmp(path, "/command") == 0) {
+    char tmp[512];
+    int copy_n = body_len;
+    if (copy_n >= (int)sizeof(tmp)) copy_n = (int)sizeof(tmp) - 1;
+    memcpy(tmp, body, (size_t)copy_n);
+    tmp[copy_n] = '\0';
+    if (webui_enqueue_command(app, tmp) == 0)
+      webui_send_response(web->client_fd, "200 OK", "application/json", "{\"ok\":true}", 11);
+    else
+      webui_send_response(web->client_fd, "400 Bad Request", "application/json", "{\"error\":\"invalid command\"}", 27);
+    return;
+  }
+
+  webui_send_response(web->client_fd, "404 Not Found", "application/json", "{\"error\":\"not found\"}", 21);
+}
+
+static void webui_poll(app_state_t *app) {
+  webui_server_t *web = &app->webui;
+  if (web->server_fd < 0) return;
+
+  if (web->client_fd < 0) {
+    struct sockaddr_in cli_addr;
+    socklen_t cli_len = sizeof(cli_addr);
+    int cfd = accept4(web->server_fd, (struct sockaddr *)&cli_addr, &cli_len, SOCK_CLOEXEC | SOCK_NONBLOCK);
+    if (cfd >= 0) {
+      web->client_fd = cfd;
+      web->req_len = 0;
+    }
+  } else {
+    char *buf = web->req_buf;
+    ssize_t n = recv(web->client_fd, buf + web->req_len, sizeof(web->req_buf) - 1 - web->req_len, 0);
+    if (n <= 0) {
+      webui_close_client(web);
+      return;
+    }
+    web->req_len += (int)n;
+    buf[web->req_len] = '\0';
+
+    char *hdr_end = strstr(buf, "\r\n\r\n");
+    if (!hdr_end) {
+      if (web->req_len >= (int)sizeof(web->req_buf) - 1) webui_close_client(web);
+      return;
+    }
+
+    int content_len = webui_find_content_length(buf);
+    int header_len = (int)(hdr_end - buf) + 4;
+    if (web->req_len < header_len + content_len) return;
+
+    webui_handle_request(app, buf, header_len + content_len);
+    webui_close_client(web);
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -1985,6 +2246,25 @@ static void resolve_actions_ini(app_state_t *app) {
   }
 }
 
+static void resolve_webui_html(app_state_t *app) {
+  if (!app->cfg.webui_html[0]) {
+    snprintf(app->cfg.webui_html, sizeof(app->cfg.webui_html), "waybeam_hub_c.html");
+  }
+  if (app->cfg.webui_html[0] == '/') return;
+
+  char dir[PATH_LEN];
+  snprintf(dir, sizeof(dir), "%s", app->config_path);
+  char *slash = strrchr(dir, '/');
+  if (slash) slash[1] = '\0';
+  else snprintf(dir, sizeof(dir), "./");
+
+  char candidate[PATH_LEN];
+  snprintf(candidate, sizeof(candidate), "%s%s", dir, app->cfg.webui_html);
+  if (access(candidate, R_OK) == 0) {
+    snprintf(app->cfg.webui_html, sizeof(app->cfg.webui_html), "%s", candidate);
+  }
+}
+
 /* ---------------------------------------------------------------------------
  * Reload config + menus (SIGHUP)
  * --------------------------------------------------------------------------- */
@@ -2002,6 +2282,7 @@ static int reload_config(app_state_t *app) {
   app->cfg = new_cfg;
 
   resolve_actions_ini(app);
+  resolve_webui_html(app);
   if (load_actions_ini(app->cfg.actions_ini, app) < 0) {
     LOGE("Actions INI reload failed");
     return -1;
@@ -2050,6 +2331,8 @@ static int run_controller(app_state_t *app) {
   app->sse.state = SSE_DISCONNECTED;
   app->sse.last_connect_attempt = 0.0;
 
+  webui_init(app);
+
   app->active_source = -1;
   app->splash_pending_opacity = -1;
   app->splash_last_opacity = -1;
@@ -2064,7 +2347,8 @@ static int run_controller(app_state_t *app) {
   app->status[0] = '\0';
   app->last_logged_status[0] = '\0';
 
-  snprintf(app->status, sizeof(app->status), "Ready (SSE %s)", app->cfg.sse_url);
+  snprintf(app->status, sizeof(app->status), "Ready (SSE %s, WebUI http://%s:%d)",
+           app->cfg.sse_url, app->cfg.webui_host, app->cfg.webui_port);
 
   LOGI("waybeam_hub started, SSE=%s, destinations=%d", app->cfg.sse_url, app->dest_count);
   for (int i = 0; i < app->dest_count; i++)
@@ -2085,7 +2369,11 @@ static int run_controller(app_state_t *app) {
     /* Handle SIGHUP reload */
     if (g_reload) {
       g_reload = 0;
-      reload_config(app);
+      if (reload_config(app) == 0) {
+        resolve_webui_html(app);
+        webui_shutdown(app);
+        webui_init(app);
+      }
       sse_parse_url(app->cfg.sse_url, app->sse.host, &app->sse.port, app->sse.path);
       sse_disconnect(&app->sse);
     }
@@ -2128,6 +2416,8 @@ static int run_controller(app_state_t *app) {
     }
 
     now = monotonic_s();
+
+    webui_poll(app);
 
     /* Poll async action */
     action_poll(app);
@@ -2402,6 +2692,7 @@ static int run_controller(app_state_t *app) {
   }
   send_clear_payload(app);
   sse_disconnect(&app->sse);
+  webui_shutdown(app);
   if (app->udp_fd >= 0) close(app->udp_fd);
   return 0;
 }
@@ -2462,14 +2753,16 @@ int main(int argc, char *argv[]) {
 
   resolve_action_shell(&app.cfg);
   resolve_actions_ini(&app);
+  resolve_webui_html(&app);
 
   if (load_actions_ini(app.cfg.actions_ini, &app) < 0) {
     LOGE("Failed to load actions INI");
     return 1;
   }
 
-  LOGI("Config loaded: host=%s port=%d sse_url=%s priority=%s",
-       app.cfg.host, app.cfg.port, app.cfg.sse_url, app.cfg.priority);
+  LOGI("Config loaded: host=%s port=%d sse_url=%s priority=%s webui=%s:%d",
+       app.cfg.host, app.cfg.port, app.cfg.sse_url, app.cfg.priority,
+       app.cfg.webui_host, app.cfg.webui_port);
   LOGI("Actions: %d actions in %d sections, %d radio rules",
        app.action_count, app.section_count, app.radio_rule_count);
   for (int i = 0; i < app.radio_rule_count; i++) {
