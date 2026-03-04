@@ -5,15 +5,104 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Waybeam Hub C</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; max-width: 760px; }
-    .card { border: 1px solid #ccc; border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+    :root {
+      --bg: #0b1220;
+      --panel: #15233a;
+      --border: #2a3b5a;
+      --text: #e5ecf7;
+      --muted: #95a7c5;
+      --primary: #2ea8ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: Inter, Arial, sans-serif;
+      background: #1f2d4f;
+    }
+    .wrap { max-width: 800px; margin: 20px auto; padding: 0 16px; }
+    h1 { margin: 0 0 14px; font-size: 22px; }
+    h3 { margin: 0 0 10px; font-size: 15px; }
+    .card {
+      background: linear-gradient(180deg, #182943 0%, var(--panel) 100%);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
     .row { display: flex; gap: 8px; flex-wrap: wrap; }
-    button { padding: 10px 12px; cursor: pointer; }
-    pre { background: #f5f5f5; padding: 10px; border-radius: 8px; }
+    button {
+      padding: 8px 14px;
+      cursor: pointer;
+      background: #2d3f5d;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+    }
+    button:hover { background: #3a5078; }
+    pre {
+      background: var(--bg);
+      color: var(--muted);
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      overflow-x: auto;
+      margin: 0;
+    }
+    .state { color: var(--muted); font-size: 13px; }
+    .pill {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .pill.ok { background: #0f5f40; color: #d0fce9; }
+    .pill.off { background: #6c1c27; color: #ffe3e8; }
+    .crsf-grid {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+    }
+    @media (max-width: 600px) {
+      .crsf-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .meter {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px;
+      font-size: 12px;
+    }
+    .meter-title {
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .meter-bar {
+      height: 6px;
+      border-radius: 999px;
+      background: #25344f;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+    .meter-bar > span {
+      display: block;
+      width: 0%;
+      height: 100%;
+      background: #23c7ff;
+      transition: width 80ms linear;
+    }
   </style>
 </head>
 <body>
+<div class="wrap">
   <h1>Waybeam Hub (C)</h1>
+
   <div class="card">
     <strong>Status:</strong> <span id="status">connecting...</span><br />
     <strong>Source:</strong> <span id="source">-</span><br />
@@ -31,32 +120,93 @@
   </div>
 
   <div class="card">
+    <h3>CRSF Input <span id="crsf-link" class="pill off">OFF</span></h3>
+    <div id="crsf-summary" class="state">No CRSF data.</div>
+    <div class="crsf-grid" id="crsf-grid"></div>
+  </div>
+
+  <div class="card">
     <strong>Raw state</strong>
     <pre id="raw">{}</pre>
   </div>
+</div>
 
-  <script>
-    async function send(command) {
-      await fetch('/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command })
-      });
-      await refresh();
+<script>
+  async function send(command) {
+    await fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command })
+    });
+    await refresh();
+  }
+
+  function normalizeCrsf(v) {
+    var clamped = Math.max(172, Math.min(1811, Number(v || 0)));
+    return ((clamped - 172) / (1811 - 172)) * 100;
+  }
+
+  function renderCrsf(data) {
+    var crsf = data && data.crsf ? data.crsf : {};
+    var link = document.getElementById('crsf-link');
+    var summary = document.getElementById('crsf-summary');
+    var grid = document.getElementById('crsf-grid');
+    var channels = Array.isArray(crsf.channels) ? crsf.channels : [];
+
+    if (crsf.link_up) {
+      link.textContent = 'LINK';
+      link.className = 'pill ok';
+    } else {
+      link.textContent = crsf.enabled ? 'NO LINK' : 'OFF';
+      link.className = 'pill off';
     }
 
-    async function refresh() {
-      const res = await fetch('/state');
-      const data = await res.json();
+    var age = Number.isFinite(crsf.last_update_age_ms) && crsf.last_update_age_ms >= 0
+      ? crsf.last_update_age_ms + 'ms' : 'n/a';
+    summary.textContent =
+      'nav=' + (crsf.nav_direction || 'neutral') +
+      ' select=' + Boolean(crsf.select_pressed) +
+      ' combo=' + Boolean(crsf.combo_active) +
+      ' latch=' + Boolean(crsf.combo_latched) +
+      ' age=' + age;
+
+    grid.innerHTML = '';
+    for (var i = 0; i < 16; i++) {
+      var raw = Number.isFinite(channels[i]) ? channels[i] : 0;
+      var meter = document.createElement('div');
+      meter.className = 'meter';
+
+      var title = document.createElement('div');
+      title.className = 'meter-title';
+      title.textContent = 'CH' + (i + 1) + ': ' + raw;
+
+      var bar = document.createElement('div');
+      bar.className = 'meter-bar';
+      var fill = document.createElement('span');
+      fill.style.width = normalizeCrsf(raw) + '%';
+      bar.appendChild(fill);
+
+      meter.appendChild(title);
+      meter.appendChild(bar);
+      grid.appendChild(meter);
+    }
+  }
+
+  async function refresh() {
+    try {
+      var res = await fetch('/state');
+      var data = await res.json();
       document.getElementById('status').textContent = data.status || '-';
       document.getElementById('source').textContent = data.active_source || '-';
       document.getElementById('section').textContent = data.current_section || '-';
       document.getElementById('selected').textContent = data.selected_label || '-';
+      renderCrsf(data);
       document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
-    }
+    } catch (e) {}
+  }
 
-    setInterval(refresh, 350);
-    refresh();
-  </script>
+  setInterval(refresh, 350);
+  refresh();
+</script>
 </body>
 </html>

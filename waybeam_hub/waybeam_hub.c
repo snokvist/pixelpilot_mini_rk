@@ -1212,18 +1212,50 @@ static int webui_build_state_json(app_state_t *app, char *out, int out_sz) {
   json_escape(app->current_section[0] ? app->current_section : "ROOT", section_esc, sizeof(section_esc));
   json_escape(selected_raw, selected_esc, sizeof(selected_esc));
 
+  /* Build CRSF channel array and source info for active source */
+  source_state_t *src = (app->active_source >= 0 && app->active_source < 2)
+                        ? &app->sources[app->active_source] : NULL;
+  char ch_buf[256];
+  int ch_off = 0;
+  ch_off += snprintf(ch_buf + ch_off, sizeof(ch_buf) - ch_off, "[");
+  for (int i = 0; i < CRSF_DISPLAY_CHANNELS; i++) {
+    int val = src ? src->channels[i] : CRSF_CENTER;
+    ch_off += snprintf(ch_buf + ch_off, sizeof(ch_buf) - ch_off, "%s%d", i ? "," : "", val);
+  }
+  snprintf(ch_buf + ch_off, sizeof(ch_buf) - ch_off, "]");
+
+  int link_up = src ? src->link_up : 0;
+  double now = monotonic_s();
+  int age_ms = src ? (int)((now - src->last_update_mono) * 1000.0) : -1;
+  const char *nav = src ? src->nav_direction : "neutral";
+  int sel_pressed = src ? src->select_pressed : 0;
+  int combo_active = src ? src->combo_active : 0;
+  int combo_latched = src ? src->combo_latched : 0;
+
   return snprintf(out, out_sz,
                   "{\"type\":\"menu_state\",\"status\":\"%s\","
                   "\"active_source\":\"%s\",\"menu_visible\":%s,"
                   "\"current_section\":\"%s\",\"selected\":%d,\"entry_count\":%d,"
-                  "\"selected_label\":\"%s\"}",
+                  "\"selected_label\":\"%s\","
+                  "\"crsf\":{\"link_up\":%s,\"enabled\":%s,"
+                  "\"channels\":%s,\"last_update_age_ms\":%d,"
+                  "\"nav_direction\":\"%s\",\"select_pressed\":%s,"
+                  "\"combo_active\":%s,\"combo_latched\":%s}}",
                   status_esc,
                   app->active_source == 0 ? "serial" : (app->active_source == 1 ? "joystick" : "none"),
                   menu_visible ? "true" : "false",
                   section_esc,
                   app->selected,
                   entry_count,
-                  selected_esc);
+                  selected_esc,
+                  link_up ? "true" : "false",
+                  (app->active_source >= 0) ? "true" : "false",
+                  ch_buf,
+                  age_ms,
+                  nav,
+                  sel_pressed ? "true" : "false",
+                  combo_active ? "true" : "false",
+                  combo_latched ? "true" : "false");
 }
 
 static void webui_close_client(webui_server_t *web) {
@@ -1325,7 +1357,7 @@ static void webui_handle_request(app_state_t *app, const char *req, int req_len)
   }
 
   if (strcmp(method, "GET") == 0 && strcmp(path, "/state") == 0) {
-    char json[1024];
+    char json[2048];
     int n = webui_build_state_json(app, json, sizeof(json));
     if (n < 0) n = 0;
     if (n >= (int)sizeof(json)) n = (int)sizeof(json) - 1;
