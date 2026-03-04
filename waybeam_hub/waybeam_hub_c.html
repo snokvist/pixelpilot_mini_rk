@@ -125,6 +125,21 @@
     <div class="crsf-grid" id="crsf-grid"></div>
   </div>
 
+  <div class="card" id="peer-card" style="display:none">
+    <h3>Peer Hub <span id="peer-pill" class="pill off">OFFLINE</span></h3>
+    <div class="state">
+      <strong>Role:</strong> <span id="peer-role">-</span>
+      <strong>Runtime:</strong> <span id="peer-runtime">-</span><br/>
+      <strong>Status:</strong> <span id="peer-hub-status">-</span><br/>
+      <strong>Section:</strong> <span id="peer-section">-</span>
+      <strong>Selected:</strong> <span id="peer-selected">-</span>
+    </div>
+    <div id="peer-actions" class="row" style="margin-top:8px"></div>
+    <div id="peer-result" style="margin-top:8px;display:none">
+      <strong>Last result:</strong> <span id="peer-result-text" class="state"></span>
+    </div>
+  </div>
+
   <div class="card">
     <strong>Raw state</strong>
     <pre id="raw">{}</pre>
@@ -192,6 +207,61 @@
     }
   }
 
+  function renderPeer(data) {
+    var card = document.getElementById('peer-card');
+    if (!data || !data.peer) { card.style.display = 'none'; return; }
+    card.style.display = '';
+    var p = data.peer;
+
+    var pill = document.getElementById('peer-pill');
+    pill.textContent = p.online ? 'ONLINE' : 'OFFLINE';
+    pill.className = 'pill ' + (p.online ? 'ok' : 'off');
+
+    document.getElementById('peer-role').textContent = p.role || '-';
+    document.getElementById('peer-runtime').textContent = p.runtime || '-';
+    document.getElementById('peer-hub-status').textContent = p.status || '-';
+    document.getElementById('peer-section').textContent = p.section || '-';
+    document.getElementById('peer-selected').textContent = p.selected_label || '-';
+
+    var actDiv = document.getElementById('peer-actions');
+    var actions = Array.isArray(p.actions) ? p.actions : [];
+    if (actions.length > 0 && p.online) {
+      actDiv.innerHTML = '';
+      for (var i = 0; i < actions.length; i++) {
+        var btn = document.createElement('button');
+        btn.textContent = actions[i].section + '/' + actions[i].name;
+        btn.onclick = (function(s, n) {
+          return function() { sendRemoteAction(s, n); };
+        })(actions[i].section, actions[i].name);
+        actDiv.appendChild(btn);
+      }
+    } else {
+      actDiv.innerHTML = '';
+    }
+
+    var resultDiv = document.getElementById('peer-result');
+    var resultText = document.getElementById('peer-result-text');
+    if (p.last_result) {
+      resultDiv.style.display = '';
+      var r = p.last_result;
+      resultText.textContent = '[' + r.section + '] ' + r.action +
+        ' exit=' + r.exit_code +
+        (r.output ? ' (' + r.output + ')' : '') +
+        (r.duration_ms ? ' in ' + r.duration_ms + 'ms' : '');
+    } else {
+      resultDiv.style.display = 'none';
+    }
+  }
+
+  async function sendRemoteAction(section, action) {
+    await fetch('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: 'remote_action', remote_action: true, section: section, action: action })
+    });
+    await refresh();
+  }
+
   async function refresh() {
     try {
       var res = await fetch('/state');
@@ -201,6 +271,7 @@
       document.getElementById('section').textContent = data.current_section || '-';
       document.getElementById('selected').textContent = data.selected_label || '-';
       renderCrsf(data);
+      renderPeer(data);
       document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
     } catch (e) {}
   }

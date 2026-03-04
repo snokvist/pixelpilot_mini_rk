@@ -18,6 +18,8 @@
   "extra_destinations": [
     "10.6.0.50:7777"
   ],
+  "sync_peer": "",
+  "sync_role": "vehicle",
   "verbose": false,
   "splashscreen": {
     "enabled": false,

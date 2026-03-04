@@ -71,6 +71,10 @@
 #define INI_LINE_BUF       512
 #define CMD_OUTPUT_BUF     256
 #define PAYLOAD_BUF        1280
+#define SYNC_HELLO_INTERVAL_S 5.0
+#define SYNC_PEER_TIMEOUT_S   15.0
+#define SYNC_MAX_ACTIONS      16
+#define SYNC_BUF              1280
 #define WEB_REQ_BUF        4096
 #define WEB_HTML_BUF      16384
 
@@ -111,6 +115,10 @@ static double monotonic_s(void) {
 static int clamp_i(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 static int clamp_crsf(int v) { return clamp_i(v, CRSF_MIN, CRSF_MAX); }
+
+/* Forward declarations */
+typedef struct app_state app_state_t;
+static void set_asset_enabled(app_state_t *app, int id, int enabled);
 
 /* ---------------------------------------------------------------------------
  * Data structures
@@ -161,6 +169,8 @@ typedef struct {
   int verbose;
   tuning_t tuning;
   splashscreen_t splashscreen;
+  char sync_peer[HOST_LEN];
+  char sync_role[16];
 } config_t;
 
 typedef struct {
@@ -258,6 +268,47 @@ typedef struct {
 } udp_dest_t;
 
 typedef struct {
+  int enabled;
+  int fd;
+  struct sockaddr_in peer_addr;
+  uint32_t seq_out;
+  /* Peer tracking */
+  int peer_online;
+  double peer_last_seen;
+  char peer_role[16];
+  char peer_runtime[8];
+  char peer_version[16];
+  /* Cached peer state */
+  int peer_menu_visible;
+  char peer_section[SECTION_NAME_LEN];
+  int peer_selected;
+  char peer_selected_label[96];
+  char peer_status[256];
+  int peer_link_up;
+  char peer_active_source[16];
+  /* Peer available actions */
+  struct { char section[SECTION_NAME_LEN]; char name[ACTION_NAME_LEN]; } peer_actions[SYNC_MAX_ACTIONS];
+  int peer_action_count;
+  /* Last result from peer */
+  char last_result_section[SECTION_NAME_LEN];
+  char last_result_action[ACTION_NAME_LEN];
+  int last_result_exit_code;
+  char last_result_output[CMD_OUTPUT_BUF];
+  int last_result_duration_ms;
+  int have_result;
+  /* State dirty tracking */
+  int state_dirty;
+  /* Remote command tracking */
+  char remote_trigger_section[SECTION_NAME_LEN];
+  char remote_trigger_action[ACTION_NAME_LEN];
+  /* Pending command from WebUI (processed in main loop) */
+  char pending_cmd_section[SECTION_NAME_LEN];
+  char pending_cmd_action[ACTION_NAME_LEN];
+  /* Hello timer */
+  double last_hello_mono;
+} sync_state_t;
+
+typedef struct app_state {
   config_t cfg;
   char config_path[PATH_LEN];
 
@@ -281,6 +332,14 @@ typedef struct {
   int selected;
   int asset_enabled[ASSET_COUNT]; /* -1=unknown, 0=off, 1=on */
   int pending_asset_updates[ASSET_COUNT]; /* -1=no update, 0=off, 1=on */
+
+  /* Text/value slot overrides (set via WebUI) */
+  char texts_override[MAX_OSD_SLOTS][MAX_OSD_TEXT_CHARS + 1];
+  int texts_override_set[MAX_OSD_SLOTS];   /* 0=not set, 1=set */
+  double values_override[MAX_OSD_SLOTS];
+  int values_override_set[MAX_OSD_SLOTS];  /* 0=not set, 1=set */
+  char zoom[64];                           /* current zoom string, empty=not set */
+
   /* Network */
   int udp_fd;
   udp_dest_t destinations[MAX_DESTINATIONS];
@@ -296,6 +355,8 @@ typedef struct {
   pid_t action_pid;        /* -1 = no running action */
   int action_pipe_fd;      /* read end of stdout/stderr pipe */
   double action_deadline;  /* monotonic deadline for timeout */
+  double action_start_mono; /* when action started */
+  int action_last_exit_code; /* exit code of last completed action */
   char action_label[128];  /* "[section] name" for status */
   char action_output[CMD_OUTPUT_BUF];
   int action_output_len;
@@ -317,6 +378,7 @@ typedef struct {
   char status[256];
   char last_logged_status[256];
   webui_server_t webui;
+  sync_state_t sync;
 } app_state_t;
 
 /* ---------------------------------------------------------------------------
@@ -476,6 +538,10 @@ static void config_defaults(config_t *cfg) {
   cfg->splashscreen.delay_s = 0.0;
   cfg->splashscreen.fadeout_s = 0.0;
 
+  /* Sync defaults */
+  cfg->sync_peer[0] = '\0';
+  snprintf(cfg->sync_role, sizeof(cfg->sync_role), "vehicle");
+
   /* Tuning defaults */
   tuning_t *t = &cfg->tuning;
   t->crsf_axis_deadband = 120;
@@ -599,6 +665,8 @@ static int parse_config_json(const char *path, config_t *cfg) {
     else if (strcmp(key, "priority") == 0) { p = parse_string(p, cfg->priority, sizeof(cfg->priority)); }
     else if (strcmp(key, "priority_fallback_s") == 0) { p = parse_json_double(p, &cfg->priority_fallback_s); }
     else if (strcmp(key, "verbose") == 0) { p = parse_json_bool(p, &cfg->verbose); }
+    else if (strcmp(key, "sync_peer") == 0) { p = parse_string(p, cfg->sync_peer, sizeof(cfg->sync_peer)); }
+    else if (strcmp(key, "sync_role") == 0) { p = parse_string(p, cfg->sync_role, sizeof(cfg->sync_role)); }
     else if (strcmp(key, "initial_off") == 0) {
       p = parse_json_int_array(p, cfg->initial_off, ASSET_COUNT, &cfg->initial_off_count);
     }
@@ -1066,15 +1134,52 @@ static int json_escape(const char *src, char *dst, int dst_sz) {
 
 static int build_osd_payload(app_state_t *app, char texts[3][MAX_OSD_TEXT_CHARS + 1],
                              char *buf, int buf_sz) {
-  char esc[3][MAX_OSD_TEXT_CHARS * 2 + 1];
-  for (int i = 0; i < 3; i++)
-    json_escape(texts[i], esc[i], sizeof(esc[i]));
-
-  /* Build texts array: null for slots 0-4, menu text for slots 5,6,7 */
-  int n = snprintf(buf, buf_sz,
-    "{\"texts\":[null,null,null,null,null,\"%s\",\"%s\",\"%s\"]",
-    esc[0], esc[1], esc[2]);
+  int n = 0;
+  n += snprintf(buf + n, buf_sz - n, "{");
   if (n >= buf_sz) n = buf_sz - 1;
+
+  /* values[] array: override values or null */
+  {
+    int has_any = 0;
+    for (int i = 0; i < MAX_OSD_SLOTS; i++)
+      if (app->values_override_set[i]) { has_any = 1; break; }
+    if (has_any) {
+      n += snprintf(buf + n, buf_sz - n, "\"values\":[");
+      if (n >= buf_sz) n = buf_sz - 1;
+      for (int i = 0; i < MAX_OSD_SLOTS; i++) {
+        if (i > 0) { n += snprintf(buf + n, buf_sz - n, ","); if (n >= buf_sz) n = buf_sz - 1; }
+        if (app->values_override_set[i])
+          n += snprintf(buf + n, buf_sz - n, "%.4g", app->values_override[i]);
+        else
+          n += snprintf(buf + n, buf_sz - n, "null");
+        if (n >= buf_sz) n = buf_sz - 1;
+      }
+      n += snprintf(buf + n, buf_sz - n, "],");
+      if (n >= buf_sz) n = buf_sz - 1;
+    }
+  }
+
+  /* texts[] array: override takes priority, then menu text for slots 5-7, else null */
+  {
+    char esc[MAX_OSD_SLOTS][MAX_OSD_TEXT_CHARS * 2 + 1];
+    n += snprintf(buf + n, buf_sz - n, "\"texts\":[");
+    if (n >= buf_sz) n = buf_sz - 1;
+    for (int i = 0; i < MAX_OSD_SLOTS; i++) {
+      if (i > 0) { n += snprintf(buf + n, buf_sz - n, ","); if (n >= buf_sz) n = buf_sz - 1; }
+      if (app->texts_override_set[i]) {
+        json_escape(app->texts_override[i], esc[i], sizeof(esc[i]));
+        n += snprintf(buf + n, buf_sz - n, "\"%s\"", esc[i]);
+      } else if (i >= MENU_TEXT_SLOT_START && i < MENU_TEXT_SLOT_START + 3) {
+        json_escape(texts[i - MENU_TEXT_SLOT_START], esc[i], sizeof(esc[i]));
+        n += snprintf(buf + n, buf_sz - n, "\"%s\"", esc[i]);
+      } else {
+        n += snprintf(buf + n, buf_sz - n, "null");
+      }
+      if (n >= buf_sz) n = buf_sz - 1;
+    }
+    n += snprintf(buf + n, buf_sz - n, "]");
+    if (n >= buf_sz) n = buf_sz - 1;
+  }
 
   /* Asset updates */
   int has_updates = 0;
@@ -1117,6 +1222,14 @@ static int build_osd_payload(app_state_t *app, char texts[3][MAX_OSD_TEXT_CHARS 
       if (n >= buf_sz) n = buf_sz - 1;
     }
     n += snprintf(buf + n, buf_sz - n, "]");
+    if (n >= buf_sz) n = buf_sz - 1;
+  }
+
+  /* Zoom control */
+  if (app->zoom[0]) {
+    char ze[128];
+    json_escape(app->zoom, ze, sizeof(ze));
+    n += snprintf(buf + n, buf_sz - n, ",\"zoom\":\"%s\"", ze);
     if (n >= buf_sz) n = buf_sz - 1;
   }
 
@@ -1187,7 +1300,253 @@ static int webui_find_content_length(const char *headers) {
   return 0;
 }
 
+/* Parse {"slot_index": "text", ...} for texts override */
+static void parse_texts_object(const char *body, app_state_t *app) {
+  const char *p = strstr(body, "\"texts\"");
+  if (!p) return;
+  p += 7;
+  while (*p && *p != '{') p++;
+  if (*p != '{') return;
+  p++; /* skip '{' */
+  while (*p) {
+    p = skip_ws(p);
+    if (*p == '}') break;
+    if (*p != '"') break;
+    char key[8];
+    const char *next = parse_string(p, key, sizeof(key));
+    if (!next) break;
+    p = skip_ws(next);
+    if (*p != ':') break;
+    p++; p = skip_ws(p);
+    int idx = atoi(key);
+    if (idx < 0 || idx >= MAX_OSD_SLOTS) { p = skip_json_value(p); }
+    else if (strncmp(p, "null", 4) == 0 && is_value_term((unsigned char)p[4])) {
+      app->texts_override_set[idx] = 0;
+      app->texts_override[idx][0] = '\0';
+      p += 4;
+    } else if (*p == '"') {
+      p = parse_string(p, app->texts_override[idx], MAX_OSD_TEXT_CHARS + 1);
+      if (!p) break;
+      if (app->texts_override[idx][0] == '\0')
+        app->texts_override_set[idx] = 0;
+      else
+        app->texts_override_set[idx] = 1;
+    } else { p = skip_json_value(p); }
+    if (!p) break;
+    p = skip_ws(p);
+    if (*p == ',') { p++; continue; }
+    if (*p == '}') break;
+    break;
+  }
+}
+
+/* Parse {"slot_index": number, ...} for values override */
+static void parse_values_object(const char *body, app_state_t *app) {
+  const char *p = strstr(body, "\"values\"");
+  if (!p) return;
+  p += 8;
+  while (*p && *p != '{') p++;
+  if (*p != '{') return;
+  p++;
+  while (*p) {
+    p = skip_ws(p);
+    if (*p == '}') break;
+    if (*p != '"') break;
+    char key[8];
+    const char *next = parse_string(p, key, sizeof(key));
+    if (!next) break;
+    p = skip_ws(next);
+    if (*p != ':') break;
+    p++; p = skip_ws(p);
+    int idx = atoi(key);
+    if (idx < 0 || idx >= MAX_OSD_SLOTS) { p = skip_json_value(p); }
+    else if (strncmp(p, "null", 4) == 0 && is_value_term((unsigned char)p[4])) {
+      app->values_override_set[idx] = 0;
+      app->values_override[idx] = 0.0;
+      p += 4;
+    } else {
+      double val;
+      const char *vn = parse_json_double(p, &val);
+      if (vn) {
+        app->values_override[idx] = val;
+        app->values_override_set[idx] = 1;
+        p = vn;
+      } else { p = skip_json_value(p); }
+    }
+    if (!p) break;
+    p = skip_ws(p);
+    if (*p == ',') { p++; continue; }
+    if (*p == '}') break;
+    break;
+  }
+}
+
+/* Parse [{"id": N, "enabled": bool}, ...] for asset_updates */
+static void parse_asset_updates_array(const char *body, app_state_t *app) {
+  const char *p = strstr(body, "\"asset_updates\"");
+  if (!p) return;
+  p += 15;
+  while (*p && *p != '[') p++;
+  if (*p != '[') return;
+  p++;
+  while (*p) {
+    p = skip_ws(p);
+    if (*p == ']') break;
+    if (*p != '{') break;
+    p++;
+    int id = -1, enabled = -1;
+    while (*p) {
+      p = skip_ws(p);
+      if (*p == '}') { p++; break; }
+      if (*p != '"') break;
+      char key[16];
+      const char *next = parse_string(p, key, sizeof(key));
+      if (!next) break;
+      p = skip_ws(next);
+      if (*p != ':') break;
+      p++; p = skip_ws(p);
+      if (strcmp(key, "id") == 0) { p = parse_json_int(p, &id); }
+      else if (strcmp(key, "enabled") == 0) { p = parse_json_bool(p, &enabled); }
+      else { p = skip_json_value(p); }
+      if (!p) break;
+      p = skip_ws(p);
+      if (*p == ',') { p++; continue; }
+      if (*p == '}') { p++; break; }
+      break;
+    }
+    if (id >= 0 && id < ASSET_COUNT && enabled >= 0)
+      set_asset_enabled(app, id, enabled);
+    if (!p) break;
+    p = skip_ws(p);
+    if (*p == ',') { p++; continue; }
+    if (*p == ']') break;
+    break;
+  }
+}
+
+/* Parse ["host:port", ...] for destinations */
+static void parse_destinations_array(const char *body, app_state_t *app) {
+  const char *p = strstr(body, "\"destinations\"");
+  if (!p) return;
+  p += 14;
+  while (*p && *p != '[') p++;
+  if (*p != '[') return;
+  p++;
+  int count = 0;
+  udp_dest_t tmp[MAX_DESTINATIONS];
+  while (*p) {
+    p = skip_ws(p);
+    if (*p == ']') break;
+    if (*p != '"') break;
+    char spec[HOST_LEN];
+    const char *next = parse_string(p, spec, sizeof(spec));
+    if (!next) break;
+    p = next;
+    if (count < MAX_DESTINATIONS) {
+      if (parse_dest_spec(spec, &tmp[count]) == 0) count++;
+    }
+    p = skip_ws(p);
+    if (*p == ',') { p++; continue; }
+    if (*p == ']') break;
+    break;
+  }
+  if (count > 0) {
+    for (int i = 0; i < count; i++)
+      app->destinations[i] = tmp[i];
+    app->dest_count = count;
+    LOGI("Destinations updated: %d target(s)", count);
+  }
+}
+
 static int webui_enqueue_command(app_state_t *app, const char *body) {
+  /* Commands that contain "menu" as substring must be checked FIRST */
+  if (strstr(body, "\"show_menu\"")) {
+    set_asset_enabled(app, app->cfg.menu_asset_id, 1);
+    app->dirty = 1;
+    return 0;
+  }
+  if (strstr(body, "\"hide_menu\"")) {
+    set_asset_enabled(app, app->cfg.menu_asset_id, 0);
+    app->dirty = 1;
+    return 0;
+  }
+  if (strstr(body, "\"quit\"")) {
+    set_asset_enabled(app, app->cfg.menu_asset_id, 0);
+    app->dirty = 1;
+    return 0;
+  }
+  if (strstr(body, "\"all_on\"")) {
+    for (int i = 0; i < ASSET_COUNT; i++)
+      set_asset_enabled(app, i, 1);
+    app->dirty = 1;
+    return 0;
+  }
+  if (strstr(body, "\"all_off\"")) {
+    for (int i = 0; i < ASSET_COUNT; i++)
+      set_asset_enabled(app, i, 0);
+    app->dirty = 1;
+    return 0;
+  }
+  if (strstr(body, "\"remote_action\"")) {
+    if (!app->sync.enabled) return -1;
+    char section[SECTION_NAME_LEN] = "", action_name[ACTION_NAME_LEN] = "";
+    const char *sp = strstr(body, "\"section\"");
+    if (sp) { sp += 9; while (*sp && (*sp == ' ' || *sp == ':')) sp++; if (*sp == '"') parse_string(sp, section, sizeof(section)); }
+    const char *ap = strstr(body, "\"action\"");
+    if (ap) { ap += 8; while (*ap && (*ap == ' ' || *ap == ':')) ap++; if (*ap == '"') parse_string(ap, action_name, sizeof(action_name)); }
+    if (section[0] && action_name[0]) {
+      snprintf(app->sync.pending_cmd_section, sizeof(app->sync.pending_cmd_section), "%s", section);
+      snprintf(app->sync.pending_cmd_action, sizeof(app->sync.pending_cmd_action), "%s", action_name);
+      return 0;
+    }
+    return -1;
+  }
+  if (strstr(body, "\"asset_updates\"")) {
+    parse_asset_updates_array(body, app);
+    app->dirty = 1;
+    return 0;
+  }
+  if (strstr(body, "\"destinations\"")) {
+    parse_destinations_array(body, app);
+    return 0;
+  }
+  if (strstr(body, "\"selected\"")) {
+    const char *sp = strstr(body, "\"selected\"");
+    sp += 10;
+    while (*sp && (*sp == ' ' || *sp == ':')) sp++;
+    int idx;
+    if (parse_json_int(sp, &idx)) {
+      menu_entry_t *entries; int entry_count;
+      get_current_entries(app, &entries, &entry_count);
+      if (idx >= 0 && idx < entry_count) {
+        app->selected = idx;
+        app->dirty = 1;
+      }
+    }
+    return 0;
+  }
+  if (strstr(body, "\"zoom\"")) {
+    const char *zp = strstr(body, "\"zoom\"");
+    zp += 6;
+    while (*zp && (*zp == ' ' || *zp == ':')) zp++;
+    if (*zp == '"') {
+      parse_string(zp, app->zoom, sizeof(app->zoom));
+      app->dirty = 1;
+    }
+    return 0;
+  }
+  if (strstr(body, "\"texts\"")) {
+    parse_texts_object(body, app);
+    app->dirty = 1;
+    return 0;
+  }
+  if (strstr(body, "\"values\"")) {
+    parse_values_object(body, app);
+    app->dirty = 1;
+    return 0;
+  }
+
+  /* Original simple key commands */
   if (strstr(body, "\"menu\"")) return queue_key(app, KEY_MENU_TOGGLE);
   if (strstr(body, "\"up\"")) return queue_key(app, KEY_UP);
   if (strstr(body, "\"down\"")) return queue_key(app, KEY_DOWN);
@@ -1232,30 +1591,126 @@ static int webui_build_state_json(app_state_t *app, char *out, int out_sz) {
   int combo_active = src ? src->combo_active : 0;
   int combo_latched = src ? src->combo_latched : 0;
 
-  return snprintf(out, out_sz,
-                  "{\"type\":\"menu_state\",\"status\":\"%s\","
-                  "\"active_source\":\"%s\",\"menu_visible\":%s,"
-                  "\"current_section\":\"%s\",\"selected\":%d,\"entry_count\":%d,"
-                  "\"selected_label\":\"%s\","
-                  "\"crsf\":{\"link_up\":%s,\"enabled\":%s,"
-                  "\"channels\":%s,\"last_update_age_ms\":%d,"
-                  "\"nav_direction\":\"%s\",\"select_pressed\":%s,"
-                  "\"combo_active\":%s,\"combo_latched\":%s}}",
-                  status_esc,
-                  app->active_source == 0 ? "serial" : (app->active_source == 1 ? "joystick" : "none"),
-                  menu_visible ? "true" : "false",
-                  section_esc,
-                  app->selected,
-                  entry_count,
-                  selected_esc,
-                  link_up ? "true" : "false",
-                  (app->active_source >= 0) ? "true" : "false",
-                  ch_buf,
-                  age_ms,
-                  nav,
-                  sel_pressed ? "true" : "false",
-                  combo_active ? "true" : "false",
-                  combo_latched ? "true" : "false");
+  int n = 0;
+  n += snprintf(out + n, out_sz - n,
+                "{\"type\":\"menu_state\",\"status\":\"%s\","
+                "\"active_source\":\"%s\",\"menu_visible\":%s,"
+                "\"current_section\":\"%s\",\"selected\":%d,\"entry_count\":%d,"
+                "\"selected_label\":\"%s\","
+                "\"crsf\":{\"link_up\":%s,\"enabled\":%s,"
+                "\"channels\":%s,\"last_update_age_ms\":%d,"
+                "\"nav_direction\":\"%s\",\"select_pressed\":%s,"
+                "\"combo_active\":%s,\"combo_latched\":%s}",
+                status_esc,
+                app->active_source == 0 ? "serial" : (app->active_source == 1 ? "joystick" : "none"),
+                menu_visible ? "true" : "false",
+                section_esc,
+                app->selected,
+                entry_count,
+                selected_esc,
+                link_up ? "true" : "false",
+                (app->active_source >= 0) ? "true" : "false",
+                ch_buf,
+                age_ms,
+                nav,
+                sel_pressed ? "true" : "false",
+                combo_active ? "true" : "false",
+                combo_latched ? "true" : "false");
+  if (n >= out_sz) n = out_sz - 1;
+
+  /* Peer sync info (only when sync is enabled) */
+  if (app->sync.enabled) {
+    sync_state_t *sy = &app->sync;
+    int last_seen_ago = sy->peer_online ? (int)((now - sy->peer_last_seen) * 1000.0) : -1;
+
+    /* Build peer actions array */
+    char pa_buf[512];
+    int pa_off = 0;
+    pa_off += snprintf(pa_buf + pa_off, sizeof(pa_buf) - pa_off, "[");
+    for (int i = 0; i < sy->peer_action_count && pa_off < (int)sizeof(pa_buf) - 80; i++) {
+      char se[64], ne[128];
+      json_escape(sy->peer_actions[i].section, se, sizeof(se));
+      json_escape(sy->peer_actions[i].name, ne, sizeof(ne));
+      if (i > 0) pa_off += snprintf(pa_buf + pa_off, sizeof(pa_buf) - pa_off, ",");
+      pa_off += snprintf(pa_buf + pa_off, sizeof(pa_buf) - pa_off,
+                         "{\"section\":\"%s\",\"name\":\"%s\"}", se, ne);
+    }
+    snprintf(pa_buf + pa_off, sizeof(pa_buf) - pa_off, "]");
+
+    char ps_esc[512], pl_esc[128], pc_esc[128];
+    json_escape(sy->peer_status, ps_esc, sizeof(ps_esc));
+    json_escape(sy->peer_selected_label, pl_esc, sizeof(pl_esc));
+    json_escape(sy->peer_section, pc_esc, sizeof(pc_esc));
+
+    n += snprintf(out + n, out_sz - n,
+                  ",\"peer\":{\"online\":%s,\"role\":\"%s\",\"runtime\":\"%s\","
+                  "\"last_seen_ago_ms\":%d,"
+                  "\"menu_visible\":%s,\"section\":\"%s\",\"selected\":%d,"
+                  "\"selected_label\":\"%s\",\"status\":\"%s\","
+                  "\"link_up\":%s,\"active_source\":\"%s\","
+                  "\"actions\":%s",
+                  sy->peer_online ? "true" : "false",
+                  sy->peer_role, sy->peer_runtime,
+                  last_seen_ago,
+                  sy->peer_menu_visible ? "true" : "false",
+                  pc_esc, sy->peer_selected,
+                  pl_esc, ps_esc,
+                  sy->peer_link_up ? "true" : "false",
+                  sy->peer_active_source,
+                  pa_buf);
+    if (n >= out_sz) n = out_sz - 1;
+
+    if (sy->have_result) {
+      char rs_esc[64], ra_esc[128], ro_esc[512];
+      json_escape(sy->last_result_section, rs_esc, sizeof(rs_esc));
+      json_escape(sy->last_result_action, ra_esc, sizeof(ra_esc));
+      json_escape(sy->last_result_output, ro_esc, sizeof(ro_esc));
+      n += snprintf(out + n, out_sz - n,
+                    ",\"last_result\":{\"section\":\"%s\",\"action\":\"%s\","
+                    "\"exit_code\":%d,\"output\":\"%s\",\"duration_ms\":%d}",
+                    rs_esc, ra_esc,
+                    sy->last_result_exit_code, ro_esc, sy->last_result_duration_ms);
+      if (n >= out_sz) n = out_sz - 1;
+    }
+
+    n += snprintf(out + n, out_sz - n, "}");
+    if (n >= out_sz) n = out_sz - 1;
+  }
+
+  /* Asset enabled state */
+  n += snprintf(out + n, out_sz - n, ",\"asset_enabled\":[");
+  if (n >= out_sz) n = out_sz - 1;
+  for (int i = 0; i < ASSET_COUNT; i++) {
+    n += snprintf(out + n, out_sz - n, "%s%d", i ? "," : "", app->asset_enabled[i]);
+    if (n >= out_sz) n = out_sz - 1;
+  }
+  n += snprintf(out + n, out_sz - n, "]");
+  if (n >= out_sz) n = out_sz - 1;
+
+  /* Destinations */
+  n += snprintf(out + n, out_sz - n, ",\"destinations\":[");
+  if (n >= out_sz) n = out_sz - 1;
+  for (int i = 0; i < app->dest_count; i++) {
+    char he[128];
+    json_escape(app->destinations[i].host, he, sizeof(he));
+    n += snprintf(out + n, out_sz - n, "%s\"%s:%d\"", i ? "," : "",
+                  he, app->destinations[i].port);
+    if (n >= out_sz) n = out_sz - 1;
+  }
+  n += snprintf(out + n, out_sz - n, "]");
+  if (n >= out_sz) n = out_sz - 1;
+
+  /* Zoom (only when set) */
+  if (app->zoom[0]) {
+    char ze[128];
+    json_escape(app->zoom, ze, sizeof(ze));
+    n += snprintf(out + n, out_sz - n, ",\"zoom\":\"%s\"", ze);
+    if (n >= out_sz) n = out_sz - 1;
+  }
+
+  n += snprintf(out + n, out_sz - n, "}");
+  if (n >= out_sz) n = out_sz - 1;
+  return n;
 }
 
 static void webui_close_client(webui_server_t *web) {
@@ -1357,7 +1812,7 @@ static void webui_handle_request(app_state_t *app, const char *req, int req_len)
   }
 
   if (strcmp(method, "GET") == 0 && strcmp(path, "/state") == 0) {
-    char json[2048];
+    char json[4096];
     int n = webui_build_state_json(app, json, sizeof(json));
     if (n < 0) n = 0;
     if (n >= (int)sizeof(json)) n = (int)sizeof(json) - 1;
@@ -2004,6 +2459,7 @@ static int action_launch(app_state_t *app, const menu_action_t *action) {
   app->action_pipe_fd = pipefd[0];
   app->action_output_len = 0;
   app->action_output[0] = '\0';
+  app->action_start_mono = monotonic_s();
   double timeout_s = app->cfg.action_timeout_ms / 1000.0;
   if (timeout_s < 0.1) timeout_s = 0.1;
   app->action_deadline = monotonic_s() + timeout_s;
@@ -2034,6 +2490,7 @@ static void action_poll(app_state_t *app) {
   /* Check if child exited */
   int wstatus;
   pid_t wp = waitpid(app->action_pid, &wstatus, WNOHANG);
+  int exit_code = -1;
 
   if (wp == 0) {
     /* Still running — check timeout */
@@ -2041,6 +2498,7 @@ static void action_poll(app_state_t *app) {
       kill(app->action_pid, SIGKILL);
       waitpid(app->action_pid, &wstatus, 0);
       snprintf(app->status, sizeof(app->status), "Action timeout: %s", app->action_label);
+      exit_code = -1;
       goto cleanup;
     }
     return; /* still running, not timed out */
@@ -2051,23 +2509,24 @@ static void action_poll(app_state_t *app) {
     char condensed[MAX_OSD_TEXT_CHARS + 1];
     extract_first_line(app->action_output, app->action_output_len, condensed, sizeof(condensed));
 
-    int rc = (wp > 0 && WIFEXITED(wstatus)) ? WEXITSTATUS(wstatus) : -1;
-    if (rc == 0) {
+    exit_code = (wp > 0 && WIFEXITED(wstatus)) ? WEXITSTATUS(wstatus) : -1;
+    if (exit_code == 0) {
       if (condensed[0])
         snprintf(app->status, sizeof(app->status), "OK %s: %s", app->action_label, condensed);
       else
         snprintf(app->status, sizeof(app->status), "OK %s", app->action_label);
     } else {
       if (condensed[0])
-        snprintf(app->status, sizeof(app->status), "ERR %d %s: %s", rc, app->action_label, condensed);
+        snprintf(app->status, sizeof(app->status), "ERR %d %s: %s", exit_code, app->action_label, condensed);
       else
-        snprintf(app->status, sizeof(app->status), "ERR %d %s", rc, app->action_label);
+        snprintf(app->status, sizeof(app->status), "ERR %d %s", exit_code, app->action_label);
     }
   }
 
 cleanup:
   if (app->action_pipe_fd >= 0) { close(app->action_pipe_fd); app->action_pipe_fd = -1; }
   app->action_pid = -1;
+  app->action_last_exit_code = exit_code;
   app->dirty = 1;
 }
 
@@ -2144,6 +2603,361 @@ static void reset_radio_states(radio_rule_state_t *rs, int count) {
     rs[i].enter_started = 0.0;
     rs[i].outside_started = 0.0;
     rs[i].latched_in_range = 0;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Hub Sync Protocol (UDP unicast state exchange between paired hubs)
+ * --------------------------------------------------------------------------- */
+
+/* JSON helpers for sync message parsing (strstr-based, good enough for controlled protocol) */
+static int sync_json_str(const char *json, const char *key, char *out, int out_sz) {
+  char needle[128];
+  snprintf(needle, sizeof(needle), "\"%s\"", key);
+  const char *p = strstr(json, needle);
+  if (!p) { out[0] = '\0'; return 0; }
+  p += strlen(needle);
+  while (*p && (*p == ' ' || *p == ':')) p++;
+  if (*p != '"') { out[0] = '\0'; return 0; }
+  parse_string(p, out, (size_t)out_sz);
+  return 1;
+}
+
+static int sync_json_int(const char *json, const char *key, int *out) {
+  char needle[128];
+  snprintf(needle, sizeof(needle), "\"%s\"", key);
+  const char *p = strstr(json, needle);
+  if (!p) return 0;
+  p += strlen(needle);
+  while (*p && (*p == ' ' || *p == ':')) p++;
+  return parse_json_int(p, out) != NULL;
+}
+
+static int sync_json_bool(const char *json, const char *key, int *out) {
+  char needle[128];
+  snprintf(needle, sizeof(needle), "\"%s\"", key);
+  const char *p = strstr(json, needle);
+  if (!p) return 0;
+  p += strlen(needle);
+  while (*p && (*p == ' ' || *p == ':')) p++;
+  return parse_json_bool(p, out) != NULL;
+}
+
+/* Find action by section + name */
+static int find_action_by_name(app_state_t *app, const char *section, const char *name) {
+  for (int i = 0; i < app->action_count; i++) {
+    if (strcmp(app->actions[i].section, section) == 0 &&
+        strcmp(app->actions[i].name, name) == 0)
+      return i;
+  }
+  return -1;
+}
+
+/* Socket setup / teardown */
+static int sync_init(app_state_t *app) {
+  sync_state_t *s = &app->sync;
+  memset(s, 0, sizeof(*s));
+  s->fd = -1;
+
+  if (!app->cfg.sync_peer[0]) {
+    s->enabled = 0;
+    return 0;
+  }
+
+  int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  if (fd < 0) {
+    LOGW("Sync socket: %s", strerror(errno));
+    return -1;
+  }
+
+  struct sockaddr_in bind_addr;
+  memset(&bind_addr, 0, sizeof(bind_addr));
+  bind_addr.sin_family = AF_INET;
+  bind_addr.sin_port = htons(8060);
+  bind_addr.sin_addr.s_addr = INADDR_ANY;
+  if (bind(fd, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+    LOGW("Sync bind UDP:8060: %s", strerror(errno));
+    close(fd);
+    return -1;
+  }
+
+  memset(&s->peer_addr, 0, sizeof(s->peer_addr));
+  s->peer_addr.sin_family = AF_INET;
+  s->peer_addr.sin_port = htons(8060);
+  if (inet_pton(AF_INET, app->cfg.sync_peer, &s->peer_addr.sin_addr) != 1) {
+    LOGW("Sync: invalid peer address: %s", app->cfg.sync_peer);
+    close(fd);
+    return -1;
+  }
+
+  s->fd = fd;
+  s->enabled = 1;
+  LOGI("Sync enabled: peer=%s, role=%s", app->cfg.sync_peer, app->cfg.sync_role);
+  return 0;
+}
+
+static void sync_shutdown(app_state_t *app) {
+  sync_state_t *s = &app->sync;
+  if (s->fd >= 0) close(s->fd);
+  s->fd = -1;
+  s->enabled = 0;
+}
+
+/* Send raw UDP to peer */
+static void sync_send_raw(sync_state_t *s, const char *buf, int len) {
+  if (s->fd < 0) return;
+  sendto(s->fd, buf, (size_t)len, 0,
+         (struct sockaddr *)&s->peer_addr, sizeof(s->peer_addr));
+}
+
+/* Message builders + senders */
+static void sync_send_hello(app_state_t *app) {
+  sync_state_t *s = &app->sync;
+  if (!s->enabled) return;
+
+  char actions_json[512];
+  int aoff = 0;
+  aoff += snprintf(actions_json + aoff, sizeof(actions_json) - aoff, "[");
+  int first = 1;
+  for (int i = 0; i < app->action_count && aoff < (int)sizeof(actions_json) - 80; i++) {
+    if (strcasecmp_section(app->actions[i].section, "RADIO") == 0) continue;
+    char sec_esc[64], name_esc[128];
+    json_escape(app->actions[i].section, sec_esc, sizeof(sec_esc));
+    json_escape(app->actions[i].name, name_esc, sizeof(name_esc));
+    if (!first) aoff += snprintf(actions_json + aoff, sizeof(actions_json) - aoff, ",");
+    aoff += snprintf(actions_json + aoff, sizeof(actions_json) - aoff,
+                     "{\"section\":\"%s\",\"name\":\"%s\"}", sec_esc, name_esc);
+    first = 0;
+  }
+  snprintf(actions_json + aoff, sizeof(actions_json) - aoff, "]");
+
+  char role_esc[32];
+  json_escape(app->cfg.sync_role, role_esc, sizeof(role_esc));
+
+  char buf[SYNC_BUF];
+  int n = snprintf(buf, sizeof(buf),
+    "{\"sync\":{\"type\":\"hello\",\"seq\":%u,\"from\":\"%s\",\"ts\":%.3f},"
+    "\"runtime\":\"c\",\"role\":\"%s\",\"version\":\"1.0\","
+    "\"actions\":%s}",
+    s->seq_out++, role_esc, monotonic_s(), role_esc, actions_json);
+  sync_send_raw(s, buf, n);
+  s->last_hello_mono = monotonic_s();
+}
+
+static void sync_send_state(app_state_t *app) {
+  sync_state_t *s = &app->sync;
+  if (!s->enabled) return;
+
+  menu_entry_t *entries;
+  int entry_count;
+  get_current_entries(app, &entries, &entry_count);
+  int menu_visible = (app->cfg.menu_asset_id >= 0 && app->cfg.menu_asset_id < ASSET_COUNT &&
+                      app->asset_enabled[app->cfg.menu_asset_id] == 1);
+
+  char status_esc[512], section_esc[128], label_esc[128];
+  char selected_raw[96] = "";
+  if (entry_count > 0 && app->selected >= 0 && app->selected < entry_count)
+    display_entry_text(app, &entries[app->selected], selected_raw, sizeof(selected_raw));
+  json_escape(app->status, status_esc, sizeof(status_esc));
+  json_escape(app->current_section[0] ? app->current_section : "ROOT", section_esc, sizeof(section_esc));
+  json_escape(selected_raw, label_esc, sizeof(label_esc));
+
+  source_state_t *src = (app->active_source >= 0 && app->active_source < 2)
+                        ? &app->sources[app->active_source] : NULL;
+  int link_up = src ? src->link_up : 0;
+
+  char role_esc[32];
+  json_escape(app->cfg.sync_role, role_esc, sizeof(role_esc));
+
+  char buf[SYNC_BUF];
+  int n = snprintf(buf, sizeof(buf),
+    "{\"sync\":{\"type\":\"state\",\"seq\":%u,\"from\":\"%s\",\"ts\":%.3f},"
+    "\"menu_visible\":%s,\"section\":\"%s\",\"selected\":%d,"
+    "\"selected_label\":\"%s\",\"status\":\"%s\",\"link_up\":%s,"
+    "\"active_source\":\"%s\"}",
+    s->seq_out++, role_esc, monotonic_s(),
+    menu_visible ? "true" : "false",
+    section_esc, app->selected, label_esc, status_esc,
+    link_up ? "true" : "false",
+    app->active_source == 0 ? "serial" : (app->active_source == 1 ? "joystick" : "none"));
+  sync_send_raw(s, buf, n);
+  s->state_dirty = 0;
+}
+
+static void sync_send_command(app_state_t *app, const char *section, const char *action) {
+  sync_state_t *s = &app->sync;
+  if (!s->enabled) return;
+
+  char sec_esc[64], act_esc[128], role_esc[32];
+  json_escape(section, sec_esc, sizeof(sec_esc));
+  json_escape(action, act_esc, sizeof(act_esc));
+  json_escape(app->cfg.sync_role, role_esc, sizeof(role_esc));
+
+  char buf[SYNC_BUF];
+  int n = snprintf(buf, sizeof(buf),
+    "{\"sync\":{\"type\":\"command\",\"seq\":%u,\"from\":\"%s\",\"ts\":%.3f},"
+    "\"section\":\"%s\",\"action\":\"%s\"}",
+    s->seq_out++, role_esc, monotonic_s(),
+    sec_esc, act_esc);
+  sync_send_raw(s, buf, n);
+}
+
+static void sync_send_result(app_state_t *app, const char *section, const char *action,
+                             int exit_code, const char *output, int duration_ms) {
+  sync_state_t *s = &app->sync;
+  if (!s->enabled) return;
+
+  char sec_esc[64], act_esc[128], out_esc[512], role_esc[32];
+  json_escape(section, sec_esc, sizeof(sec_esc));
+  json_escape(action, act_esc, sizeof(act_esc));
+  json_escape(output, out_esc, sizeof(out_esc));
+  json_escape(app->cfg.sync_role, role_esc, sizeof(role_esc));
+
+  char buf[SYNC_BUF];
+  int n = snprintf(buf, sizeof(buf),
+    "{\"sync\":{\"type\":\"result\",\"seq\":%u,\"from\":\"%s\",\"ts\":%.3f},"
+    "\"section\":\"%s\",\"action\":\"%s\",\"exit_code\":%d,"
+    "\"output\":\"%s\",\"duration_ms\":%d}",
+    s->seq_out++, role_esc, monotonic_s(),
+    sec_esc, act_esc, exit_code, out_esc, duration_ms);
+  sync_send_raw(s, buf, n);
+}
+
+/* Receive handlers */
+static void sync_handle_hello(app_state_t *app, const char *json) {
+  sync_state_t *s = &app->sync;
+  sync_json_str(json, "role", s->peer_role, sizeof(s->peer_role));
+  sync_json_str(json, "runtime", s->peer_runtime, sizeof(s->peer_runtime));
+  sync_json_str(json, "version", s->peer_version, sizeof(s->peer_version));
+
+  /* Parse actions array */
+  const char *actions_key = strstr(json, "\"actions\"");
+  if (actions_key) {
+    actions_key += 9;
+    while (*actions_key && *actions_key != '[') actions_key++;
+    if (*actions_key == '[') {
+      s->peer_action_count = 0;
+      const char *p = actions_key + 1;
+      while (*p && s->peer_action_count < SYNC_MAX_ACTIONS) {
+        p = skip_ws(p);
+        if (*p == ']') break;
+        if (*p == ',') { p++; continue; }
+        if (*p != '{') break;
+        p++;
+        char sec[SECTION_NAME_LEN] = "", name[ACTION_NAME_LEN] = "";
+        while (*p && *p != '}') {
+          p = skip_ws(p);
+          if (*p == ',') { p++; continue; }
+          if (*p != '"') break;
+          char key[32];
+          const char *next = parse_string(p, key, sizeof(key));
+          if (!next) break;
+          p = skip_ws(next);
+          if (*p != ':') break;
+          p++; p = skip_ws(p);
+          if (strcmp(key, "section") == 0) { p = parse_string(p, sec, sizeof(sec)); if (!p) break; }
+          else if (strcmp(key, "name") == 0) { p = parse_string(p, name, sizeof(name)); if (!p) break; }
+          else { p = skip_json_value(p); if (!p) break; }
+          p = skip_ws(p);
+          if (*p == ',') { p++; continue; }
+        }
+        if (*p == '}') p++;
+        if (sec[0] && name[0]) {
+          int idx = s->peer_action_count++;
+          snprintf(s->peer_actions[idx].section, SECTION_NAME_LEN, "%s", sec);
+          snprintf(s->peer_actions[idx].name, ACTION_NAME_LEN, "%s", name);
+        }
+      }
+    }
+  }
+
+  LOGV(app, "Sync: hello from peer role=%s runtime=%s actions=%d",
+       s->peer_role, s->peer_runtime, s->peer_action_count);
+}
+
+static void sync_handle_state(app_state_t *app, const char *json) {
+  sync_state_t *s = &app->sync;
+  sync_json_bool(json, "menu_visible", &s->peer_menu_visible);
+  sync_json_str(json, "section", s->peer_section, sizeof(s->peer_section));
+  sync_json_int(json, "selected", &s->peer_selected);
+  sync_json_str(json, "selected_label", s->peer_selected_label, sizeof(s->peer_selected_label));
+  sync_json_str(json, "status", s->peer_status, sizeof(s->peer_status));
+  sync_json_bool(json, "link_up", &s->peer_link_up);
+  sync_json_str(json, "active_source", s->peer_active_source, sizeof(s->peer_active_source));
+}
+
+static void sync_handle_command(app_state_t *app, const char *json) {
+  sync_state_t *s = &app->sync;
+  char section[SECTION_NAME_LEN] = "", action_name[ACTION_NAME_LEN] = "";
+  sync_json_str(json, "section", section, sizeof(section));
+  sync_json_str(json, "action", action_name, sizeof(action_name));
+
+  if (!section[0] || !action_name[0]) {
+    sync_send_result(app, section, action_name, -1, "missing section/action", 0);
+    return;
+  }
+
+  int idx = find_action_by_name(app, section, action_name);
+  if (idx < 0) {
+    char err[128];
+    snprintf(err, sizeof(err), "action not found: [%s] %s", section, action_name);
+    sync_send_result(app, section, action_name, -1, err, 0);
+    return;
+  }
+
+  /* Track remote trigger for result callback */
+  snprintf(s->remote_trigger_section, sizeof(s->remote_trigger_section), "%s", section);
+  snprintf(s->remote_trigger_action, sizeof(s->remote_trigger_action), "%s", action_name);
+
+  if (action_launch(app, &app->actions[idx]) < 0) {
+    sync_send_result(app, section, action_name, -1, "action busy or failed to launch", 0);
+    s->remote_trigger_section[0] = '\0';
+    s->remote_trigger_action[0] = '\0';
+  } else {
+    LOGI("Sync: remote command [%s] %s launched", section, action_name);
+  }
+}
+
+static void sync_handle_result(app_state_t *app, const char *json) {
+  sync_state_t *s = &app->sync;
+  sync_json_str(json, "section", s->last_result_section, sizeof(s->last_result_section));
+  sync_json_str(json, "action", s->last_result_action, sizeof(s->last_result_action));
+  sync_json_int(json, "exit_code", &s->last_result_exit_code);
+  sync_json_str(json, "output", s->last_result_output, sizeof(s->last_result_output));
+  sync_json_int(json, "duration_ms", &s->last_result_duration_ms);
+  s->have_result = 1;
+  LOGI("Sync: result [%s] %s exit=%d", s->last_result_section, s->last_result_action,
+       s->last_result_exit_code);
+}
+
+/* Receive and dispatch (drain up to 8 datagrams) */
+static void sync_recv(app_state_t *app) {
+  sync_state_t *s = &app->sync;
+  if (!s->enabled || s->fd < 0) return;
+
+  char buf[SYNC_BUF];
+  for (int pkt = 0; pkt < 8; pkt++) {
+    ssize_t n = recvfrom(s->fd, buf, sizeof(buf) - 1, 0, NULL, NULL);
+    if (n <= 0) break;
+    buf[n] = '\0';
+
+    /* Must contain sync envelope */
+    if (!strstr(buf, "\"sync\"")) continue;
+
+    s->peer_last_seen = monotonic_s();
+    if (!s->peer_online) {
+      s->peer_online = 1;
+      LOGI("Sync: peer online");
+    }
+
+    if (strstr(buf, "\"type\":\"hello\""))
+      sync_handle_hello(app, buf);
+    else if (strstr(buf, "\"type\":\"state\""))
+      sync_handle_state(app, buf);
+    else if (strstr(buf, "\"type\":\"command\""))
+      sync_handle_command(app, buf);
+    else if (strstr(buf, "\"type\":\"result\""))
+      sync_handle_result(app, buf);
   }
 }
 
@@ -2364,6 +3178,7 @@ static int run_controller(app_state_t *app) {
   app->sse.last_connect_attempt = 0.0;
 
   webui_init(app);
+  sync_init(app);
 
   app->active_source = -1;
   app->splash_pending_opacity = -1;
@@ -2405,6 +3220,8 @@ static int run_controller(app_state_t *app) {
         resolve_webui_html(app);
         webui_shutdown(app);
         webui_init(app);
+        sync_shutdown(app);
+        sync_init(app);
       }
       sse_parse_url(app->cfg.sse_url, app->sse.host, &app->sse.port, app->sse.path);
       sse_disconnect(&app->sse);
@@ -2420,39 +3237,72 @@ static int run_controller(app_state_t *app) {
       }
     }
 
-    /* Poll SSE fd */
+    /* Poll SSE + sync fds */
     int got_channel_update = 0;
-    if (app->sse.fd >= 0) {
-      struct pollfd pfd = { .fd = app->sse.fd, .events = POLLIN };
-      int rc = poll(&pfd, 1, 50); /* 50ms timeout */
-      if (rc > 0 && (pfd.revents & POLLIN)) {
-        int src = sse_process(&app->sse, app);
-        if (src < 0) {
-          LOGW("SSE disconnected, will reconnect");
-          sse_disconnect(&app->sse);
-          snprintf(app->status, sizeof(app->status), "SSE disconnected, reconnecting");
-          app->dirty = 1;
-        } else if (src > 0) {
-          got_channel_update = 1;
+    {
+      struct pollfd pfds[2];
+      int nfds = 0, sse_idx = -1, sync_idx = -1;
+      if (app->sse.fd >= 0) {
+        sse_idx = nfds;
+        pfds[nfds].fd = app->sse.fd;
+        pfds[nfds].events = POLLIN;
+        nfds++;
+      }
+      if (app->sync.enabled && app->sync.fd >= 0) {
+        sync_idx = nfds;
+        pfds[nfds].fd = app->sync.fd;
+        pfds[nfds].events = POLLIN;
+        nfds++;
+      }
+
+      int rc = poll(nfds > 0 ? pfds : NULL, (nfds_t)nfds, 50);
+      if (rc > 0) {
+        if (sse_idx >= 0 && (pfds[sse_idx].revents & POLLIN)) {
+          int src = sse_process(&app->sse, app);
+          if (src < 0) {
+            LOGW("SSE disconnected, will reconnect");
+            sse_disconnect(&app->sse);
+            snprintf(app->status, sizeof(app->status), "SSE disconnected, reconnecting");
+            app->dirty = 1;
+          } else if (src > 0) {
+            got_channel_update = 1;
+          }
         }
-      } else if (rc > 0 && (pfd.revents & (POLLERR | POLLHUP))) {
-        sse_disconnect(&app->sse);
-        snprintf(app->status, sizeof(app->status), "SSE connection lost, reconnecting");
-        app->dirty = 1;
-      } else if (rc < 0 && errno != EINTR) {
+        if (sse_idx >= 0 && (pfds[sse_idx].revents & (POLLERR | POLLHUP))) {
+          sse_disconnect(&app->sse);
+          snprintf(app->status, sizeof(app->status), "SSE connection lost, reconnecting");
+          app->dirty = 1;
+        }
+        if (sync_idx >= 0 && (pfds[sync_idx].revents & POLLIN))
+          sync_recv(app);
+      } else if (rc < 0 && errno != EINTR && sse_idx >= 0) {
         sse_disconnect(&app->sse);
       }
-    } else {
-      /* Not connected; just sleep a bit */
-      poll(NULL, 0, 50);
     }
 
     now = monotonic_s();
+
+    /* Send pending remote command from WebUI */
+    if (app->sync.enabled && app->sync.pending_cmd_section[0]) {
+      sync_send_command(app, app->sync.pending_cmd_section, app->sync.pending_cmd_action);
+      app->sync.pending_cmd_section[0] = '\0';
+      app->sync.pending_cmd_action[0] = '\0';
+    }
 
     webui_poll(app);
 
     /* Poll async action */
     action_poll(app);
+
+    /* Send sync result if a remotely-triggered action just finished */
+    if (app->sync.enabled && app->action_pid <= 0 && app->sync.remote_trigger_section[0]) {
+      int dur = (int)((monotonic_s() - app->action_start_mono) * 1000.0);
+      sync_send_result(app, app->sync.remote_trigger_section,
+                       app->sync.remote_trigger_action,
+                       app->action_last_exit_code, app->action_output, dur);
+      app->sync.remote_trigger_section[0] = '\0';
+      app->sync.remote_trigger_action[0] = '\0';
+    }
 
     /* Refresh source links */
     refresh_source_links(app, now);
@@ -2605,7 +3455,24 @@ static int run_controller(app_state_t *app) {
       for (int i = 0; i < ASSET_COUNT; i++)
         app->pending_asset_updates[i] = -1;
       app->splash_pending_opacity = -1;
+
+      /* Piggyback sync state push on OSD sends (zero extra packets) */
+      if (app->sync.enabled)
+        sync_send_state(app);
+
       app->dirty = 0;
+    }
+
+    /* Sync hello timer and peer timeout */
+    if (app->sync.enabled) {
+      now = monotonic_s();
+      if ((now - app->sync.last_hello_mono) >= SYNC_HELLO_INTERVAL_S)
+        sync_send_hello(app);
+      if (app->sync.peer_online &&
+          (now - app->sync.peer_last_seen) >= SYNC_PEER_TIMEOUT_S) {
+        app->sync.peer_online = 0;
+        LOGI("Sync: peer offline (timeout)");
+      }
     }
 
     /* Log status changes */
@@ -2723,6 +3590,7 @@ static int run_controller(app_state_t *app) {
     app->action_pid = -1;
   }
   send_clear_payload(app);
+  sync_shutdown(app);
   sse_disconnect(&app->sse);
   webui_shutdown(app);
   if (app->udp_fd >= 0) close(app->udp_fd);
