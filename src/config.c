@@ -55,6 +55,10 @@ static void usage(const char *prog) {
             "  --idr-loss-threshold N       (loss events inside window before triggering; default: 1)\n"
             "  --idr-jitter-threshold-ms N  (instant/avg jitter threshold before triggering; default: 25)\n"
             "  --idr-jitter-cooldown-ms N   (minimum spacing between jitter triggers; default: 750)\n"
+            "  --decoder-error-mode MODE    (strict|partial; default: partial)\n"
+            "  --decoder-feed-retry-us N    (decode_put_packet retry sleep; default: 2000)\n"
+            "  --decoder-idle-sleep-us N    (decode_get_frame idle sleep; default: 1000)\n"
+            "  --decoder-output-timeout-us N(output timeout for decode_get_frame; default: 5000)\n"
             "  --gst-log                    (set GST_DEBUG=3 if not set)\n"
             "  --cpu-list LIST              (comma-separated CPU IDs for affinity)\n"
             "  --verbose\n",
@@ -79,6 +83,18 @@ typedef struct {
     const char *name;
     RecordMode mode;
 } RecordModeAlias;
+
+typedef struct {
+    const char *name;
+    DecoderErrorMode mode;
+} DecoderErrorModeAlias;
+
+static const DecoderErrorModeAlias kDecoderErrorModeAliases[] = {
+    {"strict", DECODER_ERROR_MODE_STRICT},
+    {"drop", DECODER_ERROR_MODE_STRICT},
+    {"partial", DECODER_ERROR_MODE_PARTIAL},
+    {"show-partial", DECODER_ERROR_MODE_PARTIAL},
+};
 
 static const RecordModeAlias kRecordModeAliases[] = {
     {"standard", RECORD_MODE_STANDARD},
@@ -136,6 +152,30 @@ const char *cfg_record_mode_name(RecordMode mode) {
         return "sequential";
     case RECORD_MODE_FRAGMENTED:
         return "fragmented";
+    default:
+        return "unknown";
+    }
+}
+
+int cfg_parse_decoder_error_mode(const char *value, DecoderErrorMode *mode_out) {
+    if (value == NULL || mode_out == NULL) {
+        return -1;
+    }
+    for (size_t i = 0; i < sizeof(kDecoderErrorModeAliases) / sizeof(kDecoderErrorModeAliases[0]); ++i) {
+        if (strcasecmp(value, kDecoderErrorModeAliases[i].name) == 0) {
+            *mode_out = kDecoderErrorModeAliases[i].mode;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *cfg_decoder_error_mode_name(DecoderErrorMode mode) {
+    switch (mode) {
+    case DECODER_ERROR_MODE_STRICT:
+        return "strict";
+    case DECODER_ERROR_MODE_PARTIAL:
+        return "partial";
     default:
         return "unknown";
     }
@@ -256,6 +296,11 @@ void cfg_defaults(AppCfg *c) {
     c->video_gamma.r = 1.0;
     c->video_gamma.g = 1.0;
     c->video_gamma.b = 1.0;
+
+    c->decoder_error_mode = DECODER_ERROR_MODE_PARTIAL;
+    c->decoder_feed_retry_us = 2000;
+    c->decoder_idle_sleep_us = 1000;
+    c->decoder_output_timeout_us = 5000;
 }
 
 int cfg_parse_cpu_list(const char *list, AppCfg *cfg) {
@@ -605,6 +650,34 @@ int parse_cli(int argc, char **argv, AppCfg *cfg) {
                 return -1;
             }
             cfg->idr.jitter_cooldown_ms = (unsigned int)cooldown;
+        } else if (!strcmp(argv[i], "--decoder-error-mode") && i + 1 < argc) {
+            DecoderErrorMode mode;
+            if (cfg_parse_decoder_error_mode(argv[++i], &mode) != 0) {
+                LOGE("--decoder-error-mode requires strict or partial");
+                return -1;
+            }
+            cfg->decoder_error_mode = mode;
+        } else if (!strcmp(argv[i], "--decoder-feed-retry-us") && i + 1 < argc) {
+            int us = atoi(argv[++i]);
+            if (us <= 0) {
+                LOGE("--decoder-feed-retry-us requires a positive value");
+                return -1;
+            }
+            cfg->decoder_feed_retry_us = (unsigned int)us;
+        } else if (!strcmp(argv[i], "--decoder-idle-sleep-us") && i + 1 < argc) {
+            int us = atoi(argv[++i]);
+            if (us <= 0) {
+                LOGE("--decoder-idle-sleep-us requires a positive value");
+                return -1;
+            }
+            cfg->decoder_idle_sleep_us = (unsigned int)us;
+        } else if (!strcmp(argv[i], "--decoder-output-timeout-us") && i + 1 < argc) {
+            int us = atoi(argv[++i]);
+            if (us <= 0) {
+                LOGE("--decoder-output-timeout-us requires a positive value");
+                return -1;
+            }
+            cfg->decoder_output_timeout_us = (unsigned int)us;
         } else if (!strcmp(argv[i], "--gst-log")) {
             cfg->gst_log = 1;
         } else if (!strcmp(argv[i], "--cpu-list") && i + 1 < argc) {

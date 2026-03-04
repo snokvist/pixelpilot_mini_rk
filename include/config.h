@@ -25,6 +25,11 @@ typedef enum {
     RECORD_MODE_FRAGMENTED,
 } RecordMode;
 
+typedef enum {
+    DECODER_ERROR_MODE_STRICT = 0,
+    DECODER_ERROR_MODE_PARTIAL,
+} DecoderErrorMode;
+
 typedef struct {
     int enable;
     char output_path[PATH_MAX];
@@ -123,6 +128,11 @@ typedef struct {
     IdrCfg idr;
     VideoCtmCfg video_ctm;
     VideoGammaCfg video_gamma;
+
+    DecoderErrorMode decoder_error_mode;
+    unsigned int decoder_feed_retry_us;
+    unsigned int decoder_idle_sleep_us;
+    unsigned int decoder_output_timeout_us;
 } AppCfg;
 
 int parse_cli(int argc, char **argv, AppCfg *cfg);
@@ -136,6 +146,8 @@ int cfg_parse_custom_sink_mode(const char *value, CustomSinkMode *mode_out);
 const char *cfg_custom_sink_mode_name(CustomSinkMode mode);
 int cfg_parse_record_mode(const char *value, RecordMode *mode_out);
 const char *cfg_record_mode_name(RecordMode mode);
+int cfg_parse_decoder_error_mode(const char *value, DecoderErrorMode *mode_out);
+const char *cfg_decoder_error_mode_name(DecoderErrorMode mode);
 int cfg_parse_host_and_port(const char *value, char *host_out, size_t host_len, int *port_out);
 int cfg_set_drm_mode_from_string(const char *value, AppCfg *cfg);
 
