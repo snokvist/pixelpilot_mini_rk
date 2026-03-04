@@ -32,6 +32,12 @@ waybeam_hub.py
 | 2026-02-28 | Initial waybeam_hub: SSE menu driver, WebUI, radio rules, asset/zoom control |
 | 2026-02-28 | Replaced CLI arguments with JSON config file (`config.json`) |
 | 2026-02-28 | Exposed tuning constants (debounce, deadband, timeouts) in config `tuning` section |
+| 2026-03-04 | C port: Added WebUI with Dashboard tab (status, CRSF input, peer sync, raw state) |
+| 2026-03-04 | C port: Added Commands tab with menu.ini actions, config commands, and subscribe video dropdown |
+| 2026-03-04 | C port: Added subscriber system (`/subscribe` endpoint, expiry, identity tracking) |
+| 2026-03-04 | C port: Added subscribe video (`/subscribe_video` endpoint, command template with `{ip}`/`{port}`) |
+| 2026-03-04 | C port: Added `"cmd"` config section for custom shell commands (up to 16 entries) |
+| 2026-03-04 | C port: Extended `/state` JSON with actions, cmds, subscribers, action_running, identity |
 
 ## Known issues
 

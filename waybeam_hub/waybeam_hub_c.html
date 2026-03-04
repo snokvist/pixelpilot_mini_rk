@@ -230,10 +230,6 @@
 <script>
   function switchTab(name) {
     var tabs = document.querySelectorAll('.tab-btn');
-    var contents = document.querySelectorAll('.tab-content');
-    for (var i = 0; i < tabs.length; i++) {
-      tabs[i].className = 'tab-btn' + (tabs[i].textContent.toLowerCase().indexOf(name) >= 0 || (name === 'dashboard' && i === 0) || (name === 'commands' && i === 1) ? ' active' : '');
-    }
     tabs[0].className = 'tab-btn' + (name === 'dashboard' ? ' active' : '');
     tabs[1].className = 'tab-btn' + (name === 'commands' ? ' active' : '');
     document.getElementById('tab-dashboard').className = 'tab-content' + (name === 'dashboard' ? ' active' : '');
@@ -370,7 +366,11 @@
       actDiv.innerHTML = '';
       for (var i = 0; i < actions.length; i++) {
         var btn = document.createElement('button');
-        btn.innerHTML = '<span class="cmd-section-label">[' + actions[i].section + ']</span> ' + actions[i].name;
+        var span = document.createElement('span');
+        span.className = 'cmd-section-label';
+        span.textContent = '[' + actions[i].section + ']';
+        btn.appendChild(span);
+        btn.appendChild(document.createTextNode(' ' + actions[i].name));
         btn.disabled = running;
         btn.onclick = (function(s, n) {
           return function() { runAction(s, n); };
@@ -478,6 +478,7 @@
     }
     if (_subBtnTimer) clearTimeout(_subBtnTimer);
     _subBtnTimer = setTimeout(function() {
+      _subBtnTimer = null;
       btn.disabled = false;
       btn.textContent = 'Subscribe';
       btn.style.borderColor = '';

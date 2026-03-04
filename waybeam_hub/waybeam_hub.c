@@ -2155,7 +2155,7 @@ static void webui_handle_request(app_state_t *app, const char *req, int req_len)
       webui_send_response(web->client_fd, "200 OK", "application/json", "{\"ok\":true}", 11);
     else
       webui_send_response(web->client_fd, "500 Internal Server Error", "application/json",
-                          "{\"error\":\"action failed\"}", 24);
+                          "{\"error\":\"action failed\"}", 25);
     return;
   }
 
