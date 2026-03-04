@@ -68,3 +68,4 @@ Use pre-commit hooks or post-tool-use hooks to enforce formatting and linting au
 - OSD asset IDs must be unique across all `[osd.element.*]` sections (range 0–7).
 - SSE shutdown requires atomic flag checks to avoid race conditions — use GLib atomics, not bare booleans.
 - Any init/service stop timeout must exceed the application's internal graceful-shutdown waits (for example thread join timeouts), or the supervisor will SIGKILL the process before cleanup runs.
+- OSD `udp.fps.avg` should be derived from a rolling frame-count/time window (for example 1s), not direct reciprocal-of-interval EWMA, to avoid unrealistic spikes from bursty packet timing.
