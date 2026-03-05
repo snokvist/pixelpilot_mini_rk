@@ -33,7 +33,7 @@ static void usage(const char *prog) {
             "  --osd-plane-id N             (force OSD plane id; default auto)\n"
             "  --osd-refresh-ms N           (default: 500)\n"
             "  --osd-external              (enable external OSD feed listener)\n"
-            "  --osd-external-udp-port N   (UDP port for external OSD data; default: 5005)\n"
+            "  --osd-external-udp-port N   (UDP port for external OSD data; default: 7777)\n"
             "  --osd-external-bind ADDR    (bind address for external OSD data; default: 0.0.0.0)\n"
             "  --no-osd-external           (disable external OSD feed)\n"
             "  --record-video [PATH]        (enable MP4 capture; optional PATH or directory, default /media)\n"
@@ -251,7 +251,7 @@ void cfg_defaults(AppCfg *c) {
     c->osd_external.enable = 0;
     c->osd_external.enable_set = 0;
     strcpy(c->osd_external.bind_address, "0.0.0.0");
-    c->osd_external.udp_port = 5005;
+    c->osd_external.udp_port = 7777;
 
     c->gst_log = 0;
 
