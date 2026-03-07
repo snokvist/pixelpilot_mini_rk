@@ -3,6 +3,7 @@
 
 #include <glib.h>
 #include <gst/gst.h>
+#include <arpa/inet.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -58,6 +59,7 @@ typedef struct {
     UdpReceiverPacketSample history[UDP_RECEIVER_HISTORY];
     guint64 last_packet_ns;
     guint64 idr_requests;
+    char source_host[INET_ADDRSTRLEN];
 } UdpReceiverStats;
 
 typedef struct UdpReceiver UdpReceiver;

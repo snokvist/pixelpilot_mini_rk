@@ -1311,6 +1311,11 @@ void udp_receiver_get_stats(UdpReceiver *ur, UdpReceiverStats *stats) {
         idr_total = idr_requester_get_request_count(ur->idr);
     }
     stats->idr_requests = idr_total;
+    if (ur->idr != NULL) {
+        idr_requester_get_source_host(ur->idr, stats->source_host, sizeof(stats->source_host));
+    } else {
+        stats->source_host[0] = '\0';
+    }
 }
 
 void udp_receiver_set_stats_enabled(UdpReceiver *ur, gboolean enabled) {
