@@ -37,6 +37,7 @@ typedef struct {
     guint64 recording_elapsed_ns;
     guint64 recording_media_ns;
     char recording_path[PATH_MAX];
+    char source_host[INET_ADDRSTRLEN];
 } SseStatsSnapshot;
 
 typedef struct {

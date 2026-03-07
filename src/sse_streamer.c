@@ -238,13 +238,15 @@ static void format_json_payload(char *buf, size_t buf_sz, const SseStatsSnapshot
                ",\"idr_requests\":%" G_GUINT64_FORMAT
                ",\"recording_enabled\":%s,\"recording_active\":%s,\"recording_duration_s\":%.3f"
                ",\"recording_media_s\":%.3f,\"recording_mbytes\":%.2f"
-               ",\"recording_path\":\"%s\"}",
+               ",\"recording_path\":\"%s\""
+               ",\"source_host\":\"%s\"}",
                snap->total_packets, snap->video_packets, snap->audio_packets, snap->ignored_packets,
                snap->duplicate_packets, snap->lost_packets, snap->reordered_packets, total_mbytes, video_mbytes,
                audio_mbytes, snap->frame_count, snap->incomplete_frames, last_frame_kib, frame_avg_kib, snap->fps_avg,
                snap->bitrate_mbps, snap->bitrate_avg_mbps, snap->jitter_ms, snap->jitter_avg_ms, snap->expected_sequence,
                snap->idr_requests, recording_enabled, recording_active, recording_elapsed_s, recording_media_s,
-               recording_mbytes, escaped_path != NULL ? escaped_path : "");
+               recording_mbytes, escaped_path != NULL ? escaped_path : "",
+               snap->source_host);
     g_free(escaped_path);
 }
 
@@ -500,6 +502,7 @@ void sse_streamer_publish(SseStreamer *streamer, const UdpReceiverStats *stats, 
         snap.bitrate_avg_mbps = stats->bitrate_avg_mbps;
         snap.expected_sequence = stats->expected_sequence;
         snap.idr_requests = stats->idr_requests;
+        g_strlcpy(snap.source_host, stats->source_host, sizeof(snap.source_host));
     }
     snap.recording_enabled = recording_enabled ? TRUE : FALSE;
     if (recording != NULL) {

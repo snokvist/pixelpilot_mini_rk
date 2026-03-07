@@ -608,6 +608,17 @@ guint64 idr_requester_get_request_count(const IdrRequester *req) {
     return total;
 }
 
+void idr_requester_get_source_host(const IdrRequester *req, char *buf, size_t buf_sz) {
+    if (req == NULL || buf == NULL || buf_sz == 0) {
+        if (buf != NULL && buf_sz > 0) buf[0] = '\0';
+        return;
+    }
+    GMutex *lock = (GMutex *)&req->lock;
+    g_mutex_lock(lock);
+    g_strlcpy(buf, req->have_source ? req->source_host : "", buf_sz);
+    g_mutex_unlock(lock);
+}
+
 void idr_requester_set_reinit_callback(IdrRequester *req, IdrReinitCallback cb, gpointer user_data) {
     if (req == NULL) {
         return;
